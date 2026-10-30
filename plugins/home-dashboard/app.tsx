@@ -1,17 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { defineRpcContract } from "@get-bb/plugin-sdk";
 import {
   definePluginApp,
   experimental_useRpcQuery,
   experimental_useSidebarThreads,
   useBbNavigate,
+  type PluginRpcMethodContract,
   type PluginSidebarThread,
 } from "@get-bb/plugin-sdk/app";
 import { z } from "zod";
 import { groupThreads, type Lane } from "./grouping";
 
-// Focus Board owns the done marker. Read its public RPC instead of mirroring it.
-const focusBoard = defineRpcContract({
+const focusBoard = {
   done_list: {
     input: z.null(),
     output: z.object({
@@ -25,7 +24,7 @@ const focusBoard = defineRpcContract({
       ),
     }),
   },
-});
+} satisfies Record<string, PluginRpcMethodContract>;
 
 const LANES: readonly { id: Lane; title: string; color: string }[] = [
   { id: "needs-you", title: "Needs you", color: "bg-amber-400" },

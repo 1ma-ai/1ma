@@ -36,3 +36,13 @@
   диапазоны; `engines.bb` и `engines.bbPluginSdk` честные.
 - Версия bb для разработки закреплена в корневом `package.json`
   (`devDependencies.bb-app`); обновление bb — отдельный коммит с прогоном CI.
+
+## Границы сборки плагина
+
+- Фронтенд (`app.tsx` и всё, что он импортирует) берёт из SDK только
+  `@get-bb/plugin-sdk/app` и типы (`import type`). Корень
+  `@get-bb/plugin-sdk` в бандл приложения не подшивается: при установке из git
+  bb ставит зависимости без dev, и сборка падает. Общий контракт RPC для
+  фронтенда описывается литералом `satisfies Record<string, PluginRpcMethodContract>`.
+- `pnpm run check:git-install` повторяет установку bb из git для каждого
+  плагина; он обязателен перед тегом релиза.

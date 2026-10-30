@@ -13,7 +13,8 @@
     "format:check": "oxfmt --check",
     "build": "pnpm -r --workspace-concurrency=1 run build",
     "check:marketplace": "node scripts/check-marketplace.mjs",
-    "check": "pnpm run check:marketplace && pnpm run lint && pnpm run format:check && pnpm run typecheck && pnpm run test"
+    "check": "pnpm run check:marketplace && pnpm run lint && pnpm run format:check && pnpm run typecheck && pnpm run test",
+    "check:git-install": "node scripts/check-git-install.mjs"
   },
   "devDependencies": {
     "bb-app": "0.48.1",

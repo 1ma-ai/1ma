@@ -1,6 +1,6 @@
 {
   "name": "bb-home-dashboard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Компактная доска задач на домашнем экране bb: Needs you, Running, Done.",
   "license": "MIT",
