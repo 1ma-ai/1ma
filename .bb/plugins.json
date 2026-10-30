@@ -4,16 +4,20 @@
   "name": "1ma",
   "plugins": [
     {
+      "name": "1ma-brand",
+      "source": "./plugins/1ma-brand"
+    },
+    {
       "name": "1ma-theme",
       "source": "./plugins/1ma-theme"
     },
     {
-      "name": "home-dashboard",
-      "source": "./plugins/home-dashboard"
+      "name": "1ma-home-dashboard",
+      "source": "./plugins/1ma-home-dashboard"
     },
     {
-      "name": "server-switcher",
-      "source": "./plugins/server-switcher"
+      "name": "1ma-server-switcher",
+      "source": "./plugins/1ma-server-switcher"
     }
   ]
 }

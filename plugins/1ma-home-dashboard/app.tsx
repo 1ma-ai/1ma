@@ -100,17 +100,15 @@ function Tasks({ projectId }: { projectId: string | null }) {
   );
 
   if (status === "error") {
-    return (
-      <p className="text-sm text-destructive">BB threads are unavailable. Reload this page.</p>
-    );
+    return <p className="text-sm text-destructive">Треды 1ma недоступны. Обновите страницу.</p>;
   }
   if (status !== "ready" || doneQuery.isLoading) {
-    return <p className="text-sm text-muted-foreground">Loading tasks…</p>;
+    return <p className="text-sm text-muted-foreground">Загружаем задачи…</p>;
   }
   if (doneQuery.error || !doneQuery.data) {
     return (
       <p className="text-sm text-destructive">
-        Focus Board task status is unavailable. Enable Focus Board and reload this page.
+        Статус задач Focus Board недоступен. Включите Focus Board и обновите страницу.
       </p>
     );
   }

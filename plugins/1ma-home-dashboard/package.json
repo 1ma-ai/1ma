@@ -1,14 +1,17 @@
 {
-  "name": "bb-server-switcher",
-  "version": "0.1.0",
+  "name": "bb-plugin-1ma-home-dashboard",
+  "version": "0.2.0",
   "private": true,
-  "description": "Переключатель серверов bb в десктоп-приложении, рядом с кнопкой сайдбара.",
+  "description": "Компактная доска задач на домашнем экране 1ma: Needs you, Running, Done.",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run",
     "build": "bb plugin build"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.6.79",
@@ -22,10 +25,10 @@
     "bbPluginSdk": ">=0.6.79"
   },
   "bb": {
-    "name": "Mac / Linux",
-    "description": "Switch existing desktop server connections without sharing server data.",
+    "name": "1ma Home Dashboard",
+    "description": "A compact task board on the 1ma home page.",
     "branding": {
-      "icon": "Monitor"
+      "icon": "Columns"
     },
     "server": "./server.ts",
     "app": "./app.tsx"

@@ -85,14 +85,14 @@ function ServerSwitcher() {
     >
       <div className="relative flex h-7 items-center rounded-md hover:bg-accent hover:text-accent-foreground focus-within:bg-accent">
         <select
-          aria-label="Mac / Linux server"
+          aria-label="Сервер 1ma"
           aria-busy={switching}
           title={
             switching
-              ? "Connecting…"
+              ? "Подключаемся…"
               : failed
-                ? "Switch failed. Retry or use Desktop Settings."
-                : "Switch BB server; running tasks continue"
+                ? "Переключение не удалось. Повторите или откройте настройки десктопа."
+                : "Переключить сервер 1ma; запущенные задачи продолжаются"
           }
           className="h-full cursor-pointer rounded-md bg-transparent py-0 pl-2 pr-6 text-xs text-inherit disabled:opacity-50"
           style={{
@@ -127,9 +127,9 @@ function ServerSwitcher() {
         />
         <span role="status" className="sr-only">
           {switching
-            ? "Connecting…"
+            ? "Подключаемся…"
             : failed
-              ? "Connection failed. Retry or use Desktop Settings."
+              ? "Подключение не удалось. Повторите или откройте настройки десктопа."
               : ""}
         </span>
       </div>

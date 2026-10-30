@@ -6,6 +6,28 @@
   "description": "Плагины 1ma: операционная система бизнеса на ИИ поверх bb.",
   "plugins": [
     {
+      "id": "1ma-brand",
+      "displayName": "1ma Brand",
+      "description": "Бренд 1ma вместо bb: логотип, имя, favicon, заголовок окна, PWA-манифест.",
+      "icon": {
+        "url": "./icons/1ma.svg"
+      },
+      "tags": ["brand", "appearance"],
+      "author": {
+        "name": "1ma",
+        "github": "1ma-ai",
+        "url": "https://1ma.ai"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/1ma-ai/1ma.git",
+          "subdir": "plugins/1ma-brand",
+          "range": "^0.1.0",
+          "tagPrefix": "1ma-brand/"
+        }
+      }
+    },
+    {
       "id": "1ma-theme",
       "displayName": "1ma Theme",
       "description": "Тема 1ma: светлая и тёмная палитра, шрифты и цвета терминала.",
@@ -28,8 +50,8 @@
       }
     },
     {
-      "id": "bb-home-dashboard",
-      "displayName": "Home Dashboard",
+      "id": "1ma-home-dashboard",
+      "displayName": "1ma Home Dashboard",
       "description": "Компактная доска задач на домашнем экране.",
       "icon": {
         "url": "./icons/1ma.svg"
@@ -43,16 +65,16 @@
       "source": {
         "git": {
           "url": "https://github.com/1ma-ai/1ma.git",
-          "subdir": "plugins/home-dashboard",
-          "range": "^0.1.0",
-          "tagPrefix": "home-dashboard/"
+          "subdir": "plugins/1ma-home-dashboard",
+          "range": "^0.2.0",
+          "tagPrefix": "1ma-home-dashboard/"
         }
       }
     },
     {
-      "id": "bb-server-switcher",
-      "displayName": "Server Switcher",
-      "description": "Переключение между серверами bb в десктоп-приложении.",
+      "id": "1ma-server-switcher",
+      "displayName": "1ma Server Switcher",
+      "description": "Переключение между серверами 1ma в десктоп-приложении.",
       "icon": {
         "url": "./icons/1ma.svg"
       },
@@ -65,9 +87,9 @@
       "source": {
         "git": {
           "url": "https://github.com/1ma-ai/1ma.git",
-          "subdir": "plugins/server-switcher",
-          "range": "^0.1.0",
-          "tagPrefix": "server-switcher/"
+          "subdir": "plugins/1ma-server-switcher",
+          "range": "^0.2.0",
+          "tagPrefix": "1ma-server-switcher/"
         }
       }
     }

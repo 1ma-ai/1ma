@@ -8,8 +8,8 @@
 
 ```sh
 pnpm install            # из корня репозитория
-pnpm --filter bb-server-switcher run typecheck
-pnpm --filter bb-server-switcher run build   # bb plugin build → dist/
+pnpm --filter 1ma-server-switcher run typecheck
+pnpm --filter 1ma-server-switcher run build   # bb plugin build → dist/
 ```
 
 Автотестов пока нет: компонент зависит от моста `window.bbDesktop`, который
@@ -19,4 +19,4 @@ pnpm --filter bb-server-switcher run build   # bb plugin build → dist/
 ## История
 
 Написан владельцем 1ma (октябрь 2026), перенесён в монорепо без изменений
-поведения. Id плагина сохранён (`bb-server-switcher`).
+поведения. Переименован в `1ma-server-switcher` при ребрендинге 30.10.2026.
