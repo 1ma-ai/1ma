@@ -1,0 +1,30 @@
+{
+  "name": "1ma",
+  "version": "0.0.0",
+  "private": true,
+  "description": "1ma — операционная система бизнеса на ИИ, построенная как набор плагинов bb",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "pnpm -r --workspace-concurrency=1 run typecheck",
+    "test": "pnpm -r --workspace-concurrency=1 run test",
+    "lint": "oxlint",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "build": "pnpm -r --workspace-concurrency=1 run build",
+    "check:marketplace": "node scripts/check-marketplace.mjs",
+    "check": "pnpm run check:marketplace && pnpm run lint && pnpm run format:check && pnpm run typecheck && pnpm run test"
+  },
+  "devDependencies": {
+    "bb-app": "0.48.1",
+    "oxfmt": "^0.64.0",
+    "oxlint": "^1.79.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=10"
+  },
+  "packageManager": "pnpm@12.16.1"
+}

@@ -1,0 +1,33 @@
+{
+  "name": "bb-server-switcher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Переключатель серверов bb в десктоп-приложении, рядом с кнопкой сайдбара.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "build": "bb plugin build"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.79",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0"
+  },
+  "engines": {
+    "bb": ">=0.47",
+    "bbPluginSdk": ">=0.6.79"
+  },
+  "bb": {
+    "name": "Mac / Linux",
+    "description": "Switch existing desktop server connections without sharing server data.",
+    "branding": {
+      "icon": "Monitor"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx"
+  }
+}

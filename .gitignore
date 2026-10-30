@@ -1,0 +1,17 @@
+# other repositories cloned for study (not part of 1ma)
+/legacy/
+/refs/
+
+# dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
+.turbo/
+
+# local tooling
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+coverage/

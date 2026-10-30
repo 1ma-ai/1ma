@@ -1,0 +1,17 @@
+packages:
+  - "plugins/*"
+
+# bb installs plugins from git with plain npm inside each plugin directory,
+# so every plugin stays installable on its own: no workspace: specifiers in
+# plugin dependencies, each plugin brings its own runtime dependencies.
+
+# Native modules of bb-app (used here only for `bb plugin build`) and esbuild
+# need their install scripts; everything else stays script-free.
+allowBuilds:
+  better-sqlite3: true
+  node-pty: true
+  "@parcel/watcher": true
+  esbuild: true
+
+minimumReleaseAgeExclude:
+  - bb-app@0.48.1

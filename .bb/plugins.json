@@ -1,0 +1,9 @@
+{
+  "$schema": "https://getbb.app/schemas/plugins.schema.json",
+  "schemaVersion": 1,
+  "name": "1ma",
+  "plugins": [
+    { "name": "home-dashboard", "source": "./plugins/home-dashboard" },
+    { "name": "server-switcher", "source": "./plugins/server-switcher" }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "paths": { "@/*": ["./*"] }
+  },
+  "include": ["server.ts", "app.tsx", "*.ts"],
+  "exclude": ["dist", "node_modules"]
+}
