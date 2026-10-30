@@ -1,0 +1,130 @@
+/* 1ma theme. Stage 1 starting point: an exact copy of bb's default palette,
+ * typography and terminal colors, so every later change is a deliberate
+ * difference from bb. Values come from apps/app/src/components/ui/theme.css
+ * of the bb commit recorded in ../UPSTREAM.md. */
+
+:root,
+.light {
+  /* Anchors */
+  --canvas: oklch(1 0 0);
+  --ink: oklch(0.3211 0 0);
+  /* Accent */
+  --primary: oklch(0.27 0 0);
+  --primary-foreground: oklch(1 0 0);
+  /* Text tiers */
+  --muted-foreground: oklch(0.44 0 0);
+  --subtle-foreground: oklch(0.5 0 0);
+  --readback-foreground: oklch(0.47 0 0);
+  /* Semantic and status */
+  --destructive: oklch(0.45 0.19 25.8625);
+  --destructive-foreground: oklch(1 0 0);
+  --destructive-text: oklch(0.45 0.19 25.8625);
+  --warning: oklch(0.7 0.16 50);
+  --warning-text: oklch(0.55 0.14 50);
+  --attention: oklch(0.74 0.15 80);
+  --success: oklch(0.7 0.15 155);
+  --diff-added: oklch(0.4 0.13 163);
+  --diff-removed: oklch(0.4 0.17 28);
+  --pr-merged: oklch(0.53 0.2 295);
+  /* Shape */
+  --radius: 0.5rem;
+  /* Fonts */
+  --font-sans: "Inter Variable", Inter, sans-serif;
+  --font-serif: Georgia, serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+    monospace;
+  --font-terminal:
+    "JetBrainsMono Nerd Font Mono", "MesloLGS NF", "Symbols Nerd Font Mono", ui-monospace,
+    SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  /* Terminal palette */
+  --ansi-0: #000000;
+  --ansi-1: #a11616;
+  --ansi-2: #13704a;
+  --ansi-3: #7f6a00;
+  --ansi-4: #1f5ca6;
+  --ansi-5: #8a2f8a;
+  --ansi-6: #0b6f88;
+  --ansi-7: #3d3d3d;
+  --ansi-8: #3a3a3a;
+  --ansi-9: #d32f2f;
+  --ansi-10: #197c52;
+  --ansi-11: #a35f00;
+  --ansi-12: #2666b0;
+  --ansi-13: #9b349b;
+  --ansi-14: #0f7798;
+  --ansi-15: #1f1f1f;
+  --ansi-bg-fg-0: #ffffff;
+  --ansi-bg-fg-1: #ffffff;
+  --ansi-bg-fg-2: #ffffff;
+  --ansi-bg-fg-3: #ffffff;
+  --ansi-bg-fg-4: #ffffff;
+  --ansi-bg-fg-5: #ffffff;
+  --ansi-bg-fg-6: #ffffff;
+  --ansi-bg-fg-7: #ffffff;
+  --ansi-bg-fg-8: #ffffff;
+  --ansi-bg-fg-9: #ffffff;
+  --ansi-bg-fg-10: #ffffff;
+  --ansi-bg-fg-11: #ffffff;
+  --ansi-bg-fg-12: #ffffff;
+  --ansi-bg-fg-13: #ffffff;
+  --ansi-bg-fg-14: #ffffff;
+  --ansi-bg-fg-15: #ffffff;
+}
+
+.dark {
+  /* Anchors */
+  --canvas: oklch(0.195 0 0);
+  --ink: oklch(0.81 0 0);
+  /* Accent */
+  --primary: oklch(0.82 0 0);
+  --primary-foreground: oklch(0.2178 0 0);
+  /* Text tiers */
+  --muted-foreground: oklch(0.78 0 0);
+  --subtle-foreground: oklch(0.68 0 0);
+  --readback-foreground: oklch(0.715 0 0);
+  /* Semantic and status */
+  --destructive: oklch(0.56 0.19 22.1703);
+  --destructive-foreground: oklch(1 0 0);
+  --destructive-text: oklch(0.65 0.16 22);
+  --warning: oklch(0.75 0.16 50);
+  --warning-text: oklch(0.75 0.16 50);
+  --attention: oklch(0.8 0.15 80);
+  --success: oklch(0.74 0.15 155);
+  --diff-added: oklch(0.77 0.17 163);
+  --diff-removed: oklch(0.72 0.19 22);
+  --pr-merged: oklch(0.68 0.18 295);
+  /* Terminal palette */
+  --ansi-0: #858585;
+  --ansi-1: #d85e5e;
+  --ansi-2: #0dbc79;
+  --ansi-3: #e5e510;
+  --ansi-4: #3c88dc;
+  --ansi-5: #c85ac8;
+  --ansi-6: #11a8cd;
+  --ansi-7: #e5e5e5;
+  --ansi-8: #9a9a9a;
+  --ansi-9: #ff6f6f;
+  --ansi-10: #23d18b;
+  --ansi-11: #f5f543;
+  --ansi-12: #5aaaf2;
+  --ansi-13: #d670d6;
+  --ansi-14: #29b8db;
+  --ansi-15: #ffffff;
+  --ansi-bg-fg-0: #000000;
+  --ansi-bg-fg-1: #000000;
+  --ansi-bg-fg-2: #000000;
+  --ansi-bg-fg-3: #000000;
+  --ansi-bg-fg-4: #000000;
+  --ansi-bg-fg-5: #000000;
+  --ansi-bg-fg-6: #000000;
+  --ansi-bg-fg-7: #000000;
+  --ansi-bg-fg-8: #000000;
+  --ansi-bg-fg-9: #000000;
+  --ansi-bg-fg-10: #000000;
+  --ansi-bg-fg-11: #000000;
+  --ansi-bg-fg-12: #000000;
+  --ansi-bg-fg-13: #000000;
+  --ansi-bg-fg-14: #000000;
+  --ansi-bg-fg-15: #000000;
+}

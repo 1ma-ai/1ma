@@ -62,7 +62,20 @@ for (const { entry, manifest, error } of entryResults) {
   manifests.set(entry.source.replace(/^\.\//, ""), manifest);
 }
 
+if (
+  marketplace.schemaVersion === 2 &&
+  marketplace.$schema !== "https://getbb.app/schemas/marketplace-v2.schema.json"
+) {
+  errors.push("marketplace: schemaVersion 2 requires the marketplace-v2 $schema URL");
+}
 for (const plugin of marketplace.plugins) {
+  const iconUrl = plugin.icon?.url;
+  if (typeof iconUrl !== "string" || iconUrl.length === 0) {
+    errors.push(`marketplace ${plugin.id}: icon.url is required by bb`);
+  } else if (iconUrl.startsWith("./") && !existsSync(path.join(root, "marketplace", iconUrl))) {
+    errors.push(`marketplace ${plugin.id}: icon ${iconUrl} does not exist next to the manifest`);
+  }
+
   const git = plugin.source?.git;
   if (!git) {
     errors.push(`marketplace ${plugin.id}: only git sources are expected in this repository`);

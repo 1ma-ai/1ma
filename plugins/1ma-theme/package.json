@@ -1,0 +1,39 @@
+{
+  "name": "bb-plugin-1ma-theme",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Тема 1ma для bb: палитра, типографика и цвета терминала.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "bb plugin build"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.79",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0"
+  },
+  "engines": {
+    "bb": ">=0.47",
+    "bbPluginSdk": ">=0.6.79"
+  },
+  "bb": {
+    "name": "1ma Theme",
+    "description": "Тема 1ma: светлая и тёмная палитра, шрифты и цвета терминала.",
+    "branding": {
+      "icon": "Palette"
+    },
+    "server": "./server.ts",
+    "themes": [
+      {
+        "id": "1ma",
+        "name": "1ma",
+        "description": "Тема 1ma. Пока совпадает с темой bb по умолчанию; правки накапливаются здесь.",
+        "css": "./themes/1ma.css"
+      }
+    ]
+  }
+}

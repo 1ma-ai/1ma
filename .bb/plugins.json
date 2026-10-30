@@ -3,7 +3,17 @@
   "schemaVersion": 1,
   "name": "1ma",
   "plugins": [
-    { "name": "home-dashboard", "source": "./plugins/home-dashboard" },
-    { "name": "server-switcher", "source": "./plugins/server-switcher" }
+    {
+      "name": "1ma-theme",
+      "source": "./plugins/1ma-theme"
+    },
+    {
+      "name": "home-dashboard",
+      "source": "./plugins/home-dashboard"
+    },
+    {
+      "name": "server-switcher",
+      "source": "./plugins/server-switcher"
+    }
   ]
 }

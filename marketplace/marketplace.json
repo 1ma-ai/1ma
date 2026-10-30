@@ -1,16 +1,45 @@
 {
-  "$schema": "https://getbb.app/schemas/marketplace.schema.json",
+  "$schema": "https://getbb.app/schemas/marketplace-v2.schema.json",
   "schemaVersion": 2,
   "name": "1ma",
   "displayName": "1ma",
   "description": "Плагины 1ma: операционная система бизнеса на ИИ поверх bb.",
   "plugins": [
     {
+      "id": "1ma-theme",
+      "displayName": "1ma Theme",
+      "description": "Тема 1ma: светлая и тёмная палитра, шрифты и цвета терминала.",
+      "icon": {
+        "url": "./icons/1ma.svg"
+      },
+      "tags": ["theme", "appearance"],
+      "author": {
+        "name": "1ma",
+        "github": "1ma-ai",
+        "url": "https://1ma.ai"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/1ma-ai/1ma.git",
+          "subdir": "plugins/1ma-theme",
+          "range": "^0.1.0",
+          "tagPrefix": "1ma-theme/"
+        }
+      }
+    },
+    {
       "id": "bb-home-dashboard",
       "displayName": "Home Dashboard",
       "description": "Компактная доска задач на домашнем экране.",
+      "icon": {
+        "url": "./icons/1ma.svg"
+      },
       "tags": ["home", "tasks"],
-      "author": { "name": "1ma", "github": "1ma-ai", "url": "https://1ma.ai" },
+      "author": {
+        "name": "1ma",
+        "github": "1ma-ai",
+        "url": "https://1ma.ai"
+      },
       "source": {
         "git": {
           "url": "https://github.com/1ma-ai/1ma.git",
@@ -24,8 +53,15 @@
       "id": "bb-server-switcher",
       "displayName": "Server Switcher",
       "description": "Переключение между серверами bb в десктоп-приложении.",
+      "icon": {
+        "url": "./icons/1ma.svg"
+      },
       "tags": ["desktop", "servers"],
-      "author": { "name": "1ma", "github": "1ma-ai", "url": "https://1ma.ai" },
+      "author": {
+        "name": "1ma",
+        "github": "1ma-ai",
+        "url": "https://1ma.ai"
+      },
       "source": {
         "git": {
           "url": "https://github.com/1ma-ai/1ma.git",
