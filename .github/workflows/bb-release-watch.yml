@@ -1,0 +1,63 @@
+name: bb release watch
+
+on:
+  schedule:
+    # Daily: notice a new bb-app release within a day, not after a pile of them.
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    name: Compare pinned bb-app with npm latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - id: versions
+        run: |
+          pinned=$(node -p "require('./package.json').devDependencies['bb-app']")
+          latest=$(npm view bb-app version)
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "pinned=$pinned latest=$latest"
+      - name: Nothing new
+        if: steps.versions.outputs.pinned == steps.versions.outputs.latest
+        run: echo "bb-app ${{ steps.versions.outputs.pinned }} is still the latest release"
+      - name: Check every plugin against the new bb
+        id: check
+        if: steps.versions.outputs.pinned != steps.versions.outputs.latest
+        continue-on-error: true
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm add -D -w bb-app@${{ steps.versions.outputs.latest }}
+          pnpm run typecheck
+          pnpm run test
+          pnpm run build
+          pnpm run check:git-install
+      - name: Open or update the tracking issue
+        if: steps.versions.outputs.pinned != steps.versions.outputs.latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LATEST: ${{ steps.versions.outputs.latest }}
+          PINNED: ${{ steps.versions.outputs.pinned }}
+          RESULT: ${{ steps.check.outcome }}
+        run: |
+          title="bb-app $LATEST released (pinned $PINNED)"
+          body="New bb release **$LATEST** (we pin **$PINNED**). Plugin checks against the new version: **$RESULT**. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+Next: bump \`devDependencies.bb-app\`, re-sync forked plugins with their UPSTREAM.md, run \`pnpm run check\` and \`pnpm run build\`, tag releases."
+          number=$(gh issue list --search "\"$title\" in:title" --state open --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label bb-upstream || gh issue create --title "$title" --body "$body"
+          fi
