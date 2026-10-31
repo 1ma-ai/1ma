@@ -15,8 +15,9 @@ update feed at the 1ma-ai/1ma releases. Tests follow the new identity.
  apps/desktop/src/desktop-update-provider.ts   |  6 +++---
  apps/desktop/src/main.ts                      |  4 ++--
  .../test/desktop-update-provider.test.ts      |  6 +++---
- .../test/electron-builder-config.test.ts      | 10 +++++-----
- 7 files changed, 32 insertions(+), 32 deletions(-)
+ .../test/electron-builder-config.test.ts      | 14 ++++++-------
+ .../electron-builder-windows-config.test.ts   |  4 ++--
+ 8 files changed, 36 insertions(+), 36 deletions(-)
 
 diff --git a/apps/desktop/electron-builder.config.json b/apps/desktop/electron-builder.config.json
 index 1f3ddf3..a2630ec 100644
@@ -196,9 +197,27 @@ index a8ecf46..19529ee 100644
    });
  });
 diff --git a/apps/desktop/test/electron-builder-config.test.ts b/apps/desktop/test/electron-builder-config.test.ts
-index 3892742..a2c302e 100644
+index 3892742..44b303d 100644
 --- a/apps/desktop/test/electron-builder-config.test.ts
 +++ b/apps/desktop/test/electron-builder-config.test.ts
+@@ -67,7 +67,7 @@ const macConfigSchema = z
+ const linuxConfigSchema = z
+   .object({
+     category: z.literal("Development"),
+-    executableName: z.enum(["bb", "bb-nightly"]),
++    executableName: z.enum(["1ma", "1ma-nightly"]),
+     icon: z.string().min(1),
+     target: z.tuple([
+       z
+@@ -528,7 +528,7 @@ describe("electron-builder signing config", () => {
+ 
+     expect(config.linux).toMatchObject({
+       category: "Development",
+-      executableName: "bb",
++      executableName: "1ma",
+       target: [{ arch: ["x64"], target: "AppImage" }],
+     });
+     expect(config.toolsets.appimage).toBe("1.0.3");
 @@ -559,7 +559,7 @@ describe("electron-builder signing config", () => {
  
      expect(config.publish[0]).toMatchObject(DESKTOP_AUTO_UPDATE_FEED_CONFIG);
@@ -224,3 +243,24 @@ index 3892742..a2c302e 100644
      expect(config.mac.icon).toBe("assets/icon-nightly.icns");
      await expect(
        access(resolve(desktopPackageRoot, config.mac.icon)),
+diff --git a/apps/desktop/test/electron-builder-windows-config.test.ts b/apps/desktop/test/electron-builder-windows-config.test.ts
+index 063c588..089a3ee 100644
+--- a/apps/desktop/test/electron-builder-windows-config.test.ts
++++ b/apps/desktop/test/electron-builder-windows-config.test.ts
+@@ -41,14 +41,14 @@ describe("electron-builder Windows config", () => {
+     expect(config.win.target).toEqual([{ arch: ["x64"], target: "nsis" }]);
+     expect(config.win.icon).toBe("assets/icon.png");
+     expect(config.nsis).toEqual({ oneClick: true, perMachine: false });
+-    expect(config.extraMetadata).toEqual({ name: "bb" });
++    expect(config.extraMetadata).toEqual({ name: "1ma" });
+   });
+ 
+   it("keeps the nightly install apart from the stable one", async () => {
+     const config = await printConfig(["--win", "--x64"], "nightly");
+ 
+     expect(config.win.icon).toBe("assets/icon-nightly.png");
+-    expect(config.extraMetadata).toEqual({ name: "bb-nightly" });
++    expect(config.extraMetadata).toEqual({ name: "1ma-nightly" });
+   });
+ 
+   it("leaves the package name alone for other platforms", async () => {
