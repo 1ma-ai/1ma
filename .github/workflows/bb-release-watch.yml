@@ -64,6 +64,8 @@ jobs:
           set -euo pipefail
           title="bb release: bb-app $LATEST, desktop $DESKTOP_LATEST (pinned $PINNED, $DESKTOP_PINNED)"
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          # The backticks are Markdown code spans in the issue body, not command substitutions.
+          # shellcheck disable=SC2016
           body=$(printf '%s\n\n%s\n\n%s' \
             "New bb release: bb-app **$LATEST** (we pin **$PINNED**), desktop tag **$DESKTOP_LATEST** (1ma Desktop pins **$DESKTOP_PINNED**). Plugin checks against the new bb-app: **${RESULT:-not run}**. Run: $run_url" \
             'Plugins: bump `devDependencies.bb-app`, re-sync forked plugins with their UPSTREAM.md, run `pnpm run check` and `pnpm run build`, tag releases.' \
