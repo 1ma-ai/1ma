@@ -83,7 +83,7 @@ jobs:
       - name: Install Electron before parallel tests
         run: ELECTRON_RUN_AS_NODE=1 pnpm --filter @bb/desktop exec electron --version
       - name: Test desktop, launcher and config
-        run: pnpm exec turbo run test --filter=@bb/desktop --filter=bb-app --filter=@bb/config --force --output-logs=new-only
+        run: pnpm exec turbo run test --filter=@bb/desktop --filter=bb-app --filter=@bb/config --force --continue --output-logs=new-only
       - name: Package the macOS app
         run: pnpm exec turbo run desktop:build --filter=@bb/desktop --force --output-logs=new-only
       - name: Smoke test the packaged app

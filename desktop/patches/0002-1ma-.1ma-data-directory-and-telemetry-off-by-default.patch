@@ -11,8 +11,8 @@ the user sets BB_TELEMETRY=true. Tests follow the new defaults.
  packages/bb-app/test/index.test.ts  | 6 +++---
  packages/config/src/env-vars.ts     | 2 +-
  packages/config/src/runtime.ts      | 2 +-
- packages/config/test/config.test.ts | 4 ++--
- 5 files changed, 8 insertions(+), 8 deletions(-)
+ packages/config/test/config.test.ts | 6 +++---
+ 5 files changed, 9 insertions(+), 9 deletions(-)
 
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
 index 27863ca..a8dced8 100644
@@ -71,9 +71,18 @@ index 84faefb..fdae9ce 100644
  export const BB_PROD_SERVER_PORT = 38886;
  export const BB_PROD_HOST_DAEMON_PORT = 38887;
 diff --git a/packages/config/test/config.test.ts b/packages/config/test/config.test.ts
-index f12b574..a0c23a7 100644
+index f12b574..d548f3b 100644
 --- a/packages/config/test/config.test.ts
 +++ b/packages/config/test/config.test.ts
+@@ -78,7 +78,7 @@ describe("common config", () => {
+         },
+         homeDir: "/Users/tester",
+       }).BB_DATA_DIR,
+-    ).toBe(path.normalize("/Users/tester/.bb"));
++    ).toBe(path.normalize("/Users/tester/.1ma"));
+   });
+ 
+   it("requires repoRoot or BB_DATA_DIR for development data dir resolution", () => {
 @@ -159,7 +159,7 @@ describe("data-dir helpers", () => {
    it("expands a bare home-directory override", () => {
      expect(
