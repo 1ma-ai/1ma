@@ -1,10 +1,12 @@
 import {
   APPLE_TOUCH_ICON_LINK_ID,
+  AUTHOR_AVATAR_SELECTOR,
   BB_BRAND,
   BRAND,
   FAVICON_COLOR_VALUES,
   FAVICON_LINK_IDS,
   FAVICON_SIZES,
+  LOGO_FILE,
   MANIFEST_FILE,
   MANIFEST_LINK_ID,
   UNREAD_BADGE_FILL,
@@ -137,10 +139,10 @@ export function mountBrand({ pluginId, signal, document: doc }: MountBrandOption
   const swappedImages = new Map<HTMLImageElement, { src: string; alt: string | null }>();
   const swapLogo = (image: HTMLImageElement): void => {
     const src = image.getAttribute("src") ?? "";
-    if (!isBbLogoSource(src)) return;
+    if (!isBbLogoSource(src) || image.closest(AUTHOR_AVATAR_SELECTOR) !== null) return;
     if (!swappedImages.has(image))
       swappedImages.set(image, { src, alt: image.getAttribute("alt") });
-    image.setAttribute("src", assetUrl("wordmark.svg"));
+    image.setAttribute("src", assetUrl(LOGO_FILE));
     if (image.getAttribute("alt") === BB_BRAND) image.setAttribute("alt", BRAND);
   };
   const scanImages = (root: ParentNode): void => {

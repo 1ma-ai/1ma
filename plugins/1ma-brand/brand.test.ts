@@ -63,15 +63,16 @@ describe("favicon helpers", () => {
 });
 
 describe("buildManifest", () => {
-  it("names the app 1ma and points every icon at the plugin routes", () => {
+  it("names the app 1ma and uses the pixel-man app icon in both purposes", () => {
     const manifest = buildManifest("/api/v1/plugins/1ma-brand/http");
     expect(manifest.name).toBe("1ma");
     expect(manifest.short_name).toBe("1ma");
-    expect(manifest.icons.map((icon) => icon.src)).toEqual([
-      "/api/v1/plugins/1ma-brand/http/icon-192.png",
-      "/api/v1/plugins/1ma-brand/http/icon-512.png",
-      "/api/v1/plugins/1ma-brand/http/icon-192.png",
-      "/api/v1/plugins/1ma-brand/http/icon-512.png",
+    expect(manifest.background_color).toBe("#000000");
+    expect(manifest.icons.map((icon) => [icon.src, icon.sizes, icon.purpose])).toEqual([
+      ["/api/v1/plugins/1ma-brand/http/app-icon-192.png", "192x192", "any"],
+      ["/api/v1/plugins/1ma-brand/http/app-icon-512.png", "512x512", "any"],
+      ["/api/v1/plugins/1ma-brand/http/app-icon-192-maskable.png", "192x192", "maskable"],
+      ["/api/v1/plugins/1ma-brand/http/app-icon-512-maskable.png", "512x512", "maskable"],
     ]);
     for (const icon of manifest.icons) {
       expect(BRAND_ASSETS.some((asset) => icon.src.endsWith(`/${asset.file}`))).toBe(true);

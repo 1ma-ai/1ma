@@ -33,12 +33,15 @@ export const BRAND_ASSETS: readonly BrandAsset[] = [
   { file: "icon-16-dark.png", type: "image/png" },
   { file: "icon-32.png", type: "image/png" },
   { file: "icon-32-dark.png", type: "image/png" },
-  { file: "icon-192.png", type: "image/png" },
-  { file: "icon-192-dark.png", type: "image/png" },
-  { file: "icon-512.png", type: "image/png" },
-  { file: "icon-512-dark.png", type: "image/png" },
+  { file: "app-icon-192.png", type: "image/png" },
+  { file: "app-icon-192-maskable.png", type: "image/png" },
+  { file: "app-icon-512.png", type: "image/png" },
+  { file: "app-icon-512-maskable.png", type: "image/png" },
   { file: "apple-touch-icon.png", type: "image/png" },
 ];
+
+export const LOGO_FILE = "mark.svg";
+export const AUTHOR_AVATAR_SELECTOR = '[role="img"][aria-label$="avatar"]';
 
 export const MANIFEST_FILE = "manifest.webmanifest";
 export const MANIFEST_TYPE = "application/manifest+json";
@@ -116,7 +119,7 @@ export interface WebManifest {
 
 export function buildManifest(base: string): WebManifest {
   const icon = (size: 192 | 512, purpose: "any" | "maskable"): WebManifestIcon => ({
-    src: `${base}/icon-${size}.png`,
+    src: `${base}/app-icon-${size}${purpose === "maskable" ? "-maskable" : ""}.png`,
     sizes: `${size}x${size}`,
     type: "image/png",
     purpose,
@@ -127,7 +130,7 @@ export function buildManifest(base: string): WebManifest {
     start_url: "/",
     scope: "/",
     display: "standalone",
-    background_color: "#ffffff",
+    background_color: "#000000",
     theme_color: "#ffffff",
     icons: [icon(192, "any"), icon(512, "any"), icon(192, "maskable"), icon(512, "maskable")],
   };

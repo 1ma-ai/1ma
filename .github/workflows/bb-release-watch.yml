@@ -54,10 +54,11 @@ jobs:
           title="bb-app $LATEST released (pinned $PINNED)"
           body="New bb release **$LATEST** (we pin **$PINNED**). Plugin checks against the new version: **$RESULT**. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
 
-Next: bump \`devDependencies.bb-app\`, re-sync forked plugins with their UPSTREAM.md, run \`pnpm run check\` and \`pnpm run build\`, tag releases."
-          number=$(gh issue list --search "\"$title\" in:title" --state open --json number --jq '.[0].number')
-          if [ -n "$number" ]; then
-            gh issue comment "$number" --body "$body"
-          else
-            gh issue create --title "$title" --body "$body" --label bb-upstream || gh issue create --title "$title" --body "$body"
-          fi
+Next:
+  bump \`devDependencies.bb-app\`, re-sync forked plugins with their UPSTREAM.md, run \`pnpm run check\` and \`pnpm run build\`, tag releases."
+  number=$(gh issue list --search "\"$title\" in:title" --state open --json number --jq '.[0].number')
+  if [ -n "$number" ]; then
+  gh issue comment "$number" --body "$body"
+  else
+  gh issue create --title "$title" --body "$body" --label bb-upstream || gh issue create --title "$title" --body "$body"
+  fi

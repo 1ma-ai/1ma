@@ -27,6 +27,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check:marketplace
+      - run: pnpm run check:brand
       - run: pnpm run lint
       - run: pnpm run format:check
       - run: pnpm run typecheck

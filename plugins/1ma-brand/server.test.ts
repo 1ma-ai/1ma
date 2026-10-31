@@ -19,13 +19,30 @@ describe("brand asset routes", () => {
     expect(manifest.headers.get("content-type")).toBe("application/manifest+json");
     const body = (await manifest.json()) as { name: string; icons: Array<{ src: string }> };
     expect(body.name).toBe("1ma");
-    expect(body.icons[0]?.src).toBe("/api/v1/plugins/1ma-brand/http/icon-192.png");
+    expect(body.icons[0]?.src).toBe("/api/v1/plugins/1ma-brand/http/app-icon-192.png");
 
     const icon = await host.harness.behavior.fetchHttp("GET", "/icon-32.png");
     expect(icon.status).toBe(200);
     expect(icon.headers.get("content-type")).toBe("image/png");
     const bytes = new Uint8Array(await icon.arrayBuffer());
     expect(Array.from(bytes.slice(0, 8))).toEqual(PNG_MAGIC);
+
+    const appIconFiles = [
+      "/app-icon-512.png",
+      "/app-icon-512-maskable.png",
+      "/apple-touch-icon.png",
+    ];
+    const appIcons = await Promise.all(
+      appIconFiles.map(async (file) => {
+        const response = await host.harness.behavior.fetchHttp("GET", file);
+        return { file, response, head: new Uint8Array(await response.arrayBuffer()).slice(0, 8) };
+      }),
+    );
+    for (const { file, response, head } of appIcons) {
+      expect(response.status, file).toBe(200);
+      expect(response.headers.get("content-type"), file).toBe("image/png");
+      expect(Array.from(head), file).toEqual(PNG_MAGIC);
+    }
 
     const wordmark = await host.harness.behavior.fetchHttp("GET", "/wordmark.svg");
     expect(wordmark.headers.get("content-type")).toBe("image/svg+xml");

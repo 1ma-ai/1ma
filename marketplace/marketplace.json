@@ -22,7 +22,7 @@
         "git": {
           "url": "https://github.com/1ma-ai/1ma.git",
           "subdir": "plugins/1ma-brand",
-          "range": "^0.1.0",
+          "range": "^0",
           "tagPrefix": "1ma-brand/"
         }
       }
@@ -44,7 +44,7 @@
         "git": {
           "url": "https://github.com/1ma-ai/1ma.git",
           "subdir": "plugins/1ma-theme",
-          "range": "^0.1.0",
+          "range": "^0",
           "tagPrefix": "1ma-theme/"
         }
       }
@@ -66,7 +66,7 @@
         "git": {
           "url": "https://github.com/1ma-ai/1ma.git",
           "subdir": "plugins/1ma-home-dashboard",
-          "range": "^0.2.0",
+          "range": "^0",
           "tagPrefix": "1ma-home-dashboard/"
         }
       }
@@ -88,7 +88,7 @@
         "git": {
           "url": "https://github.com/1ma-ai/1ma.git",
           "subdir": "plugins/1ma-server-switcher",
-          "range": "^0.2.0",
+          "range": "^0",
           "tagPrefix": "1ma-server-switcher/"
         }
       }

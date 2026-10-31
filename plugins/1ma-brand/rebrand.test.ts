@@ -45,7 +45,7 @@ describe("mountBrand", () => {
       `${BASE}/apple-touch-icon.png`,
     );
     const [logo, photo] = document.querySelectorAll("img");
-    expect(logo?.getAttribute("src")).toBe(`${BASE}/wordmark.svg`);
+    expect(logo?.getAttribute("src")).toBe(`${BASE}/mark.svg`);
     expect(logo?.getAttribute("alt")).toBe("1ma");
     expect(logo?.className).toBe("h-5 dark:invert");
     expect(photo?.getAttribute("src")).toBe("/assets/user-photo.png");
@@ -70,7 +70,23 @@ describe("mountBrand", () => {
     late.setAttribute("src", "/assets/bb-logo-Zz99.svg");
     document.body.append(late);
     await flush();
-    expect(late.getAttribute("src")).toBe(`${BASE}/wordmark.svg`);
+    expect(late.getAttribute("src")).toBe(`${BASE}/mark.svg`);
+  });
+
+  it("leaves bb's logo in an official plugin's author avatar, where it credits the bb team", async () => {
+    const avatar =
+      '<span role="img" aria-label="bb\'s GitHub avatar"><span><img src="/assets/bb-logo-Ab12Cd.svg" class="size-4/5"></span></span>';
+    document.body.insertAdjacentHTML("beforeend", avatar);
+    mountBrand({ pluginId: "1ma-brand", signal: controller.signal, document });
+    await flush();
+    const credited = document.querySelector('[role="img"] img');
+    expect(credited?.getAttribute("src")).toBe("/assets/bb-logo-Ab12Cd.svg");
+
+    document.body.insertAdjacentHTML("beforeend", avatar);
+    await flush();
+    const added = document.querySelectorAll('[role="img"] img');
+    expect(added[1]?.getAttribute("src")).toBe("/assets/bb-logo-Ab12Cd.svg");
+    expect(document.querySelector("img")?.getAttribute("src")).toBe(`${BASE}/mark.svg`);
   });
 
   it("stops and restores bb's own assets once disposed", async () => {

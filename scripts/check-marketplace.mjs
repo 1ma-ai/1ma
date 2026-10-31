@@ -94,6 +94,13 @@ for (const plugin of marketplace.plugins) {
   if (git.tagPrefix !== expectedPrefix) {
     errors.push(`marketplace ${plugin.id}: tagPrefix should be ${expectedPrefix}`);
   }
+  const major = Number.parseInt(String(manifest.version).split(".")[0] ?? "", 10);
+  const expectedRange = `^${major}`;
+  if (git.range !== expectedRange) {
+    errors.push(
+      `marketplace ${plugin.id}: range ${git.range} should be ${expectedRange}; bb keeps the range chosen at install time, so a narrower one strands installed copies on old releases`,
+    );
+  }
 }
 
 if (errors.length > 0) {
