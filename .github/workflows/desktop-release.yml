@@ -38,12 +38,20 @@ jobs:
           cat > notes.md <<NOTES
           Test build of 1ma Desktop for macOS on Apple Silicon, built from bb ${upstream} with the 1ma patches at ${commit}.
 
-          The build is not signed by Apple yet. First launch: open 1ma once, then System Settings > Privacy & Security > Open Anyway, and enter your password.
+          The build is signed ad hoc, not by Apple yet. First launch: open 1ma once, then System Settings > Privacy & Security > Open Anyway, and enter your password.
 
           Quit bb completely before opening 1ma: both use port 38886. 1ma keeps its data in ~/.1ma, separate from bb.
           NOTES
-          gh release create "$tag" --prerelease --target "$commit" \
-            --title "1ma Desktop ${version} test build ${RUN_ID}" \
-            --notes-file notes.md \
-            dist/apps/desktop/release/*.dmg dist/apps/desktop/release/*.zip
+          files=(dist/apps/desktop/release/*.dmg dist/apps/desktop/release/*.zip)
+          # GITHUB_TOKEN may not create a release on a commit that changes workflow files
+          # (HTTP 403). A maintainer then creates the pre-release with these notes and the
+          # tag at the build commit, and a rerun of this workflow uploads the files into it.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            gh release create "$tag" --prerelease --target "$commit" \
+              --title "1ma Desktop ${version} test build ${RUN_ID}" \
+              --notes-file notes.md \
+              "${files[@]}"
+          fi
           echo "published $tag"
