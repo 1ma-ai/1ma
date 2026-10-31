@@ -1,8 +1,8 @@
 {
   "name": "bb-plugin-1ma-brand",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Бренд 1ma вместо bb внутри окна: заголовок, favicon, иконка приложения, логотип, PWA-манифест.",
+  "description": "Бренд 1ma вместо bb внутри окна: заголовок, favicon и иконка приложения с человечком, логотип 1ma, PWA-манифест.",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -28,13 +28,9 @@
   },
   "bb": {
     "name": "1ma Brand",
-    "description": "Бренд 1ma вместо bb: иконка приложения, знак, favicon, заголовок окна, PWA-манифест.",
+    "description": "Бренд 1ma вместо bb: иконка-человечек во вкладке и при установке, логотип 1ma, заголовок окна, PWA-манифест.",
     "branding": {
-      "icon": "./assets/icon.svg",
-      "experimental_icons": {
-        "mark": "./assets/mark.svg",
-        "wordmark": "./assets/wordmark.svg"
-      }
+      "icon": "./assets/icon.svg"
     },
     "server": "./server.ts",
     "app": "./app.tsx"

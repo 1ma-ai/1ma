@@ -4,6 +4,7 @@ import {
   buildManifest,
   faviconFile,
   isBbLogoSource,
+  logoReplacement,
   looksLikeBadge,
   readFaviconColor,
   rebrandTitle,
@@ -37,9 +38,9 @@ describe("isBbLogoSource", () => {
 });
 
 describe("favicon helpers", () => {
-  it("picks the dark glyph for dark color schemes", () => {
-    expect(faviconFile(32, false)).toBe("icon-32.png");
-    expect(faviconFile(16, true)).toBe("icon-16-dark.png");
+  it("uses the pixel-man favicon tile at each size bb links", () => {
+    expect(faviconFile(32)).toBe("favicon-32.png");
+    expect(faviconFile(16)).toBe("favicon-16.png");
   });
 
   it("accepts only bb's known favicon colors from storage", () => {
@@ -77,5 +78,16 @@ describe("buildManifest", () => {
     for (const icon of manifest.icons) {
       expect(BRAND_ASSETS.some((asset) => icon.src.endsWith(`/${asset.file}`))).toBe(true);
     }
+  });
+});
+
+describe("logoReplacement", () => {
+  it("puts the 1ma wordmark where bb names itself with its logo", () => {
+    expect(logoReplacement("bb")).toEqual({ file: "wordmark.svg", widthAuto: true });
+  });
+
+  it("puts the pixel-man icon in decorative logo slots", () => {
+    expect(logoReplacement("")).toEqual({ file: "icon.svg", widthAuto: false });
+    expect(logoReplacement(null)).toEqual({ file: "icon.svg", widthAuto: false });
   });
 });

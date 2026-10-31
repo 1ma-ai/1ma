@@ -23,7 +23,8 @@ describe("mountBrand", () => {
       '<link rel="manifest" href="/manifest.webmanifest" id="app-manifest">',
     ].join("");
     document.body.innerHTML = [
-      '<img src="/assets/bb-logo-Ab12Cd.svg" alt="bb" class="h-5 dark:invert">',
+      '<img src="/assets/bb-logo-Ab12Cd.svg" alt="bb" class="h-5 w-6 dark:invert">',
+      '<img src="/assets/bb-logo-Ab12Cd.svg" alt="" aria-hidden="true" class="size-4 dark:invert">',
       '<img src="/assets/user-photo.png" alt="me">',
     ].join("");
   });
@@ -36,18 +37,26 @@ describe("mountBrand", () => {
     mountBrand({ pluginId: "1ma-brand", signal: controller.signal, document });
     await flush();
     expect(document.title).toBe("1ma");
-    expect(document.getElementById("favicon-32")?.getAttribute("href")).toBe(`${BASE}/icon-32.png`);
-    expect(document.getElementById("favicon-16")?.getAttribute("href")).toBe(`${BASE}/icon-16.png`);
+    expect(document.getElementById("favicon-32")?.getAttribute("href")).toBe(
+      `${BASE}/favicon-32.png`,
+    );
+    expect(document.getElementById("favicon-16")?.getAttribute("href")).toBe(
+      `${BASE}/favicon-16.png`,
+    );
     expect(document.getElementById("app-manifest")?.getAttribute("href")).toBe(
       `${BASE}/manifest.webmanifest`,
     );
     expect(document.getElementById("apple-touch-icon")?.getAttribute("href")).toBe(
       `${BASE}/apple-touch-icon.png`,
     );
-    const [logo, photo] = document.querySelectorAll("img");
-    expect(logo?.getAttribute("src")).toBe(`${BASE}/mark.svg`);
-    expect(logo?.getAttribute("alt")).toBe("1ma");
-    expect(logo?.className).toBe("h-5 dark:invert");
+    const [header, decorative, photo] = document.querySelectorAll("img");
+    expect(header?.getAttribute("src")).toBe(`${BASE}/wordmark.svg`);
+    expect(header?.getAttribute("alt")).toBe("1ma");
+    expect(header?.style.width).toBe("auto");
+    expect(header?.className).toBe("h-5 w-6 dark:invert");
+    expect(decorative?.getAttribute("src")).toBe(`${BASE}/icon.svg`);
+    expect(decorative?.getAttribute("alt")).toBe("");
+    expect(decorative?.style.width).toBe("");
     expect(photo?.getAttribute("src")).toBe("/assets/user-photo.png");
   });
 
@@ -64,13 +73,15 @@ describe("mountBrand", () => {
     document.getElementById("favicon-32")?.setAttribute("href", "/favicon-32x32-dark.png");
     await flush();
     await flush();
-    expect(document.getElementById("favicon-32")?.getAttribute("href")).toBe(`${BASE}/icon-32.png`);
+    expect(document.getElementById("favicon-32")?.getAttribute("href")).toBe(
+      `${BASE}/favicon-32.png`,
+    );
 
     const late = document.createElement("img");
     late.setAttribute("src", "/assets/bb-logo-Zz99.svg");
     document.body.append(late);
     await flush();
-    expect(late.getAttribute("src")).toBe(`${BASE}/mark.svg`);
+    expect(late.getAttribute("src")).toBe(`${BASE}/icon.svg`);
   });
 
   it("leaves bb's logo in an official plugin's author avatar, where it credits the bb team", async () => {
@@ -86,7 +97,7 @@ describe("mountBrand", () => {
     await flush();
     const added = document.querySelectorAll('[role="img"] img');
     expect(added[1]?.getAttribute("src")).toBe("/assets/bb-logo-Ab12Cd.svg");
-    expect(document.querySelector("img")?.getAttribute("src")).toBe(`${BASE}/mark.svg`);
+    expect(document.querySelector("img")?.getAttribute("src")).toBe(`${BASE}/wordmark.svg`);
   });
 
   it("stops and restores bb's own assets once disposed", async () => {
@@ -97,7 +108,11 @@ describe("mountBrand", () => {
     expect(document.getElementById("app-manifest")?.getAttribute("href")).toBe(
       "/manifest.webmanifest",
     );
-    expect(document.querySelector("img")?.getAttribute("src")).toBe("/assets/bb-logo-Ab12Cd.svg");
+    const [header, decorative] = document.querySelectorAll("img");
+    expect(header?.getAttribute("src")).toBe("/assets/bb-logo-Ab12Cd.svg");
+    expect(header?.getAttribute("alt")).toBe("bb");
+    expect(header?.style.width).toBe("");
+    expect(decorative?.getAttribute("src")).toBe("/assets/bb-logo-Ab12Cd.svg");
     document.title = "bb";
     await flush();
     expect(document.title).toBe("bb");

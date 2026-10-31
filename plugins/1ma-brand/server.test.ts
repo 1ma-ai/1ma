@@ -21,7 +21,7 @@ describe("brand asset routes", () => {
     expect(body.name).toBe("1ma");
     expect(body.icons[0]?.src).toBe("/api/v1/plugins/1ma-brand/http/app-icon-192.png");
 
-    const icon = await host.harness.behavior.fetchHttp("GET", "/icon-32.png");
+    const icon = await host.harness.behavior.fetchHttp("GET", "/favicon-32.png");
     expect(icon.status).toBe(200);
     expect(icon.headers.get("content-type")).toBe("image/png");
     const bytes = new Uint8Array(await icon.arrayBuffer());
@@ -43,6 +43,11 @@ describe("brand asset routes", () => {
       expect(response.headers.get("content-type"), file).toBe("image/png");
       expect(Array.from(head), file).toEqual(PNG_MAGIC);
     }
+
+    const figure = await host.harness.behavior.fetchHttp("GET", "/icon.svg");
+    expect(figure.status).toBe(200);
+    expect(figure.headers.get("content-type")).toBe("image/svg+xml");
+    expect((await figure.text()).match(/<rect /g)?.length).toBe(31);
 
     const wordmark = await host.harness.behavior.fetchHttp("GET", "/wordmark.svg");
     expect(wordmark.headers.get("content-type")).toBe("image/svg+xml");

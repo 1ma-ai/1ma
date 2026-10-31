@@ -40,6 +40,11 @@ describe("brand assets", () => {
     }
   });
 
+  it("draws the app icon as the 31 squares of the pixel man", () => {
+    const svg = readFileSync(new URL("./assets/icon.svg", import.meta.url), "utf8");
+    expect(svg.match(/<rect /g)?.length).toBe(31);
+  });
+
   it("ships monochrome SVG marks that follow the text color and never say bb", () => {
     for (const asset of BRAND_ASSETS.filter((entry) => entry.type === "image/svg+xml")) {
       const svg = readFileSync(new URL(`./assets/${asset.file}`, import.meta.url), "utf8");

@@ -28,11 +28,9 @@ export interface BrandAsset {
 
 export const BRAND_ASSETS: readonly BrandAsset[] = [
   { file: "wordmark.svg", type: "image/svg+xml" },
-  { file: "mark.svg", type: "image/svg+xml" },
-  { file: "icon-16.png", type: "image/png" },
-  { file: "icon-16-dark.png", type: "image/png" },
-  { file: "icon-32.png", type: "image/png" },
-  { file: "icon-32-dark.png", type: "image/png" },
+  { file: "icon.svg", type: "image/svg+xml" },
+  { file: "favicon-16.png", type: "image/png" },
+  { file: "favicon-32.png", type: "image/png" },
   { file: "app-icon-192.png", type: "image/png" },
   { file: "app-icon-192-maskable.png", type: "image/png" },
   { file: "app-icon-512.png", type: "image/png" },
@@ -40,7 +38,8 @@ export const BRAND_ASSETS: readonly BrandAsset[] = [
   { file: "apple-touch-icon.png", type: "image/png" },
 ];
 
-export const LOGO_FILE = "mark.svg";
+export const WORDMARK_FILE = "wordmark.svg";
+export const ICON_FILE = "icon.svg";
 export const AUTHOR_AVATAR_SELECTOR = '[role="img"][aria-label$="avatar"]';
 
 export const MANIFEST_FILE = "manifest.webmanifest";
@@ -67,8 +66,19 @@ export function isBbLogoSource(src: string): boolean {
   return /(^|\/)bb-logo(-[A-Za-z0-9_-]+)?\.svg$/u.test(pathname);
 }
 
-export function faviconFile(size: FaviconSize, dark: boolean): string {
-  return `icon-${size}${dark ? "-dark" : ""}.png`;
+export function faviconFile(size: FaviconSize): string {
+  return `favicon-${size}.png`;
+}
+
+export interface LogoReplacement {
+  file: string;
+  widthAuto: boolean;
+}
+
+export function logoReplacement(alt: string | null): LogoReplacement {
+  return alt === BB_BRAND
+    ? { file: WORDMARK_FILE, widthAuto: true }
+    : { file: ICON_FILE, widthAuto: false };
 }
 
 export function readFaviconColor(read: (key: string) => string | null): string | null {

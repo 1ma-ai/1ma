@@ -8,7 +8,7 @@
     {
       "id": "1ma-brand",
       "displayName": "1ma Brand",
-      "description": "Бренд 1ma вместо bb: логотип, имя, favicon, заголовок окна, PWA-манифест.",
+      "description": "Бренд 1ma вместо bb: иконка-человечек, логотип 1ma, заголовок окна, PWA-манифест.",
       "icon": {
         "url": "./icons/1ma.svg"
       },

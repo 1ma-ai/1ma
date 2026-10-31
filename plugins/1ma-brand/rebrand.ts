@@ -6,13 +6,13 @@ import {
   FAVICON_COLOR_VALUES,
   FAVICON_LINK_IDS,
   FAVICON_SIZES,
-  LOGO_FILE,
   MANIFEST_FILE,
   MANIFEST_LINK_ID,
   UNREAD_BADGE_FILL,
   assetBase,
   faviconFile,
   isBbLogoSource,
+  logoReplacement,
   looksLikeBadge,
   readFaviconColor,
   rebrandTitle,
@@ -136,14 +136,23 @@ export function mountBrand({ pluginId, signal, document: doc }: MountBrandOption
   });
   observers.push(titleObserver);
 
-  const swappedImages = new Map<HTMLImageElement, { src: string; alt: string | null }>();
+  const swappedImages = new Map<
+    HTMLImageElement,
+    { src: string; alt: string | null; width: string }
+  >();
   const swapLogo = (image: HTMLImageElement): void => {
     const src = image.getAttribute("src") ?? "";
     if (!isBbLogoSource(src) || image.closest(AUTHOR_AVATAR_SELECTOR) !== null) return;
-    if (!swappedImages.has(image))
-      swappedImages.set(image, { src, alt: image.getAttribute("alt") });
-    image.setAttribute("src", assetUrl(LOGO_FILE));
-    if (image.getAttribute("alt") === BB_BRAND) image.setAttribute("alt", BRAND);
+    const original = swappedImages.get(image) ?? {
+      src,
+      alt: image.getAttribute("alt"),
+      width: image.style.width,
+    };
+    swappedImages.set(image, original);
+    const replacement = logoReplacement(original.alt);
+    image.setAttribute("src", assetUrl(replacement.file));
+    if (original.alt === BB_BRAND) image.setAttribute("alt", BRAND);
+    if (replacement.widthAuto) image.style.width = "auto";
   };
   const scanImages = (root: ParentNode): void => {
     for (const image of root.querySelectorAll("img")) swapLogo(image);
@@ -177,6 +186,7 @@ export function mountBrand({ pluginId, signal, document: doc }: MountBrandOption
     for (const [image, original] of swappedImages) {
       image.setAttribute("src", original.src);
       if (original.alt !== null) image.setAttribute("alt", original.alt);
+      image.style.width = original.width;
     }
   });
 
@@ -205,7 +215,6 @@ export function mountBrand({ pluginId, signal, document: doc }: MountBrandOption
   const applyFavicon = async (): Promise<void> => {
     const token = ++renderToken;
     if (win?.matchMedia?.("(display-mode: standalone)").matches) return;
-    const dark = Boolean(win?.matchMedia?.("(prefers-color-scheme: dark)").matches);
     const color = readFaviconColor((key) => win?.localStorage.getItem(key) ?? null);
     const rendered = await Promise.all(
       FAVICON_SIZES.map(async (size) => {
@@ -213,7 +222,7 @@ export function mountBrand({ pluginId, signal, document: doc }: MountBrandOption
         if (!link) return null;
         const badge = await detectBadge(doc, link.getAttribute("href") ?? "");
         const href = await renderFavicon(doc, {
-          base: assetUrl(faviconFile(size, dark)),
+          base: assetUrl(faviconFile(size)),
           color,
           badge,
         });
@@ -242,10 +251,6 @@ export function mountBrand({ pluginId, signal, document: doc }: MountBrandOption
   });
   linkObserver.observe(doc.head, { subtree: true, attributes: true, attributeFilter: ["href"] });
   observers.push(linkObserver);
-  const scheme = win?.matchMedia?.("(prefers-color-scheme: dark)");
-  const onSchemeChange = (): void => void applyFavicon();
-  scheme?.addEventListener("change", onSchemeChange);
-  restores.push(() => scheme?.removeEventListener("change", onSchemeChange));
   restores.push(() => {
     for (const [id, href] of originalHrefs) {
       const link = linkById(id);

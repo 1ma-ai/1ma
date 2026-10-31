@@ -23,6 +23,10 @@ PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 APP_ICON_CANVAS = 1024
 APP_ICON_TILE = 824
 APP_ICON_RADIUS_RATIO = 0.225
+FAVICON_RADIUS_RATIO = 0.171
+FAVICON_SIZES = (16, 32)
+FIGURE_THRESHOLD = 128
+FIGURE_PADDING = 24
 SVG_PADDING = 8.0
 ICNS_ENTRIES = (
     ("icp4", 16),
@@ -207,11 +211,9 @@ def invert(image: Image) -> Image:
     return Image(image.width, image.height, gray, list(image.alpha))
 
 
-def rounded_tile(art: Image) -> Image:
-    size = APP_ICON_CANVAS
-    tile = APP_ICON_TILE
+def rounded_tile(art: Image, size: int, tile: int, radius_ratio: float) -> Image:
     margin = (size - tile) // 2
-    radius = APP_ICON_RADIUS_RATIO * tile
+    radius = radius_ratio * tile
     half = tile / 2
     center = margin + half
     straight = half - radius
@@ -233,6 +235,55 @@ def rounded_tile(art: Image) -> Image:
             alpha[index] = coverage * source_alpha
             gray[index] = scaled.gray[source] * coverage
     return Image(size, size, gray, alpha)
+
+
+def figure_squares(art: Image) -> list:
+    width, height = art.width, art.height
+    lit = bytearray(1 if value >= FIGURE_THRESHOLD else 0 for value in art.gray)
+    seen = bytearray(width * height)
+    squares = []
+    for start in range(width * height):
+        if not lit[start] or seen[start]:
+            continue
+        stack = [start]
+        seen[start] = 1
+        count = 0
+        left = top = 1 << 30
+        right = bottom = -1
+        while stack:
+            point = stack.pop()
+            count += 1
+            y, x = divmod(point, width)
+            left, right, top, bottom = min(left, x), max(right, x), min(top, y), max(bottom, y)
+            for neighbour in (
+                point - 1 if x > 0 else -1,
+                point + 1 if x < width - 1 else -1,
+                point - width if y > 0 else -1,
+                point + width if y < height - 1 else -1,
+            ):
+                if neighbour >= 0 and lit[neighbour] and not seen[neighbour]:
+                    seen[neighbour] = 1
+                    stack.append(neighbour)
+        box = (right - left + 1) * (bottom - top + 1)
+        if count / box < 0.95:
+            raise ValueError(f"figure part at {left},{top} is not a square; vectorizing would distort it")
+        squares.append((left, top, right - left + 1, bottom - top + 1))
+    return sorted(squares, key=lambda square: (square[1], square[0]))
+
+
+def figure_svg(squares: list) -> str:
+    left = min(x for x, _, _, _ in squares)
+    top = min(y for _, y, _, _ in squares)
+    right = max(x + w for x, _, w, _ in squares)
+    bottom = max(y + h for _, y, _, h in squares)
+    side = max(right - left, bottom - top) + 2 * FIGURE_PADDING
+    origin_x = (left + right - side) / 2
+    origin_y = (top + bottom - side) / 2
+    body = "\n".join(f'<rect x="{x}" y="{y}" width="{w}" height="{h}"/>' for x, y, w, h in squares)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{origin_x:g} {origin_y:g} {side} {side}" '
+        f'fill="currentColor" role="img" aria-label="1ma">\n{body}\n</svg>\n'
+    )
 
 
 def build_icns(render) -> bytes:
@@ -327,11 +378,10 @@ def logo_svgs(source: str) -> dict:
     transform = re.search(r'<g transform="([^"]+)"', source).group(1)
     matrix = _transform(transform)
     paths = re.findall(r'<path d="([^"]+)"', source)
-    if len(paths) < 2:
-        raise ValueError("logo.svg must contain the mark path followed by the remaining letters")
+    if not paths:
+        raise ValueError("logo.svg has no paths")
     boxes = [_user_bounds(_path_bounds(path), matrix) for path in paths]
     word = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
-    mark = boxes[0]
 
     def svg(view: tuple, chosen: list) -> str:
         x, y, w, h = view
@@ -343,23 +393,16 @@ def logo_svgs(source: str) -> dict:
         )
 
     pad = SVG_PADDING
-    side = max(mark[2] - mark[0], mark[3] - mark[1]) + 2 * pad
-    middle_x = (mark[0] + mark[2]) / 2
-    middle_y = (mark[1] + mark[3]) / 2
     return {
         "wordmark.svg": svg((word[0] - pad, word[1] - pad, word[2] - word[0] + 2 * pad, word[3] - word[1] + 2 * pad), paths),
-        "mark.svg": svg((mark[0] - pad, mark[1] - pad, mark[2] - mark[0] + 2 * pad, mark[3] - mark[1] + 2 * pad), paths[:1]),
-        "icon.svg": svg((middle_x - side / 2, middle_y - side / 2, side, side), paths[:1]),
     }
 
 
 def build_outputs() -> dict:
-    favicon = load_image(SOURCE / "favicon-black.png")
-    favicon_dark = invert(favicon)
     art = load_image(SOURCE / "app-icon.png")
     if art.alpha is not None or art.width != art.height:
         raise ValueError("brand/source/app-icon.png must be an opaque square")
-    master = rounded_tile(art)
+    master = rounded_tile(art, APP_ICON_CANVAS, APP_ICON_TILE, APP_ICON_RADIUS_RATIO)
     tiles = {master.width: encode_png(master)}
 
     def tile_png(size: int) -> bytes:
@@ -368,15 +411,16 @@ def build_outputs() -> dict:
         return tiles[size]
 
     outputs = {}
-    for size in (16, 32):
-        outputs[PLUGIN_ASSETS / f"icon-{size}.png"] = encode_png(resize(favicon, size, size))
-        outputs[PLUGIN_ASSETS / f"icon-{size}-dark.png"] = encode_png(resize(favicon_dark, size, size))
+    for size in FAVICON_SIZES:
+        favicon = rounded_tile(art, size, size, FAVICON_RADIUS_RATIO)
+        outputs[PLUGIN_ASSETS / f"favicon-{size}.png"] = encode_png(favicon)
     for size in (192, 512):
         outputs[PLUGIN_ASSETS / f"app-icon-{size}.png"] = tile_png(size)
         outputs[PLUGIN_ASSETS / f"app-icon-{size}-maskable.png"] = encode_png(resize(art, size, size))
     outputs[PLUGIN_ASSETS / "apple-touch-icon.png"] = encode_png(resize(art, 180, 180))
     outputs[BRAND_OUT / "app-icon-1024.png"] = tile_png(APP_ICON_CANVAS)
     outputs[BRAND_OUT / "1ma.icns"] = build_icns(tile_png)
+    outputs[PLUGIN_ASSETS / "icon.svg"] = figure_svg(figure_squares(art)).encode("utf-8")
     for name, text in logo_svgs((SOURCE / "logo.svg").read_text(encoding="utf-8")).items():
         outputs[PLUGIN_ASSETS / name] = text.encode("utf-8")
     outputs[MARKETPLACE_ICON] = outputs[PLUGIN_ASSETS / "icon.svg"]

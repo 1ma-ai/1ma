@@ -1,11 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="23.0 819.0 570.1 570.1" fill="currentColor" role="img" aria-label="1ma">
-<g transform="translate(0.000000,2204.000000) scale(0.100000,-0.100000)">
-<path d="M2640 13724 c0 -76 -29 -251 -57 -338 -58 -186 -143 -325 -277 -454
--224 -215 -497 -323 -908 -358 l-68 -6 0 -599 0 -599 193 5 c105 4 251 13 322
-21 330 39 598 152 788 332 l37 36 0 -1167 0 -1167 -815 0 -815 0 0 -601 0
--600 613 3 c591 4 616 5 721 26 271 57 513 165 736 330 166 123 366 344 467
-516 21 36 41 66 46 66 4 0 7 -211 7 -470 l0 -470 745 0 745 0 0 595 0 595
--694 0 -695 0 24 71 c34 98 72 276 84 391 7 65 11 731 11 1993 l0 1895 -605 0
--605 0 0 -46z"/>
-</g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="80 166 1112 1112" fill="currentColor" role="img" aria-label="1ma">
+<rect x="540" y="190" width="81" height="76"/>
+<rect x="636" y="190" width="81" height="76"/>
+<rect x="540" y="281" width="81" height="76"/>
+<rect x="636" y="281" width="81" height="76"/>
+<rect x="588" y="370" width="77" height="64"/>
+<rect x="458" y="426" width="82" height="77"/>
+<rect x="556" y="447" width="82" height="82"/>
+<rect x="653" y="447" width="87" height="82"/>
+<rect x="756" y="447" width="81" height="78"/>
+<rect x="402" y="517" width="79" height="77"/>
+<rect x="802" y="540" width="80" height="77"/>
+<rect x="556" y="545" width="81" height="84"/>
+<rect x="652" y="545" width="80" height="84"/>
+<rect x="402" y="610" width="79" height="77"/>
+<rect x="813" y="632" width="79" height="76"/>
+<rect x="563" y="645" width="74" height="78"/>
+<rect x="652" y="645" width="73" height="78"/>
+<rect x="380" y="702" width="78" height="78"/>
+<rect x="747" y="719" width="79" height="77"/>
+<rect x="559" y="738" width="78" height="78"/>
+<rect x="652" y="738" width="79" height="78"/>
+<rect x="380" y="795" width="78" height="78"/>
+<rect x="527" y="831" width="109" height="88"/>
+<rect x="652" y="831" width="107" height="88"/>
+<rect x="380" y="888" width="78" height="77"/>
+<rect x="524" y="934" width="95" height="118"/>
+<rect x="676" y="934" width="93" height="106"/>
+<rect x="680" y="1056" width="89" height="91"/>
+<rect x="525" y="1068" width="94" height="118"/>
+<rect x="659" y="1163" width="87" height="90"/>
+<rect x="525" y="1204" width="92" height="50"/>
 </svg>
