@@ -5,12 +5,14 @@ on:
     branches: [main]
     paths:
       - "desktop/**"
+      - "!desktop/**/*.md"
       - "brand/**"
       - "plugins/1ma-brand/assets/**"
       - ".github/workflows/desktop.yml"
   pull_request:
     paths:
       - "desktop/**"
+      - "!desktop/**/*.md"
       - "brand/**"
       - "plugins/1ma-brand/assets/**"
       - ".github/workflows/desktop.yml"
