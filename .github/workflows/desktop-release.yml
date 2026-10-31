@@ -1,0 +1,49 @@
+name: Desktop release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Desktop workflow run whose macOS build should be published"
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    name: Publish a 1ma Desktop test build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: 1ma-desktop-macos-arm64
+          path: dist
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Create the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          ls -R dist
+          version=$(node -p "require('./dist/apps/desktop/release/desktop-version.json').version")
+          upstream=$(node -p "require('./dist/1ma-provenance.json').upstream.tag")
+          commit=$(node -p "require('./dist/1ma-provenance.json').oneMaCommit")
+          tag="desktop/v${version}-1ma.${RUN_ID}"
+          cat > notes.md <<NOTES
+          Test build of 1ma Desktop for macOS on Apple Silicon, built from bb ${upstream} with the 1ma patches at ${commit}.
+
+          The build is not signed by Apple yet. First launch: open 1ma once, then System Settings > Privacy & Security > Open Anyway, and enter your password.
+
+          Quit bb completely before opening 1ma: both use port 38886. 1ma keeps its data in ~/.1ma, separate from bb.
+          NOTES
+          gh release create "$tag" --prerelease --target "$commit" \
+            --title "1ma Desktop ${version} test build ${RUN_ID}" \
+            --notes-file notes.md \
+            dist/apps/desktop/release/*.dmg dist/apps/desktop/release/*.zip
+          echo "published $tag"
