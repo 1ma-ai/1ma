@@ -32,15 +32,29 @@ env:
 
 jobs:
   patches:
-    name: 1ma patches apply to the pinned bb release
+    name: 1ma patches and rebrand apply to the pinned bb release
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22.x"
-      - run: node desktop/scripts/prepare.mjs --out "$RUNNER_TEMP/bb"
+      - name: Install the desktop tooling
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts --filter 1ma-desktop-tooling
+      - name: Test the rebrand rules
+        run: pnpm --filter 1ma-desktop-tooling run test
+      - name: Prepare bb with the 1ma patches, assets and rebrand
+        run: node desktop/scripts/prepare.mjs --out "$RUNNER_TEMP/bb"
+      - name: Keep the rebrand diff for review
+        run: git -C "$RUNNER_TEMP/bb" diff HEAD~1 HEAD > "$RUNNER_TEMP/rebrand.diff"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rebrand-diff
+          path: ${{ runner.temp }}/rebrand.diff
+          if-no-files-found: error
 
   macos:
     name: macOS arm64 app (ad-hoc signed)
@@ -56,9 +70,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22.x"
-      - name: Prepare bb with the 1ma patches and assets
+      - name: Install the desktop tooling
         working-directory: ${{ github.workspace }}
-        run: node desktop/scripts/prepare.mjs --out bb-src
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts --filter 1ma-desktop-tooling
+      - name: Prepare bb with the 1ma patches, assets and rebrand
+        working-directory: ${{ github.workspace }}
+        run: |
+          node desktop/scripts/prepare.mjs --out bb-src
+          # bb-src sits inside this checkout; drop the tooling's packages so bb resolves only its own.
+          rm -rf node_modules desktop/node_modules
       - name: Verify arm64 runner
         run: test "$(uname -m)" = "arm64"
       - name: Enable the pnpm version bb pins

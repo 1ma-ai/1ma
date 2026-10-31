@@ -1,0 +1,17 @@
+{
+  "name": "1ma-desktop-tooling",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Build tooling for 1ma Desktop: prepares the pinned bb release with the 1ma patches, assets and rebrand",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 scripts/rebrand.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

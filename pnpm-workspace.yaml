@@ -1,5 +1,6 @@
 packages:
   - "plugins/*"
+  - "desktop"
 
 # bb installs plugins from git with plain npm inside each plugin directory,
 # so every plugin stays installable on its own: no workspace: specifiers in

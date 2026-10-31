@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -37,9 +38,15 @@ const ASSETS = [
 function parseArgs(argv) {
   const index = argv.indexOf("--out");
   if (index === -1 || !argv[index + 1]) {
-    throw new Error("usage: node desktop/scripts/prepare.mjs --out <empty directory>");
+    throw new Error(
+      "usage: node desktop/scripts/prepare.mjs --out <empty directory> [--no-rebrand | --update-rebrand-lock]",
+    );
   }
-  return { out: path.resolve(argv[index + 1]) };
+  return {
+    out: path.resolve(argv[index + 1]),
+    rebrand: !argv.includes("--no-rebrand"),
+    updateLock: argv.includes("--update-rebrand-lock"),
+  };
 }
 
 function git(cwd, args) {
@@ -57,7 +64,7 @@ function git(cwd, args) {
   return result.stdout.trim();
 }
 
-const { out } = parseArgs(process.argv.slice(2));
+const { out, rebrand, updateLock } = parseArgs(process.argv.slice(2));
 if (existsSync(out) && readdirSync(out).length > 0) {
   throw new Error(`${out} is not empty; prepare writes a fresh tree`);
 }
@@ -99,9 +106,49 @@ for (const [from, to] of ASSETS) {
 }
 console.log(`replaced ${ASSETS.length} bb assets with 1ma assets`);
 
+let rebranded = null;
+if (rebrand) {
+  const { REBRAND_DIR, diffInventory, formatInventory, loadRules, rebrandTree } =
+    await import("./rebrand.mjs");
+  const result = rebrandTree(out, loadRules(), { write: true });
+  const inventory = formatInventory(result.inventory);
+  const lockPath = path.join(REBRAND_DIR, "inventory.json");
+  if (updateLock) {
+    writeFileSync(lockPath, inventory);
+    console.log(`wrote ${path.relative(repo, lockPath)}; review its diff before committing`);
+  } else {
+    const { added, removed } = diffInventory(readFileSync(lockPath, "utf8"), inventory);
+    if (added.length > 0 || removed.length > 0) {
+      const lines = [...removed.map((line) => `- ${line}`), ...added.map((line) => `+ ${line}`)];
+      throw new Error(
+        `bb strings no longer match desktop/rebrand/inventory.json (${added.length} new or changed, ${removed.length} gone):\n${lines.slice(0, 60).join("\n")}\nReview them, adjust desktop/rebrand/rules.json if needed, and rerun prepare with --update-rebrand-lock.`,
+      );
+    }
+  }
+  if (result.changed.length > 0) {
+    git(out, ["add", "--", ...result.changed]);
+    git(out, [
+      "commit",
+      "--quiet",
+      "--no-verify",
+      "-m",
+      "1ma: rename the product to 1ma in visible strings",
+    ]);
+  }
+  rebranded = {
+    files: result.changed.length,
+    counts: result.counts,
+    inventorySha256: createHash("sha256").update(inventory).digest("hex"),
+  };
+  console.log(
+    `rebranded ${result.changed.length} files: ${result.counts.product} mentions of bb became 1ma; kept ${result.counts.command} commands, ${result.counts.code} code spans, ${result.counts.cloud} bb cloud mentions, ${result.counts.identifier} identifiers`,
+  );
+}
+
 const provenance = {
   upstream,
   patches,
+  rebrand: rebranded,
   oneMaCommit: spawnSync("git", ["rev-parse", "HEAD"], {
     cwd: repo,
     encoding: "utf8",

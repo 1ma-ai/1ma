@@ -1,0 +1,102 @@
+name: Desktop bb tests
+
+# Runs bb's own test suite, in the shards bb's CI uses, on the tree 1ma Desktop
+# builds from: the pinned bb release with the 1ma patches, assets and rebrand.
+# A manual run with rebrand=false gives the baseline without the rebrand.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "!desktop/**/*.md"
+      - ".github/workflows/desktop-tests.yml"
+  workflow_dispatch:
+    inputs:
+      rebrand:
+        description: "Apply the 1ma rebrand before testing"
+        type: boolean
+        default: true
+
+concurrency:
+  group: desktop-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  plan:
+    name: Read bb's test shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tests: ${{ steps.shards.outputs.tests }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: shards
+        run: |
+          set -euo pipefail
+          commit=$(node -p "require('./desktop/upstream.json').commit")
+          curl -fsSL --retry 3 "https://raw.githubusercontent.com/get-bb/bb/${commit}/scripts/ci-test-shards.json" -o "$RUNNER_TEMP/shards.json"
+          echo "tests=$(node -e 'const s = require(process.argv[1]); process.stdout.write(JSON.stringify({ include: s.tests }))' "$RUNNER_TEMP/shards.json")" >> "$GITHUB_OUTPUT"
+
+  tests:
+    name: bb tests (${{ matrix.shard }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.tests) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Install the desktop tooling
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts --filter 1ma-desktop-tooling
+      - name: Prepare bb with the 1ma patches, assets and rebrand
+        env:
+          REBRAND: ${{ github.event_name != 'workflow_dispatch' || inputs.rebrand }}
+        run: |
+          args=(--out "$RUNNER_TEMP/bb-src")
+          if [[ "$REBRAND" == "false" ]]; then args+=(--no-rebrand); fi
+          node desktop/scripts/prepare.mjs "${args[@]}"
+      - name: Install bb dependencies for this shard
+        working-directory: ${{ runner.temp }}/bb-src
+        env:
+          APP_SHARD: ${{ startsWith(matrix.shard, 'app-') }}
+          DEMO_ONLY: ${{ matrix.filter == '--filter=@bb/demo-server' }}
+        run: |
+          filters=()
+          if [[ "$APP_SHARD" == "true" ]]; then
+            filters=(--ignore-scripts --filter bb --filter '@bb/app...' --filter '@bb/db...')
+          elif [[ "$DEMO_ONLY" == "true" ]]; then
+            filters=(--ignore-scripts --filter bb --filter '@bb/demo-server...' --filter '@bb/db...')
+          else
+            filters=(--filter '!@bb/mobile')
+          fi
+          bash .github/actions/setup-workspace/install-dependencies.sh "${filters[@]}"
+      - name: Set up Bun
+        if: startsWith(matrix.shard, 'packages-') || startsWith(matrix.shard, 'plugins-')
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - name: Install Electron runtime libraries
+        if: contains(matrix.filter, '--filter=@bb/desktop')
+        working-directory: ${{ runner.temp }}/bb-src
+        run: |
+          bash .github/actions/setup-workspace/install-electron-libraries.sh
+          ELECTRON_RUN_AS_NODE=1 pnpm --filter @bb/desktop exec electron --version
+      - name: Test
+        working-directory: ${{ runner.temp }}/bb-src
+        env:
+          BB_CI_TEST_SHARD: ${{ matrix.vitestShard }}
+          VITEST_MAX_WORKERS: ${{ (startsWith(matrix.shard, 'server-') || matrix.shard == 'integration') && '4' || '2' }}
+        run: ${{ contains(matrix.filter, '--filter=@bb/desktop') && 'xvfb-run -a' || '' }} pnpm exec turbo run test ${{ matrix.filter }} --output-logs=new-only --concurrency=4
