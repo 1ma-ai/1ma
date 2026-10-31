@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Sat, 31 Oct 2026 18:08:34 +0100
+Subject: [PATCH] 1ma: unsigned macOS builds are ad-hoc signed
+
+With CSC_IDENTITY_AUTO_DISCOVERY=false and no signing secrets the build left
+the app without any bundle signature. Apple Silicon reports such a download
+as damaged and offers no way to open it. The build now signs ad hoc (identity
+"-"); the entitlements already disable library validation, so the app and
+its helpers launch, and a downloaded copy gets the unidentified-developer
+prompt that Open Anyway in System Settings clears.
+---
+ apps/desktop/scripts/run-electron-builder.mjs   | 17 ++++++++++-------
+ .../test/electron-builder-config.test.ts        |  4 ++--
+ 2 files changed, 12 insertions(+), 9 deletions(-)
+
+diff --git a/apps/desktop/scripts/run-electron-builder.mjs b/apps/desktop/scripts/run-electron-builder.mjs
+index c4efca3..1d62ee8 100644
+--- a/apps/desktop/scripts/run-electron-builder.mjs
++++ b/apps/desktop/scripts/run-electron-builder.mjs
+@@ -88,7 +88,7 @@ function logSigningPlan(signingPlan) {
+     );
+   } else {
+     logWarning(
+-      "macOS signing skipped: CSC_IDENTITY_AUTO_DISCOVERY=false and no signing secrets found. Artifacts will be unsigned.",
++      "macOS Developer ID signing skipped: CSC_IDENTITY_AUTO_DISCOVERY=false and no signing secrets found. Artifacts are ad-hoc signed and not notarized; a downloaded copy opens only after Open Anyway in System Settings.",
+     );
+   }
+ 
+@@ -116,8 +116,11 @@ function autoDiscoveryExplicitlyDisabled(env) {
+  *   evaluate every exec in the app's process tree and can stall execs
+  *   system-wide. Machines without a signing identity fall back to unsigned
+  *   artifacts inside electron-builder.
+- * - "disabled": no secrets and CSC_IDENTITY_AUTO_DISCOVERY=false — explicitly
+- *   unsigned (the CI path for workflow-artifact-only builds).
++ * - "ad-hoc": no secrets and CSC_IDENTITY_AUTO_DISCOVERY=false — ad-hoc
++ *   signed (the CI path for workflow-artifact-only builds). Apple Silicon
++ *   reports a downloaded bundle without a valid signature as damaged and
++ *   offers no way to open it; an ad-hoc signature turns that into the
++ *   unidentified-developer prompt that Open Anyway clears.
+  */
+ function createSigningPlan(env) {
+   const presentSigningKeys = presentEnvironmentKeys(
+@@ -152,7 +155,7 @@ function createSigningPlan(env) {
+   }
+ 
+   return {
+-    mode: autoDiscoveryExplicitlyDisabled(env) ? "disabled" : "keychain",
++    mode: autoDiscoveryExplicitlyDisabled(env) ? "ad-hoc" : "keychain",
+     identityName: undefined,
+     notarizationEnabled: false,
+   };
+@@ -169,8 +172,8 @@ function resolveElectronBuilderConfig(baseConfig, env, electronBuilderArgs) {
+     notarize: signingPlan.notarizationEnabled,
+   };
+ 
+-  if (signingPlan.mode === "disabled") {
+-    mac.identity = null;
++  if (signingPlan.mode === "ad-hoc") {
++    mac.identity = "-";
+   } else if (signingPlan.identityName) {
+     mac.identity = signingPlan.identityName;
+   } else {
+@@ -218,7 +221,7 @@ function createElectronBuilderEnv(signingPlan) {
+   };
+ 
+   childEnv.CSC_IDENTITY_AUTO_DISCOVERY =
+-    signingPlan.mode !== "disabled" && !signingPlan.identityName
++    signingPlan.mode !== "ad-hoc" && !signingPlan.identityName
+       ? "true"
+       : "false";
+ 
+diff --git a/apps/desktop/test/electron-builder-config.test.ts b/apps/desktop/test/electron-builder-config.test.ts
+index 44b303d..9c0b50e 100644
+--- a/apps/desktop/test/electron-builder-config.test.ts
++++ b/apps/desktop/test/electron-builder-config.test.ts
+@@ -607,12 +607,12 @@ describe("electron-builder signing config", () => {
+     expect(config.dmg.sign).toBe(false);
+   });
+ 
+-  it("keeps builds unsigned when keychain auto-discovery is explicitly disabled", async () => {
++  it("ad-hoc signs builds when keychain auto-discovery is explicitly disabled", async () => {
+     const { config } = await readResolvedConfig({
+       CSC_IDENTITY_AUTO_DISCOVERY: "false",
+     });
+ 
+-    expect(config.mac.identity).toBeNull();
++    expect(config.mac.identity).toBe("-");
+     expect(config.mac.notarize).toBe(false);
+   });
+ 

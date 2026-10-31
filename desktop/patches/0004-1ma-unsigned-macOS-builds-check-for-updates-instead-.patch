@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: 1ma <hello@1ma.ai>
 Date: Sat, 31 Oct 2026 12:08:03 +0100
-Subject: [PATCH 4/5] 1ma: unsigned macOS builds check for updates instead of
+Subject: [PATCH] 1ma: unsigned macOS builds check for updates instead of
  auto-installing
 
 Squirrel.Mac only installs an update whose signature matches the running

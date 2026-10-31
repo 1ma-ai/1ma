@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: 1ma <hello@1ma.ai>
 Date: Sat, 31 Oct 2026 12:06:59 +0100
-Subject: [PATCH 1/5] 1ma: desktop app identity, installer names and update
- feed
+Subject: [PATCH] 1ma: desktop app identity, installer names and update feed
 
 Rename the stable and nightly desktop identities to 1ma: app id
 ai.1ma.desktop, product name 1ma, artifact and executable names, the

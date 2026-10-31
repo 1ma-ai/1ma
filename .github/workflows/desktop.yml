@@ -15,4 +15,98 @@ on:
       - "plugins/1ma-brand/assets/**"
       - ".github/workflows/desktop.yml"
   workflow_dispatch:
-    inputs:
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BB_DESKTOP_RELEASE_CHANNEL: latest
+  CSC_IDENTITY_AUTO_DISCOVERY: "false"
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  patches:
+    name: 1ma patches apply to the pinned bb release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - run: node desktop/scripts/prepare.mjs --out "$RUNNER_TEMP/bb"
+
+  macos:
+    name: macOS arm64 app (ad-hoc signed)
+    needs: patches
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: bb-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Prepare bb with the 1ma patches and assets
+        working-directory: ${{ github.workspace }}
+        run: node desktop/scripts/prepare.mjs --out bb-src
+      - name: Verify arm64 runner
+        run: test "$(uname -m)" = "arm64"
+      - name: Enable the pnpm version bb pins
+        run: |
+          corepack enable
+          pnpm --version
+          echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PNPM_STORE }}
+          key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/upstream.json') }}
+          restore-keys: pnpm-store-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+      - name: Typecheck desktop, launcher and config
+        run: pnpm exec turbo run typecheck --filter=@bb/desktop --filter=bb-app --filter=@bb/config --output-logs=new-only
+      - name: Build desktop
+        run: pnpm exec turbo run build --filter=@bb/desktop --output-logs=new-only
+      - name: Install Electron before parallel tests
+        run: ELECTRON_RUN_AS_NODE=1 pnpm --filter @bb/desktop exec electron --version
+      - name: Test desktop, launcher and config
+        run: pnpm exec turbo run test --filter=@bb/desktop --filter=bb-app --filter=@bb/config --force --continue --output-logs=new-only
+      - name: Package the macOS app
+        run: pnpm exec turbo run desktop:build --filter=@bb/desktop --force --output-logs=new-only
+      - name: Verify the ad-hoc signature of the app in the DMG and the ZIP
+        run: |
+          set -euo pipefail
+          check() {
+            codesign --verify --deep --strict --verbose=2 "$1"
+            codesign --display --verbose=2 "$1" 2>&1 | tee /dev/stderr | grep -qx 'Signature=adhoc'
+          }
+          check apps/desktop/release/mac-arm64/1ma.app
+          mounted="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mounted" apps/desktop/release/*.dmg
+          check "$mounted/1ma.app"
+          hdiutil detach "$mounted"
+          unzipped="$(mktemp -d)"
+          ditto -x -k apps/desktop/release/*.zip "$unzipped"
+          check "$unzipped/1ma.app"
+      - name: Smoke test the packaged app
+        run: pnpm exec turbo run smoke:packaged --filter=@bb/desktop --force --output-logs=new-only
+      - name: Generate the version feed
+        run: pnpm --dir apps/desktop run desktop:version-feed
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 1ma-desktop-macos-arm64
+          path: |
+            bb-src/apps/desktop/release/*.dmg
+            bb-src/apps/desktop/release/*.zip
+            bb-src/apps/desktop/release/latest-mac.yml
+            bb-src/apps/desktop/release/desktop-version.json
+            bb-src/1ma-provenance.json
+          if-no-files-found: error

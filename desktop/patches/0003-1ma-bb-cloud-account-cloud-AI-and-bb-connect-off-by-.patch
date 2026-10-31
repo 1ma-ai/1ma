@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: 1ma <hello@1ma.ai>
 Date: Sat, 31 Oct 2026 12:07:29 +0100
-Subject: [PATCH 3/5] 1ma: bb cloud account, cloud AI and bb connect off by
- default
+Subject: [PATCH] 1ma: bb cloud account, cloud AI and bb connect off by default
 
 1ma does not depend on getbb.app: the bb account, bb cloud AI and bb
 connect built-in plugins start disabled. Users can still enable them in
