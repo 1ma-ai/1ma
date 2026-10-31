@@ -24,14 +24,22 @@ jobs:
           cache: pnpm
       - id: versions
         run: |
+          set -euo pipefail
           pinned=$(node -p "require('./package.json').devDependencies['bb-app']")
           latest=$(npm view bb-app version)
-          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
-          echo "latest=$latest" >> "$GITHUB_OUTPUT"
-          echo "pinned=$pinned latest=$latest"
+          desktop_pinned=$(node -p "require('./desktop/upstream.json').tag")
+          desktop_latest=$(git ls-remote --tags --sort=-v:refname "$(node -p "require('./desktop/upstream.json').repository")" 'desktop-v*' \
+            | grep -v '\^{}' | sed 's|.*refs/tags/||' | grep -E '^desktop-v[0-9]+\.[0-9]+\.[0-9]+$' | sed -n 1p)
+          {
+            echo "pinned=$pinned"
+            echo "latest=$latest"
+            echo "desktop_pinned=$desktop_pinned"
+            echo "desktop_latest=$desktop_latest"
+          } >> "$GITHUB_OUTPUT"
+          echo "bb-app pinned=$pinned latest=$latest; desktop pinned=$desktop_pinned latest=$desktop_latest"
       - name: Nothing new
-        if: steps.versions.outputs.pinned == steps.versions.outputs.latest
-        run: echo "bb-app ${{ steps.versions.outputs.pinned }} is still the latest release"
+        if: steps.versions.outputs.pinned == steps.versions.outputs.latest && steps.versions.outputs.desktop_pinned == steps.versions.outputs.desktop_latest
+        run: echo "bb-app ${{ steps.versions.outputs.pinned }} and bb ${{ steps.versions.outputs.desktop_pinned }} are still the latest releases"
       - name: Check every plugin against the new bb
         id: check
         if: steps.versions.outputs.pinned != steps.versions.outputs.latest
@@ -44,21 +52,25 @@ jobs:
           pnpm run build
           pnpm run check:git-install
       - name: Open or update the tracking issue
-        if: steps.versions.outputs.pinned != steps.versions.outputs.latest
+        if: steps.versions.outputs.pinned != steps.versions.outputs.latest || steps.versions.outputs.desktop_pinned != steps.versions.outputs.desktop_latest
         env:
           GH_TOKEN: ${{ github.token }}
           LATEST: ${{ steps.versions.outputs.latest }}
           PINNED: ${{ steps.versions.outputs.pinned }}
+          DESKTOP_LATEST: ${{ steps.versions.outputs.desktop_latest }}
+          DESKTOP_PINNED: ${{ steps.versions.outputs.desktop_pinned }}
           RESULT: ${{ steps.check.outcome }}
         run: |
-          title="bb-app $LATEST released (pinned $PINNED)"
-          body="New bb release **$LATEST** (we pin **$PINNED**). Plugin checks against the new version: **$RESULT**. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
-
-Next:
-  bump \`devDependencies.bb-app\`, re-sync forked plugins with their UPSTREAM.md, run \`pnpm run check\` and \`pnpm run build\`, tag releases."
-  number=$(gh issue list --search "\"$title\" in:title" --state open --json number --jq '.[0].number')
-  if [ -n "$number" ]; then
-  gh issue comment "$number" --body "$body"
-  else
-  gh issue create --title "$title" --body "$body" --label bb-upstream || gh issue create --title "$title" --body "$body"
-  fi
+          set -euo pipefail
+          title="bb release: bb-app $LATEST, desktop $DESKTOP_LATEST (pinned $PINNED, $DESKTOP_PINNED)"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body=$(printf '%s\n\n%s\n\n%s' \
+            "New bb release: bb-app **$LATEST** (we pin **$PINNED**), desktop tag **$DESKTOP_LATEST** (1ma Desktop pins **$DESKTOP_PINNED**). Plugin checks against the new bb-app: **${RESULT:-not run}**. Run: $run_url" \
+            'Plugins: bump `devDependencies.bb-app`, re-sync forked plugins with their UPSTREAM.md, run `pnpm run check` and `pnpm run build`, tag releases.' \
+            '1ma Desktop: move `desktop/upstream.json` to the new desktop tag, rebase the patch series in a prepared tree and export it again (desktop/README.md).')
+          number=$(gh issue list --search "\"$title\" in:title" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label bb-upstream || gh issue create --title "$title" --body "$body"
+          fi
