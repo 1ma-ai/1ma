@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Sat, 31 Oct 2026 12:08:03 +0100
+Subject: [PATCH 4/5] 1ma: unsigned macOS builds check for updates instead of
+ auto-installing
+
+Squirrel.Mac only installs an update whose signature matches the running
+app, so unsigned or ad-hoc signed macOS builds can find an update but never
+install it. Until 1ma builds are signed with a Developer ID, macOS keeps the
+version check that reports new releases and skips auto-install.
+---
+ apps/desktop/src/desktop-update-provider.ts       | 5 ++++-
+ apps/desktop/src/main.ts                          | 2 +-
+ apps/desktop/test/desktop-update-provider.test.ts | 4 ++--
+ 3 files changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/apps/desktop/src/desktop-update-provider.ts b/apps/desktop/src/desktop-update-provider.ts
+index a2c09fd..4e05087 100644
+--- a/apps/desktop/src/desktop-update-provider.ts
++++ b/apps/desktop/src/desktop-update-provider.ts
+@@ -84,9 +84,12 @@ interface ResolveDesktopUpdateSupportArgs {
+ export function resolveDesktopUpdateSupport(
+   args: ResolveDesktopUpdateSupportArgs,
+ ): DesktopUpdateSupport {
+-  if (args.platform === "macos" || args.platform === "windows") {
++  if (args.platform === "windows") {
+     return { autoUpdate: true, versionCheck: true };
+   }
++  if (args.platform === "macos") {
++    return { autoUpdate: false, versionCheck: true };
++  }
+ 
+   const appImagePath = args.env.APPIMAGE?.trim() ?? "";
+   if (appImagePath.length === 0) {
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index a8dced8..505e05e 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -3305,7 +3305,7 @@ async function runDesktopApp(): Promise<void> {
+     desktopAutoUpdateService.start();
+   } else {
+     desktopLogger.info(
+-      "Desktop auto-install is disabled: only the Linux AppImage build can replace itself. Version checks still report new releases.",
++      "Desktop auto-install is disabled: unsigned macOS builds and Linux outside an AppImage cannot replace themselves. Version checks still report new releases.",
+     );
+   }
+ 
+diff --git a/apps/desktop/test/desktop-update-provider.test.ts b/apps/desktop/test/desktop-update-provider.test.ts
+index 19529ee..0bdd4fd 100644
+--- a/apps/desktop/test/desktop-update-provider.test.ts
++++ b/apps/desktop/test/desktop-update-provider.test.ts
+@@ -23,14 +23,14 @@ const alwaysReplaceable = () => true;
+ const neverReplaceable = () => false;
+ 
+ describe("desktop update support", () => {
+-  it("enables both update paths on macOS", () => {
++  it("reports new releases on macOS but leaves installing them to the user while builds are unsigned", () => {
+     expect(
+       resolveDesktopUpdateSupport({
+         canReplaceAppImage: neverReplaceable,
+         env: {},
+         platform: "macos",
+       }),
+-    ).toEqual({ autoUpdate: true, versionCheck: true });
++    ).toEqual({ autoUpdate: false, versionCheck: true });
+   });
+ 
+   it("checks for and installs updates on Windows", () => {

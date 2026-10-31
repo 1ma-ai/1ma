@@ -1,0 +1,226 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Sat, 31 Oct 2026 12:06:59 +0100
+Subject: [PATCH 1/5] 1ma: desktop app identity, installer names and update
+ feed
+
+Rename the stable and nightly desktop identities to 1ma: app id
+ai.1ma.desktop, product name 1ma, artifact and executable names, the
+Windows AppUserModelID, the macOS microphone purpose string, and point the
+update feed at the 1ma-ai/1ma releases. Tests follow the new identity.
+---
+ apps/desktop/electron-builder.config.json     | 10 +++++-----
+ .../scripts/desktop-release-channel.d.mts     |  8 ++++----
+ .../scripts/desktop-release-channel.mjs       | 20 +++++++++----------
+ apps/desktop/src/desktop-update-provider.ts   |  6 +++---
+ apps/desktop/src/main.ts                      |  4 ++--
+ .../test/desktop-update-provider.test.ts      |  6 +++---
+ .../test/electron-builder-config.test.ts      | 10 +++++-----
+ 7 files changed, 32 insertions(+), 32 deletions(-)
+
+diff --git a/apps/desktop/electron-builder.config.json b/apps/desktop/electron-builder.config.json
+index 1f3ddf3..a2630ec 100644
+--- a/apps/desktop/electron-builder.config.json
++++ b/apps/desktop/electron-builder.config.json
+@@ -1,6 +1,6 @@
+ {
+-  "appId": "dev.bb.desktop",
+-  "productName": "bb",
++  "appId": "ai.1ma.desktop",
++  "productName": "1ma",
+   "artifactName": "${productName}-${version}-${arch}.${ext}",
+   "toolsets": {
+     "appimage": "1.0.3"
+@@ -33,13 +33,13 @@
+     {
+       "channel": "latest",
+       "provider": "generic",
+-      "url": "https://github.com/get-bb/bb/releases/download/desktop-latest/"
++      "url": "https://github.com/1ma-ai/1ma/releases/download/desktop-latest/"
+     }
+   ],
+   "mac": {
+     "category": "public.app-category.developer-tools",
+     "extendInfo": {
+-      "NSMicrophoneUsageDescription": "bb uses your microphone for voice input and sites you allow in the in-app browser."
++      "NSMicrophoneUsageDescription": "1ma uses your microphone for voice input and sites you allow in the in-app browser."
+     },
+     "minimumSystemVersion": "13.0.0",
+     "entitlements": "build/entitlements.mac.plist",
+@@ -62,7 +62,7 @@
+   },
+   "linux": {
+     "category": "Development",
+-    "executableName": "bb",
++    "executableName": "1ma",
+     "icon": "assets/icon.png",
+     "target": [{ "target": "AppImage", "arch": ["x64"] }]
+   },
+diff --git a/apps/desktop/scripts/desktop-release-channel.d.mts b/apps/desktop/scripts/desktop-release-channel.d.mts
+index cd30a08..be60b9c 100644
+--- a/apps/desktop/scripts/desktop-release-channel.d.mts
++++ b/apps/desktop/scripts/desktop-release-channel.d.mts
+@@ -8,15 +8,15 @@ export interface DesktopUpdateMetadataFileNames {
+ }
+ 
+ export interface DesktopReleaseConfig {
+-  appId: "dev.bb.desktop" | "dev.bb.desktop.nightly";
+-  applicationName: "bb" | "bb Nightly";
++  appId: "ai.1ma.desktop" | "ai.1ma.desktop.nightly";
++  applicationName: "1ma" | "1ma Nightly";
+   artifactName: string;
+   iconFileName: "icon.png" | "icon-nightly.png";
+-  linuxExecutableName: "bb" | "bb-nightly";
++  linuxExecutableName: "1ma" | "1ma-nightly";
+   macIconPath: "assets/icon.icns" | "assets/icon-nightly.icns";
+   releaseTag: "desktop-latest" | "desktop-nightly";
+   updateMetadataFileNames: DesktopUpdateMetadataFileNames;
+-  windowsInstallName: "bb" | "bb-nightly";
++  windowsInstallName: "1ma" | "1ma-nightly";
+ }
+ 
+ export function resolveDesktopReleaseChannel(
+diff --git a/apps/desktop/scripts/desktop-release-channel.mjs b/apps/desktop/scripts/desktop-release-channel.mjs
+index 6620891..708b42e 100644
+--- a/apps/desktop/scripts/desktop-release-channel.mjs
++++ b/apps/desktop/scripts/desktop-release-channel.mjs
+@@ -33,16 +33,16 @@ export function resolveDesktopBuildPlatform(nodePlatform) {
+ export function createDesktopReleaseConfig(channel) {
+   if (channel === "nightly") {
+     return {
+-      appId: "dev.bb.desktop.nightly",
+-      applicationName: "bb Nightly",
+-      artifactName: "bb-nightly-${version}-${arch}.${ext}",
++      appId: "ai.1ma.desktop.nightly",
++      applicationName: "1ma Nightly",
++      artifactName: "1ma-nightly-${version}-${arch}.${ext}",
+       iconFileName: "icon-nightly.png",
+       // The Linux binary name must differ from stable so both channels can be
+       // installed at once without one shadowing the other on PATH.
+-      linuxExecutableName: "bb-nightly",
++      linuxExecutableName: "1ma-nightly",
+       macIconPath: "assets/icon-nightly.icns",
+       releaseTag: "desktop-nightly",
+-      windowsInstallName: "bb-nightly",
++      windowsInstallName: "1ma-nightly",
+       updateMetadataFileNames: {
+         linux: "nightly-linux.yml",
+         macos: "nightly-mac.yml",
+@@ -52,14 +52,14 @@ export function createDesktopReleaseConfig(channel) {
+   }
+ 
+   return {
+-    appId: "dev.bb.desktop",
+-    applicationName: "bb",
++    appId: "ai.1ma.desktop",
++    applicationName: "1ma",
+     artifactName: "${productName}-${version}-${arch}.${ext}",
+     iconFileName: "icon.png",
+-    linuxExecutableName: "bb",
++    linuxExecutableName: "1ma",
+     macIconPath: "assets/icon.icns",
+     releaseTag: "desktop-latest",
+-    windowsInstallName: "bb",
++    windowsInstallName: "1ma",
+     updateMetadataFileNames: {
+       linux: "latest-linux.yml",
+       macos: "latest-mac.yml",
+@@ -69,5 +69,5 @@ export function createDesktopReleaseConfig(channel) {
+ }
+ 
+ export function createDesktopUpdateReleaseBaseUrl(releaseTag) {
+-  return `https://github.com/get-bb/bb/releases/download/${releaseTag}/`;
++  return `https://github.com/1ma-ai/1ma/releases/download/${releaseTag}/`;
+ }
+diff --git a/apps/desktop/src/desktop-update-provider.ts b/apps/desktop/src/desktop-update-provider.ts
+index 27f9b3c..a2c09fd 100644
+--- a/apps/desktop/src/desktop-update-provider.ts
++++ b/apps/desktop/src/desktop-update-provider.ts
+@@ -6,7 +6,7 @@ import {
+ type DesktopReleaseChannel = "latest" | "nightly";
+ 
+ interface DesktopReleaseInfo {
+-  applicationName: "bb" | "bb Nightly";
++  applicationName: "1ma" | "1ma Nightly";
+   channel: DesktopReleaseChannel;
+   iconFileName: "icon.png" | "icon-nightly.png";
+   releaseTag: "desktop-latest" | "desktop-nightly";
+@@ -20,11 +20,11 @@ export function createDesktopReleaseInfo(
+   const releaseTag = nightly ? "desktop-nightly" : "desktop-latest";
+ 
+   return {
+-    applicationName: nightly ? "bb Nightly" : "bb",
++    applicationName: nightly ? "1ma Nightly" : "1ma",
+     channel,
+     iconFileName: nightly ? "icon-nightly.png" : "icon.png",
+     releaseTag,
+-    updateReleaseBaseUrl: `https://github.com/get-bb/bb/releases/download/${releaseTag}/`,
++    updateReleaseBaseUrl: `https://github.com/1ma-ai/1ma/releases/download/${releaseTag}/`,
+   };
+ }
+ 
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 97d29cd..27863ca 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -2918,8 +2918,8 @@ async function runDesktopApp(): Promise<void> {
+ 
+   app.setAppUserModelId(
+     DESKTOP_RELEASE_CHANNEL === "nightly"
+-      ? "dev.bb.desktop.nightly"
+-      : "dev.bb.desktop",
++      ? "ai.1ma.desktop.nightly"
++      : "ai.1ma.desktop",
+   );
+   if (app.isPackaged) {
+     await hostToolchain.refresh();
+diff --git a/apps/desktop/test/desktop-update-provider.test.ts b/apps/desktop/test/desktop-update-provider.test.ts
+index a8ecf46..19529ee 100644
+--- a/apps/desktop/test/desktop-update-provider.test.ts
++++ b/apps/desktop/test/desktop-update-provider.test.ts
+@@ -7,13 +7,13 @@ import {
+ describe("desktop update feed url", () => {
+   it("gives each platform its own feed file inside one release tag", () => {
+     expect(createDesktopUpdateFeedUrl("macos")).toBe(
+-      "https://github.com/get-bb/bb/releases/download/desktop-latest/desktop-version.json",
++      "https://github.com/1ma-ai/1ma/releases/download/desktop-latest/desktop-version.json",
+     );
+     expect(createDesktopUpdateFeedUrl("linux")).toBe(
+-      "https://github.com/get-bb/bb/releases/download/desktop-latest/desktop-version-linux.json",
++      "https://github.com/1ma-ai/1ma/releases/download/desktop-latest/desktop-version-linux.json",
+     );
+     expect(createDesktopUpdateFeedUrl("windows")).toBe(
+-      "https://github.com/get-bb/bb/releases/download/desktop-latest/desktop-version-windows.json",
++      "https://github.com/1ma-ai/1ma/releases/download/desktop-latest/desktop-version-windows.json",
+     );
+   });
+ });
+diff --git a/apps/desktop/test/electron-builder-config.test.ts b/apps/desktop/test/electron-builder-config.test.ts
+index 3892742..a2c302e 100644
+--- a/apps/desktop/test/electron-builder-config.test.ts
++++ b/apps/desktop/test/electron-builder-config.test.ts
+@@ -559,7 +559,7 @@ describe("electron-builder signing config", () => {
+ 
+     expect(config.publish[0]).toMatchObject(DESKTOP_AUTO_UPDATE_FEED_CONFIG);
+     expect(DESKTOP_AUTO_UPDATE_FEED_CONFIG.url).toBe(
+-      "https://github.com/get-bb/bb/releases/download/desktop-latest/",
++      "https://github.com/1ma-ai/1ma/releases/download/desktop-latest/",
+     );
+   });
+ 
+@@ -569,11 +569,11 @@ describe("electron-builder signing config", () => {
+     });
+     const nightlyRelease = createDesktopReleaseInfo("nightly");
+ 
+-    expect(config.appId).toBe("dev.bb.desktop.nightly");
+-    expect(config.productName).toBe("bb Nightly");
+-    expect(config.artifactName).toBe("bb-nightly-${version}-${arch}.${ext}");
++    expect(config.appId).toBe("ai.1ma.desktop.nightly");
++    expect(config.productName).toBe("1ma Nightly");
++    expect(config.artifactName).toBe("1ma-nightly-${version}-${arch}.${ext}");
+     expect(config.linux.icon).toBe("assets/icon-nightly.png");
+-    expect(config.linux.executableName).toBe("bb-nightly");
++    expect(config.linux.executableName).toBe("1ma-nightly");
+     expect(config.mac.icon).toBe("assets/icon-nightly.icns");
+     await expect(
+       access(resolve(desktopPackageRoot, config.mac.icon)),

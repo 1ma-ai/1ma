@@ -19,3 +19,6 @@ coverage/
 # python bytecode
 __pycache__/
 *.pyc
+
+# prepared bb tree for desktop builds
+/bb-src/

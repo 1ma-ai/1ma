@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Sat, 31 Oct 2026 12:08:09 +0100
+Subject: [PATCH 5/5] 1ma: window title and web app install name
+
+The home page title, the iOS home-screen title and the web app manifest
+name read 1ma. The colour variants of the manifest are regenerated from it
+by the app build.
+---
+ apps/app/index.html                          | 4 ++--
+ apps/app/public/manifest.webmanifest         | 4 ++--
+ apps/app/src/components/layout/AppLayout.tsx | 2 +-
+ 3 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/apps/app/index.html b/apps/app/index.html
+index bb37f89..268761a 100644
+--- a/apps/app/index.html
++++ b/apps/app/index.html
+@@ -17,8 +17,8 @@
+       name="apple-mobile-web-app-status-bar-style"
+       content="black-translucent"
+     />
+-    <meta name="apple-mobile-web-app-title" content="bb" />
+-    <title>bb</title>
++    <meta name="apple-mobile-web-app-title" content="1ma" />
++    <title>1ma</title>
+     <link
+       rel="icon"
+       type="image/png"
+diff --git a/apps/app/public/manifest.webmanifest b/apps/app/public/manifest.webmanifest
+index f6b7401..37fb49e 100644
+--- a/apps/app/public/manifest.webmanifest
++++ b/apps/app/public/manifest.webmanifest
+@@ -1,6 +1,6 @@
+ {
+-  "name": "bb",
+-  "short_name": "bb",
++  "name": "1ma",
++  "short_name": "1ma",
+   "start_url": "/",
+   "display": "standalone",
+   "background_color": "#ffffff",
+diff --git a/apps/app/src/components/layout/AppLayout.tsx b/apps/app/src/components/layout/AppLayout.tsx
+index 0e078fa..69df073 100644
+--- a/apps/app/src/components/layout/AppLayout.tsx
++++ b/apps/app/src/components/layout/AppLayout.tsx
+@@ -336,7 +336,7 @@ function SidebarTriggerOverlay({
+ }
+ 
+ const routeTitles: Record<string, { title: string }> = {
+-  "/": { title: "bb" },
++  "/": { title: "1ma" },
+   "/settings": { title: "Settings" },
+   "/automations": { title: "Automations" },
+   "/skills": { title: "Skills" },

@@ -1,0 +1,127 @@
+name: Desktop
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "brand/**"
+      - "plugins/1ma-brand/assets/**"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "brand/**"
+      - "plugins/1ma-brand/assets/**"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish the macOS build as a 1ma Desktop pre-release"
+        type: boolean
+        default: false
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BB_DESKTOP_RELEASE_CHANNEL: latest
+  CSC_IDENTITY_AUTO_DISCOVERY: "false"
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  patches:
+    name: 1ma patches apply to the pinned bb release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - run: node desktop/scripts/prepare.mjs --out "$RUNNER_TEMP/bb"
+
+  macos:
+    name: macOS arm64 app (unsigned)
+    needs: patches
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: bb-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Prepare bb with the 1ma patches and assets
+        working-directory: ${{ github.workspace }}
+        run: node desktop/scripts/prepare.mjs --out bb-src
+      - name: Verify arm64 runner
+        run: test "$(uname -m)" = "arm64"
+      - name: Enable the pnpm version bb pins
+        run: |
+          corepack enable
+          pnpm --version
+          echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.PNPM_STORE }}
+          key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/upstream.json') }}
+          restore-keys: pnpm-store-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+      - name: Typecheck desktop, launcher and config
+        run: pnpm exec turbo run typecheck --filter=@bb/desktop --filter=bb-app --filter=@bb/config --output-logs=new-only
+      - name: Build desktop
+        run: pnpm exec turbo run build --filter=@bb/desktop --output-logs=new-only
+      - name: Install Electron before parallel tests
+        run: ELECTRON_RUN_AS_NODE=1 pnpm --filter @bb/desktop exec electron --version
+      - name: Test desktop, launcher and config
+        run: pnpm exec turbo run test --filter=@bb/desktop --filter=bb-app --filter=@bb/config --force --output-logs=new-only
+      - name: Package the macOS app
+        run: pnpm exec turbo run desktop:build --filter=@bb/desktop --force --output-logs=new-only
+      - name: Smoke test the packaged app
+        run: pnpm exec turbo run smoke:packaged --filter=@bb/desktop --force --output-logs=new-only
+      - name: Generate the version feed
+        run: pnpm --dir apps/desktop run desktop:version-feed
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 1ma-desktop-macos-arm64
+          path: |
+            bb-src/apps/desktop/release/*.dmg
+            bb-src/apps/desktop/release/*.zip
+            bb-src/apps/desktop/release/latest-mac.yml
+            bb-src/apps/desktop/release/desktop-version.json
+            bb-src/1ma-provenance.json
+          if-no-files-found: error
+
+  release:
+    name: Publish a 1ma Desktop pre-release
+    needs: macos
+    if: github.event_name == 'workflow_dispatch' && inputs.release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: 1ma-desktop-macos-arm64
+          path: dist
+      - name: Create or update the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p "require('./dist/desktop-version.json').version ?? ''" 2>/dev/null || true)
+          tag="desktop/v${version:-0.0.0}-1ma.${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" --prerelease --target "$GITHUB_SHA" \
+            --title "1ma Desktop ${version} (build ${GITHUB_RUN_NUMBER})" \
+            --notes "Unsigned macOS build of 1ma Desktop on bb $(node -p "require('./desktop/upstream.json').tag"). First launch: open the app once, then System Settings > Privacy & Security > Open Anyway." \
+            dist/*.dmg dist/*.zip

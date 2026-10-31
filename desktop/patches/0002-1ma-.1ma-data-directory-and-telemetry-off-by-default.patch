@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Sat, 31 Oct 2026 12:07:07 +0100
+Subject: [PATCH 2/5] 1ma: ~/.1ma data directory and telemetry off by default
+
+1ma keeps its server data in ~/.1ma so it can sit next to an existing bb
+install without sharing a database, and it sends no usage telemetry unless
+the user sets BB_TELEMETRY=true. Tests follow the new defaults.
+---
+ apps/desktop/src/main.ts            | 2 +-
+ packages/bb-app/test/index.test.ts  | 6 +++---
+ packages/config/src/env-vars.ts     | 2 +-
+ packages/config/src/runtime.ts      | 2 +-
+ packages/config/test/config.test.ts | 4 ++--
+ 5 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 27863ca..a8dced8 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -662,7 +662,7 @@ const desktopLogger = createDesktopLogger({ logDir: formatLogDirectory() });
+ function resolveDataDirFromEnv(args: ResolveDataDirFromEnvArgs): string {
+   const rawDataDir = args.env.BB_DATA_DIR?.trim();
+   if (rawDataDir === undefined || rawDataDir.length === 0) {
+-    return join(args.homeDir, ".bb");
++    return join(args.homeDir, ".1ma");
+   }
+   if (rawDataDir === "~") {
+     return args.homeDir;
+diff --git a/packages/bb-app/test/index.test.ts b/packages/bb-app/test/index.test.ts
+index 33a3aff..9bd812a 100644
+--- a/packages/bb-app/test/index.test.ts
++++ b/packages/bb-app/test/index.test.ts
+@@ -575,9 +575,9 @@ describe("bb-app launcher", () => {
+       homeDir: "/home/tester",
+     });
+ 
+-    expect(context.dataDir).toBe(join("/home/tester", ".bb"));
+-    expect(context.configFile).toBe(join("/home/tester", ".bb", "config.json"));
+-    expect(context.envFile).toBe(join("/home/tester", ".bb", "env.json"));
++    expect(context.dataDir).toBe(join("/home/tester", ".1ma"));
++    expect(context.configFile).toBe(join("/home/tester", ".1ma", "config.json"));
++    expect(context.envFile).toBe(join("/home/tester", ".1ma", "env.json"));
+     expect(context.serverPort).toBe(38886);
+     expect(context.daemonPort).toBe(38887);
+     expect(context.serverUrl).toBe("http://127.0.0.1:38886");
+diff --git a/packages/config/src/env-vars.ts b/packages/config/src/env-vars.ts
+index 7a9b183..cb0f4da 100644
+--- a/packages/config/src/env-vars.ts
++++ b/packages/config/src/env-vars.ts
+@@ -423,7 +423,7 @@ export const DEFAULT_BB_SERVER_BIND_HOST: ServerBindHost = BB_LOOPBACK_HOST;
+ export const DEFAULT_BB_EXTERNAL_URL = "";
+ export const DEFAULT_BB_POSTHOG_API_KEY =
+   "phc_tejoYoNLV6vG8QAd5eYXXvcsENFYnP4brpZDGqG7zvpy";
+-export const DEFAULT_BB_TELEMETRY = true;
++export const DEFAULT_BB_TELEMETRY = false;
+ export const DEFAULT_BB_DEV_APP_HOST = "";
+ export const DEFAULT_BB_MARKETPLACE_URL =
+   "https://getbb.app/marketplace/v2/marketplace.json";
+diff --git a/packages/config/src/runtime.ts b/packages/config/src/runtime.ts
+index 84faefb..fdae9ce 100644
+--- a/packages/config/src/runtime.ts
++++ b/packages/config/src/runtime.ts
+@@ -78,7 +78,7 @@ interface ResolvePortFromEnvArgs {
+   name: string;
+ }
+ 
+-const BB_PROD_DATA_DIR_NAME = ".bb";
++const BB_PROD_DATA_DIR_NAME = ".1ma";
+ const BB_DEV_DATA_ROOT_DIR = ".bb-dev";
+ export const BB_PROD_SERVER_PORT = 38886;
+ export const BB_PROD_HOST_DAEMON_PORT = 38887;
+diff --git a/packages/config/test/config.test.ts b/packages/config/test/config.test.ts
+index f12b574..a0c23a7 100644
+--- a/packages/config/test/config.test.ts
++++ b/packages/config/test/config.test.ts
+@@ -159,7 +159,7 @@ describe("data-dir helpers", () => {
+   it("expands a bare home-directory override", () => {
+     expect(
+       resolveConfiguredDataDir({
+-        defaultDataDir: path.join(os.homedir(), ".bb"),
++        defaultDataDir: path.join(os.homedir(), ".1ma"),
+         env: {
+           BB_DATA_DIR: "~",
+         },
+@@ -171,7 +171,7 @@ describe("data-dir helpers", () => {
+   it("rejects whitespace-only data dir overrides", () => {
+     expect(() =>
+       resolveConfiguredDataDir({
+-        defaultDataDir: path.join(os.homedir(), ".bb"),
++        defaultDataDir: path.join(os.homedir(), ".1ma"),
+         env: {
+           BB_DATA_DIR: " ",
+         },
