@@ -11,6 +11,16 @@ const LINK = /getbb\.app|github\.com\/get-bb/iu;
 const SOURCE = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 const TEST_PATH =
   /(?:\.test\.|\.spec\.|\.stories\.|\/test\/|\/tests\/|\/__tests__\/|\/\.ladle\/|^tests\/)/;
+const CODE_KEYWORDS = new Set([
+  "const",
+  "var",
+  "return",
+  "typeof",
+  "await",
+  "yield",
+  "instanceof",
+  "void",
+]);
 const VISIBLE_ATTRIBUTES = new Set([
   "title",
   "label",
@@ -56,6 +66,14 @@ export function decideOccurrence(text, index, rules) {
   if (previous === "(" && next === ",") return "identifier";
   if (next === ")" && /^\)\s*=>/.test(text.slice(end))) return "identifier";
   if (/["'`]/.test(previous) && next === previous) return "identifier";
+  if (next === "(" || next === "[") return "identifier";
+  const rest = text.slice(end);
+  if (/^\s*(?:===?|!==?|&&|\|\||\?\?|=>|[+\-*/%]=|\?\.|=(?!=))/.test(rest)) return "identifier";
+  if (/^\s*(?:>=|<=|[<>^~])\s*\d/.test(rest)) return "identifier";
+  const head = text.slice(0, index);
+  if (/(?:===?\s*|!==?\s*|(?<![=!<>])=\s*|&&\s*|\|\|\s*|!)$/.test(head)) return "identifier";
+  const keyword = /([A-Za-z_$][\w$]*)\s+$/.exec(head)?.[1];
+  if (keyword && CODE_KEYWORDS.has(keyword)) return "identifier";
   if (next === "/") return "identifier";
   if (next === ":" && text[end + 1] !== undefined && !/\s/.test(text[end + 1])) return "identifier";
   if (next === "." && /\p{L}/u.test(text[end + 1] ?? "")) return "identifier";
@@ -188,7 +206,7 @@ function contextOf(node) {
   return { kind: "value" };
 }
 
-function literalEdits(file, text, rules, record) {
+function literalEdits(file, text, rules, record, decide) {
   const kind = /\.[jt]sx$/.test(file) ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
   const edits = [];
@@ -217,7 +235,7 @@ function literalEdits(file, text, rules, record) {
     if (cooked !== null && /bb/i.test(cooked)) {
       const context = contextOf(node);
       if (context.kind !== "module" && context.kind !== "key") {
-        const { result, decisions } = rebrandString(cooked, context, rules);
+        const { result, decisions } = decide(cooked, context);
         record(file, cooked, result, decisions);
         if (result !== cooked) {
           if (decisions.some((decision) => decision.kind === "override")) {
@@ -246,6 +264,30 @@ function literalEdits(file, text, rules, record) {
   };
   visit(source);
   return edits;
+}
+
+// Tests follow the source: a test literal changes only where it holds a source
+// string the rules changed, so test inputs, command lines and patterns that the
+// tests build themselves keep bb's wording.
+export function propagateToTest(text, changes) {
+  const exact = changes.get(text);
+  if (exact) return exact;
+  const decisions = [];
+  const claimed = [];
+  for (const [original, change] of changes.longest) {
+    if (original.length < 12 || !change.offsets) continue;
+    for (let at = text.indexOf(original); at !== -1; at = text.indexOf(original, at + 1)) {
+      if (claimed.some(([start, stop]) => at < stop && start < at + original.length)) continue;
+      claimed.push([at, at + original.length]);
+      for (const offset of change.offsets) decisions.push({ index: at + offset, kind: "product" });
+    }
+  }
+  if (decisions.length === 0) return { result: text, decisions: [] };
+  decisions.sort((a, b) => a.index - b.index);
+  let result = text;
+  for (const decision of decisions.toReversed())
+    result = result.slice(0, decision.index) + "\u0000" + result.slice(decision.index + 2);
+  return { result: result.replaceAll("\u0000", changes.replacement), decisions };
 }
 
 function markdownEdits(file, text, rules, record) {
@@ -420,10 +462,16 @@ export function walk(root, relative, skip, out) {
 
 function kindOf(file) {
   if (SOURCE.test(file)) return "source";
-  if (file.endsWith("/PLUGIN_OVERVIEW.md") || /\/skills\/.+\.md$/.test(file)) return "markdown";
-  if (/^packages\/templates\/src\/templates\/.+\.md$/.test(file)) return "markdown";
+  if (file.endsWith("/PLUGIN_OVERVIEW.md")) return "markdown";
   if (/^plugins\/[^/]+\/package\.json$/.test(file)) return "manifest";
   return null;
+}
+
+export function excluded(file, rules) {
+  return (
+    rules.exclude.some((prefix) => file.startsWith(prefix)) ||
+    rules.excludeSegments.some((segment) => file.includes(segment))
+  );
 }
 
 export function rebrandTree(root, rules, { write = false } = {}) {
@@ -458,25 +506,59 @@ export function rebrandTree(root, rules, { write = false } = {}) {
     sources.add(file);
     inventory.set(key, sources);
   };
-  for (const file of files.toSorted()) {
-    const kind = kindOf(file);
-    if (!kind) continue;
-    const full = path.join(root, file);
-    const text = readFileSync(full, "utf8");
-    if (!/bb/i.test(text)) continue;
-    const edits =
-      kind === "source"
-        ? literalEdits(file, text, rules, record)
-        : kind === "markdown"
-          ? markdownEdits(file, text, rules, record)
-          : manifestEdits(file, text, rules, record);
-    if (edits.length === 0) continue;
+  const changes = new Map();
+  const remember = (text, result, decisions) => {
+    if (result === text || changes.has(text)) return;
+    const whole = decisions.some((decision) => decision.kind === "override");
+    const offsets = whole
+      ? null
+      : decisions
+          .filter((decision) => decision.kind === "product")
+          .map((decision) => decision.index);
+    changes.set(text, {
+      result,
+      decisions: whole ? decisions : decisions.filter((d) => d.kind === "product"),
+      offsets,
+    });
+  };
+  const rewrite = (file, edits, text) => {
+    if (edits.length === 0) return;
     let next = text;
     for (const edit of edits.toSorted((a, b) => b.start - a.start)) {
       next = next.slice(0, edit.start) + edit.text + next.slice(edit.end);
     }
     changed.push(file);
-    if (write) writeFileSync(full, next);
+    if (write) writeFileSync(path.join(root, file), next);
+  };
+  const inScope = files.toSorted().filter((file) => kindOf(file) && !excluded(file, rules));
+  for (const file of inScope.filter((name) => !TEST_PATH.test(name))) {
+    const text = readFileSync(path.join(root, file), "utf8");
+    if (!/bb/i.test(text)) continue;
+    const kind = kindOf(file);
+    const remembering = (name, cooked, result, decisions) => {
+      record(name, cooked, result, decisions);
+      remember(cooked, result, decisions);
+    };
+    const edits =
+      kind === "source"
+        ? literalEdits(file, text, rules, remembering, (cooked, context) =>
+            rebrandString(cooked, context, rules),
+          )
+        : kind === "markdown"
+          ? markdownEdits(file, text, rules, record)
+          : manifestEdits(file, text, rules, record);
+    rewrite(file, edits, text);
+  }
+  changes.longest = [...changes.entries()].toSorted(([a], [b]) => b.length - a.length);
+  changes.replacement = rules.replacement;
+  for (const file of inScope.filter((name) => TEST_PATH.test(name) && SOURCE.test(name))) {
+    const text = readFileSync(path.join(root, file), "utf8");
+    if (!/bb/i.test(text)) continue;
+    rewrite(
+      file,
+      literalEdits(file, text, rules, record, (cooked) => propagateToTest(cooked, changes)),
+      text,
+    );
   }
   return { inventory, changed, counts };
 }

@@ -38,11 +38,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: shards
+        name: Plan the shards with bb's own CI planner at the pinned commit
         run: |
           set -euo pipefail
           commit=$(node -p "require('./desktop/upstream.json').commit")
-          curl -fsSL --retry 3 "https://raw.githubusercontent.com/get-bb/bb/${commit}/scripts/ci-test-shards.json" -o "$RUNNER_TEMP/shards.json"
-          echo "tests=$(node -e 'const s = require(process.argv[1]); process.stdout.write(JSON.stringify({ include: s.tests }))' "$RUNNER_TEMP/shards.json")" >> "$GITHUB_OUTPUT"
+          planner="$RUNNER_TEMP/bb-plan"
+          mkdir -p "$planner/scripts"
+          for file in plan-ci.mjs ci-test-shards.json; do
+            curl -fsSL --retry 3 "https://raw.githubusercontent.com/get-bb/bb/${commit}/scripts/${file}" -o "$planner/scripts/${file}"
+          done
+          (cd "$planner" && node scripts/plan-ci.mjs --full) > "$RUNNER_TEMP/selection.json"
+          echo "tests=$(node -e 'process.stdout.write(JSON.stringify(require(process.argv[1]).tests))' "$RUNNER_TEMP/selection.json")" >> "$GITHUB_OUTPUT"
 
   tests:
     name: bb tests (${{ matrix.shard }})
@@ -73,16 +79,21 @@ jobs:
         env:
           APP_SHARD: ${{ startsWith(matrix.shard, 'app-') }}
           DEMO_ONLY: ${{ matrix.filter == '--filter=@bb/demo-server' }}
+          MOBILE_TESTS: ${{ matrix.mobile }}
         run: |
           filters=()
           if [[ "$APP_SHARD" == "true" ]]; then
             filters=(--ignore-scripts --filter bb --filter '@bb/app...' --filter '@bb/db...')
           elif [[ "$DEMO_ONLY" == "true" ]]; then
             filters=(--ignore-scripts --filter bb --filter '@bb/demo-server...' --filter '@bb/db...')
-          else
+          elif [[ "$MOBILE_TESTS" != "true" ]]; then
             filters=(--filter '!@bb/mobile')
           fi
           bash .github/actions/setup-workspace/install-dependencies.sh "${filters[@]}"
+      - name: Regenerate the PWA icon variants from the 1ma icons, as bb's app build does
+        if: startsWith(matrix.shard, 'app-')
+        working-directory: ${{ runner.temp }}/bb-src
+        run: pnpm --filter @bb/app run generate:pwa-icons
       - name: Set up Bun
         if: startsWith(matrix.shard, 'packages-') || startsWith(matrix.shard, 'plugins-')
         uses: oven-sh/setup-bun@v2

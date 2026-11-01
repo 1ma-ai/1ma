@@ -115,6 +115,23 @@ describe("bb cloud services and identifiers stay", () => {
     assert.equal(prose("(async (bb) => { install(bb, x) })"), "(async (bb) => { install(bb, x) })");
   });
 
+  test("code inside strings and engine version ranges stay", () => {
+    assert.equal(
+      prose("bb === null ? missingPageValue.read : 1"),
+      "bb === null ? missingPageValue.read : 1",
+    );
+    assert.equal(
+      prose("const bb = window.bridge; return bb;"),
+      "const bb = window.bridge; return bb;",
+    );
+    assert.equal(prose("ready = bb && bb.ready"), "ready = bb && bb.ready");
+    assert.equal(prose('plugin "x" requires bb >=99.0.0'), 'plugin "x" requires bb >=99.0.0');
+    assert.equal(prose("Done! bb will restart now"), "Done! 1ma will restart now");
+    assert.equal(prose("let bb run it while you rest"), "let 1ma run it while you rest");
+    assert.equal(prose("Create a new bb skill that"), "Create a new 1ma skill that");
+    assert.equal(prose("const bb = new BBSdk({ baseUrl })"), "const bb = new BBSdk({ baseUrl })");
+  });
+
   test("a single word outside visible labels is an identifier", () => {
     assert.equal(rebrandString("bb", { kind: "value" }, rules).result, "bb");
     assert.equal(rebrandString("bb", { kind: "jsx-attribute", name: "alt" }, rules).result, "1ma");
@@ -154,6 +171,17 @@ describe("rebrandTree edits only string contents", () => {
     `${JSON.stringify({ name: "bb-plugin-demo", description: "Run bb threads.", bb: { name: "Demo", description: "Run bb threads." } }, null, 2)}\n`,
   );
   write("apps/web/src/site.ts", 'export const site = "Welcome to bb today";\n');
+  write(
+    "apps/app/src/view.test.tsx",
+    [
+      'expect(screen.getByText("Reload bb now")).toBeTruthy();',
+      'expect(log).toContain("first, then Reload bb now please");',
+      "const input = \"bb thread message thr_x 'Reload bb'\";",
+      "",
+    ].join("\n"),
+  );
+  write("apps/cli/src/help.ts", 'export const help = "Restart bb when done";\n');
+  write("plugins/demo/skills/demo/SKILL.md", "Use bb carefully.\n");
 
   const result = rebrandTree(root, rules, { write: true });
 
@@ -172,6 +200,24 @@ describe("rebrandTree edits only string contents", () => {
     const manifest = JSON.parse(readFileSync(path.join(root, "plugins/demo/package.json"), "utf8"));
     assert.equal(manifest.bb.description, "Run 1ma threads.");
     assert.equal(manifest.description, "Run bb threads.");
+  });
+
+  test("tests follow the source strings and keep their own inputs", () => {
+    const spec = readFileSync(path.join(root, "apps/app/src/view.test.tsx"), "utf8");
+    assert.match(spec, /getByText\("Reload 1ma now"\)/);
+    assert.match(spec, /toContain\("first, then Reload 1ma now please"\)/);
+    assert.match(spec, /"bb thread message thr_x 'Reload bb'"/);
+  });
+
+  test("the CLI, skills and other later phases stay untouched", () => {
+    assert.match(
+      readFileSync(path.join(root, "apps/cli/src/help.ts"), "utf8"),
+      /Restart bb when done/,
+    );
+    assert.equal(
+      readFileSync(path.join(root, "plugins/demo/skills/demo/SKILL.md"), "utf8"),
+      "Use bb carefully.\n",
+    );
   });
 
   test("code that bb does not ship is rewritten but left out of the inventory", () => {
