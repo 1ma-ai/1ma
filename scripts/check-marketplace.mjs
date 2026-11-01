@@ -2,20 +2,12 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { pluginId as pluginIdFromPackageName } from "./lib/plugin-id.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 async function readJson(relativePath) {
   return JSON.parse(await readFile(path.join(root, relativePath), "utf8"));
-}
-
-function pluginIdFromPackageName(name) {
-  const last = name.split("/").pop() ?? name;
-  const stripped = last.startsWith("bb-plugin-") ? last.slice("bb-plugin-".length) : last;
-  return stripped
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
 }
 
 const errors = [];

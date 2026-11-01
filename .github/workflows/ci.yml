@@ -20,6 +20,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -32,6 +34,7 @@ jobs:
       - run: pnpm run format:check
       - run: pnpm run typecheck
       - run: pnpm run test
+      - run: pnpm run test:scripts
       - name: Build every plugin with the pinned bb
         run: pnpm run build
       - name: Install and build every plugin the way bb installs it from git
@@ -45,6 +48,8 @@ jobs:
       ACTIONLINT_VERSION: 1.7.12
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Lint workflow files with actionlint
         env:
           GH_TOKEN: ${{ github.token }}
@@ -64,6 +69,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:

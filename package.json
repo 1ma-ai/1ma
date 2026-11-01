@@ -13,10 +13,11 @@
     "format:check": "oxfmt --check",
     "build": "pnpm -r --workspace-concurrency=1 run build",
     "check:marketplace": "node scripts/check-marketplace.mjs",
-    "check": "pnpm run check:marketplace && pnpm run check:brand && pnpm run lint && pnpm run format:check && pnpm run typecheck && pnpm run test",
+    "check": "pnpm run check:marketplace && pnpm run check:brand && pnpm run lint && pnpm run format:check && pnpm run typecheck && pnpm run test && pnpm run test:scripts",
     "check:git-install": "node scripts/check-git-install.mjs",
     "check:brand": "python3 -I scripts/brand/make-icons.py --check",
-    "release:linux": "node scripts/release-linux.mjs"
+    "release:linux": "node scripts/release-linux.mjs",
+    "test:scripts": "node --test scripts/lib/*.test.mjs"
   },
   "devDependencies": {
     "bb-app": "0.48.1",
