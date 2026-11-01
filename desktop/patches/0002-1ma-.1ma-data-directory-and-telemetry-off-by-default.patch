@@ -13,17 +13,17 @@ its bridge sessions in ~/.1ma. Tests follow the new defaults.
  .../src/commands/machine-enrollment.test.ts   |  2 +-
  apps/cli/src/commands/machine-enrollment.ts   |  2 +-
  apps/desktop/src/main.ts                      |  2 +-
- .../src/server-move/service.test.ts           | 26 +++++++++----------
+ .../src/server-move/service.test.ts           | 30 +++++++++----------
  apps/host-daemon/src/server-move/service.ts   |  2 +-
- packages/bb-app/test/index.test.ts            |  6 ++---
+ packages/bb-app/test/index.test.ts            |  6 ++--
  packages/config/src/env-vars.ts               |  2 +-
  packages/config/src/runtime.ts                |  2 +-
- packages/config/test/config.test.ts           |  6 ++---
+ packages/config/test/config.test.ts           |  6 ++--
  packages/scripts/test/reset-bb-data.test.ts   |  2 +-
- packages/scripts/test/run-dev.test.ts         | 12 ++++-----
+ packages/scripts/test/run-dev.test.ts         | 12 ++++----
  packages/scripts/test/run-host-daemon.test.ts |  2 +-
  .../provider-pi/src/bridge/session-paths.ts   |  2 +-
- 13 files changed, 34 insertions(+), 34 deletions(-)
+ 13 files changed, 36 insertions(+), 36 deletions(-)
 
 diff --git a/apps/cli/src/commands/machine-enrollment.test.ts b/apps/cli/src/commands/machine-enrollment.test.ts
 index 6f5ec80..469c988 100644
@@ -65,7 +65,7 @@ index 27863ca..a8dced8 100644
    if (rawDataDir === "~") {
      return args.homeDir;
 diff --git a/apps/host-daemon/src/server-move/service.test.ts b/apps/host-daemon/src/server-move/service.test.ts
-index 7433389..8f1a6f4 100644
+index 7433389..382d481 100644
 --- a/apps/host-daemon/src/server-move/service.test.ts
 +++ b/apps/host-daemon/src/server-move/service.test.ts
 @@ -189,7 +189,7 @@ describe("ServerMoveService.prepare", () => {
@@ -77,7 +77,7 @@ index 7433389..8f1a6f4 100644
        "standalone server",
      );
      const command = await prepareCommand(fixture, {
-@@ -197,7 +197,7 @@ describe("ServerMoveService.prepare", () => {
+@@ -197,10 +197,10 @@ describe("ServerMoveService.prepare", () => {
      });
  
      const result = await fixture.service.prepare(command);
@@ -85,7 +85,11 @@ index 7433389..8f1a6f4 100644
 +    expect(await exists(join(fixture.homeDir, ".1ma"))).toBe(false);
      expect(
        (await readdir(fixture.homeDir)).some((name) =>
-         name.startsWith(".bb.before-move-"),
+-        name.startsWith(".bb.before-move-"),
++        name.startsWith(".1ma.before-move-"),
+       ),
+     ).toBe(true);
+ 
 @@ -223,7 +223,7 @@ describe("ServerMoveService.prepare", () => {
      expect(await exists(join(fixture.dataDir, "server-move-incoming"))).toBe(
        false,
@@ -154,6 +158,15 @@ index 7433389..8f1a6f4 100644
  
      const result = await fixture.service.inspect({
        type: "server_move.inspect",
+@@ -716,7 +716,7 @@ describe("ServerMoveService own data dir guards", () => {
+     );
+     expect(
+       (await readdir(fixture.homeDir)).filter((name) =>
+-        name.startsWith(".bb.before-move-"),
++        name.startsWith(".1ma.before-move-"),
+       ),
+     ).toEqual([]);
+     expect(await readFile(join(fixture.dataDir, "bb.db"), "utf8")).toBe(
 @@ -807,7 +807,7 @@ describe("ServerMoveService.inspect and probe", () => {
      const fixture = await createFixture({
        env: { BB_SERVER_MOVE_SERVICE_MANAGER: "none", BB_APP_VERSION: "1.2.3" },
