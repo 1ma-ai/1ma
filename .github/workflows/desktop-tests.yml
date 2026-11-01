@@ -115,7 +115,7 @@ jobs:
         env:
           BB_CI_TEST_SHARD: ${{ matrix.vitestShard }}
           VITEST_MAX_WORKERS: ${{ (startsWith(matrix.shard, 'server-') || matrix.shard == 'integration') && '4' || '2' }}
-        run: ${{ contains(matrix.filter, '--filter=@bb/desktop') && 'xvfb-run -a' || '' }} pnpm exec turbo run test ${{ matrix.filter }} --output-logs=new-only --concurrency=4
+        run: ${{ contains(matrix.filter, '--filter=@bb/desktop') && 'xvfb-run -a' || '' }} pnpm exec turbo run test ${{ matrix.filter }} --continue --output-logs=new-only --concurrency=4
       - name: Test native browser address interactions
         if: contains(matrix.filter, '--filter=@bb/desktop')
         working-directory: ${{ runner.temp }}/bb-src

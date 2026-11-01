@@ -115,7 +115,7 @@ describe("bb cloud services and identifiers stay", () => {
     assert.equal(prose("(async (bb) => { install(bb, x) })"), "(async (bb) => { install(bb, x) })");
   });
 
-  test("code inside strings and engine version ranges stay", () => {
+  test("code inside strings stays", () => {
     assert.equal(
       prose("bb === null ? missingPageValue.read : 1"),
       "bb === null ? missingPageValue.read : 1",
@@ -125,7 +125,7 @@ describe("bb cloud services and identifiers stay", () => {
       "const bb = window.bridge; return bb;",
     );
     assert.equal(prose("ready = bb && bb.ready"), "ready = bb && bb.ready");
-    assert.equal(prose('plugin "x" requires bb >=99.0.0'), 'plugin "x" requires bb >=99.0.0');
+    assert.equal(prose('plugin "x" requires bb >=99.0.0'), 'plugin "x" requires 1ma >=99.0.0');
     assert.equal(prose("Done! bb will restart now"), "Done! 1ma will restart now");
     assert.equal(prose("let bb run it while you rest"), "let 1ma run it while you rest");
     assert.equal(prose("Create a new bb skill that"), "Create a new 1ma skill that");
@@ -233,6 +233,7 @@ describe("rebrandTree edits only string contents", () => {
           reason: "test",
         },
       ],
+      testKeep: [],
     },
     { write: true },
   );
@@ -295,5 +296,160 @@ describe("rebrandTree edits only string contents", () => {
     const { added, removed } = diffInventory(text, text.replace("Reload 1ma now", "Reload bb now"));
     assert.equal(added.length, 1);
     assert.equal(removed.length, 1);
+  });
+});
+
+const manifest = (name, dependencies = {}) =>
+  `${JSON.stringify({ name, dependencies }, null, 2)}\n`;
+
+describe("tests follow only the sources they can reach", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "rebrand-scope-"));
+  after(() => rmSync(root, { recursive: true, force: true }));
+  const write = (file, text) => {
+    mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    writeFileSync(path.join(root, file), text);
+  };
+  write(
+    "apps/app/package.json",
+    manifest("@bb/app", { "@bb/shared": "workspace:*", "bb-plugin-bb-guide": "workspace:*" }),
+  );
+  write(
+    "apps/app/src/update.tsx",
+    [
+      "export const updating = (v) => `Updating bb to ${v}`;",
+      "export const Reach = () => <h1>Could not reach this bb server</h1>;",
+      "export const requires = (r, v) => `requires bb ${r}, this is ${v}`;",
+      'export const remove = (id) => `Remove "${id}" from bb and delete its settings?`;',
+      'export const Region = () => <section aria-label="bb">x</section>;',
+      'export const official = "BB Official";',
+      'export const open = "Open bb settings.";',
+      "",
+    ].join("\n"),
+  );
+  write(
+    "apps/app/src/update.test.tsx",
+    [
+      'expect(screen.getByText("Updating bb to 1.2.0")).toBeTruthy();',
+      'expect(title).toBe("Could not reach this bb server");',
+      'expect(text).toContain("Requires bb >= 0.15.");',
+      'expect(screen.getByText(/Remove "github" from bb/)).toBeTruthy();',
+      'screen.getByRole("region", { name: "bb" });',
+      'const project = { name: "bb" };',
+      'navigate("/plugins?source=publisher%3ABB%20Official");',
+      'expect(out).toContain("bb plugin update fresh");',
+      'screen.getByRole("link", { name: "Open bb settings" });',
+      'expect(message).toBe("This bb server moved to desk.");',
+      'expect(prompt).toBe("Create a new bb plugin that ");',
+      "",
+    ].join("\n"),
+  );
+  write("packages/shared/package.json", manifest("@bb/shared"));
+  write(
+    "packages/shared/src/move.ts",
+    [
+      "export const moved = (to) => `This bb server moved to ${to}.`;",
+      "export const create = (x) => `Create a new bb plugin that ${x}`;",
+      'export const plugin = "Updates the bb plugin update notes";',
+      "",
+    ].join("\n"),
+  );
+  write("plugins/bb-guide/package.json", manifest("bb-plugin-bb-guide"));
+  write(
+    "plugins/bb-guide/src/guide.ts",
+    "export const guide = (x) => `Create a new bb plugin that ${x}`;\n",
+  );
+  write("apps/mobile/package.json", manifest("@bb/mobile"));
+  write(
+    "apps/mobile/src/reach.ts",
+    [
+      'export const reach = "Could not reach this bb server";',
+      "export const updating = (v) => `Updating bb to ${v}`;",
+      "",
+    ].join("\n"),
+  );
+  write("apps/mobile/src/reach.test.ts", 'expect(reach).toBe("Could not reach this bb server");\n');
+  write("apps/cli/package.json", manifest("@bb/cli", { "@bb/shared": "workspace:*" }));
+  write(
+    "apps/cli/src/usage.ts",
+    [
+      'export const usage = "Inspect the bb server with care";',
+      "export const create = (x) => `Create a new bb plugin that ${x}`;",
+      "",
+    ].join("\n"),
+  );
+  write(
+    "apps/cli/src/usage.test.ts",
+    [
+      'expect(label).toContain("BB Official");',
+      'expect(moved).toBe("This bb server moved to desk.");',
+      'expect(prompt).toBe("Create a new bb plugin that ");',
+      "",
+    ].join("\n"),
+  );
+  write("apps/server/package.json", manifest("@bb/server"));
+  write(
+    "apps/server/src/assets/install.sh",
+    'fail_step "Could not register the bb host-daemon launch agent $label."\n',
+  );
+  write(
+    "apps/server/src/agent.ts",
+    'export const agent = "Restart the bb host-daemon launch agent";\n',
+  );
+  write("apps/server/src/label.ts", 'export const label = "the bb host-daemon launch agent";\n');
+  write(
+    "apps/server/test/install.test.ts",
+    'expect(out).toContain("Could not register the bb host-daemon launch agent x.");\n',
+  );
+
+  rebrandTree(
+    root,
+    {
+      ...rules,
+      testReplace: [],
+      testKeep: [
+        { file: "apps/app/src/update.test.tsx", text: "Open bb settings", reason: "test" },
+      ],
+    },
+    { write: true },
+  );
+  const read = (file) => readFileSync(path.join(root, file), "utf8");
+
+  test("a test follows its package and dependencies through template values and case", () => {
+    const spec = read("apps/app/src/update.test.tsx");
+    assert.match(spec, /getByText\("Updating 1ma to 1\.2\.0"\)/);
+    assert.match(spec, /toBe\("Could not reach this 1ma server"\)/);
+    assert.match(spec, /toContain\("Requires 1ma >= 0\.15\."\)/);
+    assert.match(spec, /getByText\(\/Remove "github" from 1ma\/\)/);
+    assert.match(spec, /toBe\("This 1ma server moved to desk\."\)/);
+  });
+
+  test("single words, commands and kept phrases stay; encoded overrides follow", () => {
+    const spec = read("apps/app/src/update.test.tsx");
+    assert.match(spec, /getByRole\("region", \{ name: "bb" \}\)/);
+    assert.match(spec, /const project = \{ name: "bb" \}/);
+    assert.match(spec, /publisher%3ABuilt-in"/);
+    assert.match(spec, /toContain\("bb plugin update fresh"\)/);
+    assert.match(spec, /name: "Open bb settings"/);
+  });
+
+  test("a tie between renamed and kept sources follows the test's own kind", () => {
+    assert.match(read("apps/app/src/update.test.tsx"), /toBe\("Create a new 1ma plugin that "\)/);
+    assert.match(read("apps/cli/src/usage.test.ts"), /toBe\("Create a new bb plugin that "\)/);
+  });
+
+  test("code 1ma leaves alone keeps its tests, except for renamed dependencies", () => {
+    assert.match(read("apps/mobile/src/reach.test.ts"), /toBe\("Could not reach this bb server"\)/);
+    const cli = read("apps/cli/src/usage.test.ts");
+    assert.match(cli, /toContain\("BB Official"\)/);
+    assert.match(cli, /toBe\("This 1ma server moved to desk\."\)/);
+  });
+
+  test("scripts the rebrand leaves alone keep the tests that read their output", () => {
+    assert.match(
+      read("apps/server/test/install.test.ts"),
+      /Could not register the bb host-daemon launch agent x\./,
+    );
+    assert.match(read("apps/server/src/agent.ts"), /Restart the 1ma host-daemon launch agent/);
+    assert.match(read("apps/server/src/label.ts"), /the 1ma host-daemon launch agent/);
   });
 });

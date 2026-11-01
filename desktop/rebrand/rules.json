@@ -276,6 +276,18 @@
     {
       "text": "bb exited with",
       "reason": "names the bb CLI process, which keeps its name until phase 3"
+    },
+    {
+      "text": "bb is already on your PATH",
+      "reason": "names the bb command on PATH, which keeps its name until the CLI is renamed (phase 3)"
+    },
+    {
+      "text": "Another bb at ",
+      "reason": "names the bb command on PATH, which keeps its name until the CLI is renamed (phase 3)"
+    },
+    {
+      "text": "to use bb outside",
+      "reason": "names the bb command on PATH, which keeps its name until the CLI is renamed (phase 3)"
     }
   ],
   "replace": [
@@ -296,6 +308,25 @@
       "find": "/^BB/u",
       "replace": "/^Built-in/u",
       "reason": "the author page heading of built-in plugins reads Built-in; a two-letter pattern is too short to follow the source automatically"
+    },
+    {
+      "file": "plugins/automations/src/composer.test.ts",
+      "find": "label: \"spec\", from: 36, to: 41 }",
+      "replace": "label: \"spec\", from: 37, to: 42 }",
+      "reason": "the mention offsets count the characters of the renamed prompt prefix, which is one character longer"
+    },
+    {
+      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
+      "find": "getByRole(\"region\", { name: \"bb\" })",
+      "replace": "getByRole(\"region\", { name: \"1ma\" })",
+      "reason": "the updates card for the app itself is labelled with the product name; single words in tests are data elsewhere (project names, provider filters) and never follow automatically"
+    }
+  ],
+  "testKeep": [
+    {
+      "file": "apps/app/src/components/settings/ProjectsSettingsSection.test.tsx",
+      "text": "Open bb settings",
+      "reason": "the project in this test is named bb, and the link reads Open <project> settings"
     }
   ]
 }
