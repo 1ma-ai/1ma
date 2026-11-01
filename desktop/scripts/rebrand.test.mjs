@@ -323,6 +323,7 @@ describe("tests follow only the sources they can reach", () => {
       'export const Region = () => <section aria-label="bb">x</section>;',
       'export const official = "BB Official";',
       'export const open = "Open bb settings.";',
+      'export const start = "Ready to start using bb";',
       "",
     ].join("\n"),
   );
@@ -340,6 +341,8 @@ describe("tests follow only the sources they can reach", () => {
       'screen.getByRole("link", { name: "Open bb settings" });',
       'expect(message).toBe("This bb server moved to desk.");',
       'expect(prompt).toBe("Create a new bb plugin that ");',
+      'expect(row.textContent).toContain("Updating bb");',
+      'const pasted = "using bb\'s Plugin Guide.";',
       "",
     ].join("\n"),
   );
@@ -421,6 +424,11 @@ describe("tests follow only the sources they can reach", () => {
     assert.match(spec, /toContain\("Requires 1ma >= 0\.15\."\)/);
     assert.match(spec, /getByText\(\/Remove "github" from 1ma\/\)/);
     assert.match(spec, /toBe\("This 1ma server moved to desk\."\)/);
+    assert.match(spec, /toContain\("Updating 1ma"\)/);
+  });
+
+  test("an overlap where only the ends meet needs three words", () => {
+    assert.match(read("apps/app/src/update.test.tsx"), /"using bb's Plugin Guide\."/);
   });
 
   test("single words, commands and kept phrases stay; encoded overrides follow", () => {

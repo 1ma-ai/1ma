@@ -16,7 +16,7 @@
     "apps/cli/",
     "apps/server/src/assets/",
     "packages/templates/",
-    "plugins/bb-guide/",
+    "plugins/bb-guide/introduction.ts",
     "plugins/plugin-api-docs/",
     "plugins/plugin-api-tester/",
     "plugins/bb-account/",
@@ -25,7 +25,7 @@
     "plugins/connect-next/"
   ],
   "excludeSegments": ["/skills/"],
-  "$excludeReason": "Phase 3 renames the bb command together with the developer and agent texts that describe it (CLI, guide, plugin API docs, scaffold templates, skills, machine install scripts); phase 2 replaces the bb cloud plugins (account, AI, connect).",
+  "$excludeReason": "Phase 3 renames the bb command together with the developer and agent texts that describe it (CLI, the agent introduction of the bb guide plugin, plugin API docs, scaffold templates, skills, machine install scripts); phase 2 replaces the bb cloud plugins (account, AI, connect).",
   "cloudWords": ["account", "connect", "connect-next", "cloud", "ai"],
   "determiners": [
     "the",
@@ -320,6 +320,12 @@
       "find": "getByRole(\"region\", { name: \"bb\" })",
       "replace": "getByRole(\"region\", { name: \"1ma\" })",
       "reason": "the updates card for the app itself is labelled with the product name; single words in tests are data elsewhere (project names, provider filters) and never follow automatically"
+    },
+    {
+      "file": "plugins/bb-guide/app.test.ts",
+      "find": "label: \"spec\", from: 34, to: 39 }",
+      "replace": "label: \"spec\", from: 35, to: 40 }",
+      "reason": "the mention offsets count the characters of the renamed prompt prefix, which is one character longer"
     }
   ],
   "testKeep": [
@@ -327,6 +333,13 @@
       "file": "apps/app/src/components/settings/ProjectsSettingsSection.test.tsx",
       "text": "Open bb settings",
       "reason": "the project in this test is named bb, and the link reads Open <project> settings"
+    }
+  ],
+  "derived": [
+    {
+      "run": "packages/plugin-registry/scripts/build-registry.mjs",
+      "writes": "packages/plugin-registry/r",
+      "reason": "bb generates the plugin component registry from sources and descriptions the rebrand changes; its test and typecheck fail on a stale registry"
     }
   ]
 }

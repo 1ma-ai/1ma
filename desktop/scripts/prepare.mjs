@@ -110,7 +110,17 @@ let rebranded = null;
 if (rebrand) {
   const { REBRAND_DIR, diffInventory, formatInventory, loadRules, rebrandTree } =
     await import("./rebrand.mjs");
-  const result = rebrandTree(out, loadRules(), { write: true });
+  const rules = loadRules();
+  const result = rebrandTree(out, rules, { write: true });
+  for (const { run, writes } of rules.derived) {
+    if (!existsSync(path.join(out, run))) {
+      throw new Error(`bb no longer has ${run}; update "derived" in desktop/rebrand/rules.json`);
+    }
+    const generated = spawnSync(process.execPath, [run], { cwd: out, encoding: "utf8" });
+    if (generated.status !== 0) throw new Error(`${run} failed:\n${generated.stderr}`);
+    console.log(`regenerated ${writes} from the renamed sources`);
+  }
+  const staged = [...result.changed, ...rules.derived.map(({ writes }) => writes)];
   const inventory = formatInventory(result.inventory);
   const lockPath = path.join(REBRAND_DIR, "inventory.json");
   if (updateLock) {
@@ -126,7 +136,7 @@ if (rebrand) {
     }
   }
   if (result.changed.length > 0) {
-    git(out, ["add", "--", ...result.changed]);
+    git(out, ["add", "--", ...staged]);
     git(out, [
       "commit",
       "--quiet",

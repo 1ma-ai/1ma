@@ -610,7 +610,8 @@ export function createIndex(rules) {
 // A source text and the test string are aligned on a bb they share; the overlap
 // must read the same and, without surrounding whitespace, span two words and at
 // least 8 characters, so a test can repeat a source text, quote part of it, or cut
-// through a template value. Only sources of the test's package and its
+// through a template value. When neither string contains the other, the overlap
+// rests on where both happen to end and needs three words. Only sources of the test's package and its
 // dependencies count (scope). Explicit rules win; then the longest overlap; then,
 // for an overlap of three words or more, sources treated like the test's own
 // package (renamed or left alone); a remaining tie keeps bb. A bb the rules
@@ -677,11 +678,13 @@ export function propagate(
         let end = Math.min(haystack.length, shift + needle.length);
         if (entry.explicit && end - start !== needle.length) continue;
         if (haystack.slice(start, end) !== needle.slice(start - shift, end - shift)) continue;
+        const whole = end - start === needle.length || end - start === haystack.length;
         while (start < end && /\s/u.test(haystack[start])) start += 1;
         while (end > start && /\s/u.test(haystack[end - 1])) end -= 1;
         const overlap = haystack.slice(start, end);
         if (overlap.length < 8 || !/\S\s+\S/u.test(overlap)) continue;
         const words = wordCount(overlap);
+        if (!whole && words < 3) continue;
         for (const [offset, kind] of own) {
           const at = offset + shift;
           if (at < start || at + 2 > end) continue;
@@ -788,7 +791,7 @@ function templateEvidence(haystack, marks, parts, at) {
     if (context.length < 2) continue;
     const length = context.reduce((sum, piece) => sum + piece.length, 0);
     const words = context.reduce((sum, piece) => sum + wordCount(piece), 0);
-    if (length < 8 || words < 2) continue;
+    if (length < 8 || words < 3) continue;
     for (const [offset, kind] of own) {
       const position = offset + shift;
       if (position >= start && position + 2 <= end)

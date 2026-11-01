@@ -5,10 +5,12 @@ Subject: [PATCH] 1ma: bb cloud account, cloud AI and bb connect off by default
 
 1ma does not depend on getbb.app: the bb account, bb cloud AI and bb
 connect built-in plugins start disabled. Users can still enable them in
-Settings.
+Settings. The web marketplace lists them as off by default too, so it
+keeps matching the server registry.
 ---
  apps/server/src/services/plugins/builtin-registry.ts | 6 +++---
- 1 file changed, 3 insertions(+), 3 deletions(-)
+ apps/web/src/marketplace/bundled-marketplace.ts      | 3 +++
+ 2 files changed, 6 insertions(+), 3 deletions(-)
 
 diff --git a/apps/server/src/services/plugins/builtin-registry.ts b/apps/server/src/services/plugins/builtin-registry.ts
 index 6958dbc..e3ccd23 100644
@@ -35,3 +37,17 @@ index 6958dbc..e3ccd23 100644
    },
    {
      name: "connect-next",
+diff --git a/apps/web/src/marketplace/bundled-marketplace.ts b/apps/web/src/marketplace/bundled-marketplace.ts
+index 0a0baad..3e25822 100644
+--- a/apps/web/src/marketplace/bundled-marketplace.ts
++++ b/apps/web/src/marketplace/bundled-marketplace.ts
+@@ -31,6 +31,9 @@ export const INSTALL_ON_REQUEST_BUNDLED_PLUGINS: ReadonlySet<string> = new Set([
+ export const OFF_BY_DEFAULT_BUNDLED_PLUGINS: ReadonlySet<string> = new Set([
+   "agent-annotations",
+   "ask-user-question",
++  "bb-account",
++  "bb-ai",
++  "connect",
+   "connect-next",
+   "mcp",
+   "monaco-editor",

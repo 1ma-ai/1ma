@@ -79,6 +79,11 @@ jobs:
           args=(--out "$RUNNER_TEMP/bb-src")
           if [[ "$REBRAND" == "false" ]]; then args+=(--no-rebrand); fi
           node desktop/scripts/prepare.mjs "${args[@]}"
+      - name: Install bb's own pnpm, as bb's CI does
+        working-directory: ${{ runner.temp }}/bb-src
+        run: |
+          version="$(node --print 'require("./package.json").packageManager.replace(/^pnpm@/, "")')"
+          GITHUB_WORKSPACE="$PWD" PNPM_VERSION="$version" bash .github/actions/setup-workspace/install-pnpm.sh
       - name: Install bb dependencies for this shard
         working-directory: ${{ runner.temp }}/bb-src
         env:

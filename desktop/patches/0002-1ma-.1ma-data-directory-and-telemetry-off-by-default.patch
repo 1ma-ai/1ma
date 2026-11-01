@@ -7,12 +7,15 @@ Subject: [PATCH] 1ma: ~/.1ma data directory and telemetry off by default
 install without sharing a database, and it sends no usage telemetry unless
 the user sets BB_TELEMETRY=true. Tests follow the new defaults.
 ---
- apps/desktop/src/main.ts            | 2 +-
- packages/bb-app/test/index.test.ts  | 6 +++---
- packages/config/src/env-vars.ts     | 2 +-
- packages/config/src/runtime.ts      | 2 +-
- packages/config/test/config.test.ts | 6 +++---
- 5 files changed, 9 insertions(+), 9 deletions(-)
+ apps/desktop/src/main.ts                      |  2 +-
+ packages/bb-app/test/index.test.ts            |  6 +++---
+ packages/config/src/env-vars.ts               |  2 +-
+ packages/config/src/runtime.ts                |  2 +-
+ packages/config/test/config.test.ts           |  6 +++---
+ packages/scripts/test/reset-bb-data.test.ts   |  2 +-
+ packages/scripts/test/run-dev.test.ts         | 12 ++++++------
+ packages/scripts/test/run-host-daemon.test.ts |  2 +-
+ 8 files changed, 17 insertions(+), 17 deletions(-)
 
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
 index 27863ca..a8dced8 100644
@@ -101,3 +104,76 @@ index f12b574..d548f3b 100644
          env: {
            BB_DATA_DIR: " ",
          },
+diff --git a/packages/scripts/test/reset-bb-data.test.ts b/packages/scripts/test/reset-bb-data.test.ts
+index 731327f..273fb47 100644
+--- a/packages/scripts/test/reset-bb-data.test.ts
++++ b/packages/scripts/test/reset-bb-data.test.ts
+@@ -54,7 +54,7 @@ describe("reset-bb-data", () => {
+     const targets = resolveResetTargets(new Set(["--all"]));
+ 
+     expect(targets).toEqual([
+-      join(os.homedir(), ".bb"),
++      join(os.homedir(), ".1ma"),
+       expectedDevDataDir({
+         homeDir: os.homedir(),
+         repoRoot,
+diff --git a/packages/scripts/test/run-dev.test.ts b/packages/scripts/test/run-dev.test.ts
+index 448dee7..bfe07a5 100644
+--- a/packages/scripts/test/run-dev.test.ts
++++ b/packages/scripts/test/run-dev.test.ts
+@@ -139,7 +139,7 @@ describe("run-dev", () => {
+ 
+     const inheritedSkillsRootPaths = [
+       path.join(homeDir, ".bb-dev", "code-bb-abc123", "skills"),
+-      path.join(homeDir, ".bb", "skills"),
++      path.join(homeDir, ".1ma", "skills"),
+     ];
+     expect(resolveInheritedDevSkillsRootPaths({ homeDir, repoRoot })).toEqual(
+       inheritedSkillsRootPaths,
+@@ -151,17 +151,17 @@ describe("run-dev", () => {
+ 
+   it("dedupes inherited bb skills for prod-managed worktree dev apps", () => {
+     const homeDir = path.resolve("/Users/tester");
+-    const repoRoot = path.join(homeDir, ".bb/worktrees/env_feature/bb");
++    const repoRoot = path.join(homeDir, ".1ma/worktrees/env_feature/bb");
+     const config = resolveDevInstanceConfig({
+       homeDir,
+       repoRoot,
+     });
+ 
+     expect(resolveInheritedDevSkillsRootPaths({ homeDir, repoRoot })).toEqual([
+-      path.join(homeDir, ".bb", "skills"),
++      path.join(homeDir, ".1ma", "skills"),
+     ]);
+     expect(toDevProcessEnv({ baseEnv: {}, config })).toMatchObject({
+-      BB_INHERITED_SKILLS_ROOTS: path.join(homeDir, ".bb", "skills"),
++      BB_INHERITED_SKILLS_ROOTS: path.join(homeDir, ".1ma", "skills"),
+     });
+   });
+ 
+@@ -174,10 +174,10 @@ describe("run-dev", () => {
+     });
+ 
+     expect(resolveInheritedDevSkillsRootPaths({ homeDir, repoRoot })).toEqual([
+-      path.join(homeDir, ".bb", "skills"),
++      path.join(homeDir, ".1ma", "skills"),
+     ]);
+     expect(toDevProcessEnv({ baseEnv: {}, config })).toMatchObject({
+-      BB_INHERITED_SKILLS_ROOTS: path.join(homeDir, ".bb", "skills"),
++      BB_INHERITED_SKILLS_ROOTS: path.join(homeDir, ".1ma", "skills"),
+     });
+   });
+ 
+diff --git a/packages/scripts/test/run-host-daemon.test.ts b/packages/scripts/test/run-host-daemon.test.ts
+index 02ba6c3..9cfe702 100644
+--- a/packages/scripts/test/run-host-daemon.test.ts
++++ b/packages/scripts/test/run-host-daemon.test.ts
+@@ -66,7 +66,7 @@ describe("run-host-daemon auto join", () => {
+ 
+     const env = runHostDaemon.resolveHostDaemonRuntimeEnvironment("prod");
+ 
+-    expect(env.BB_DATA_DIR).toBe(path.join(os.homedir(), ".bb"));
++    expect(env.BB_DATA_DIR).toBe(path.join(os.homedir(), ".1ma"));
+     expect(env.NODE_ENV).toBe("production");
+   });
+ 
