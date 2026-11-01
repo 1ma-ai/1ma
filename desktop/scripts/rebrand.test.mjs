@@ -47,6 +47,18 @@ describe("product mentions", () => {
 });
 
 describe("commands keep the bb name until the CLI is renamed", () => {
+  test("the CLI keeps its name in capitals too", () => {
+    assert.equal(
+      prose("Tell agents about the BB CLI, threads, and links."),
+      "Tell agents about the BB CLI, threads, and links.",
+    );
+    assert.equal(prose("BB CLI skill"), "BB CLI skill");
+    assert.equal(
+      prose("Install the bb CLI for use outside bb."),
+      "Install the bb CLI for use outside 1ma.",
+    );
+  });
+
   test("a known subcommand, flag, placeholder or alternative follows", () => {
     assert.equal(
       prose("Cancel it with bb server move status."),
@@ -324,6 +336,8 @@ describe("tests follow only the sources they can reach", () => {
       'export const official = "BB Official";',
       'export const open = "Open bb settings.";',
       'export const start = "Ready to start using bb";',
+      'export const relaunch = "Relaunch bb to finish updating";',
+      'export const marker = "Written by bb: runs the bb command of the bb installed on this computer.";',
       "",
     ].join("\n"),
   );
@@ -342,6 +356,8 @@ describe("tests follow only the sources they can reach", () => {
       'expect(message).toBe("This bb server moved to desk.");',
       'expect(prompt).toBe("Create a new bb plugin that ");',
       'expect(row.textContent).toContain("Updating bb");',
+      'expect(screen.queryByRole("button", { name: /Copy the command|Relaunch bb|Download/ })).toBeNull();',
+      "expect(text).toMatch(/Written by bb: runs the bb command of the bb installed on this computer\\./);",
       'const pasted = "using bb\'s Plugin Guide.";',
       "",
     ].join("\n"),
@@ -453,6 +469,16 @@ describe("tests follow only the sources they can reach", () => {
     assert.match(spec, /toContain\("Updating 1ma"\)/);
   });
 
+  test("each alternative of a regular expression follows on its own", () => {
+    const spec = read("apps/app/src/update.test.tsx");
+    assert.match(spec, /name: \/Copy the command\|Relaunch 1ma\|Download\/ \}/);
+    assert.ok(
+      spec.includes(
+        "/Written by 1ma: runs the bb command of the 1ma installed on this computer\\./",
+      ),
+    );
+  });
+
   test("an overlap where only the ends meet needs three words", () => {
     assert.match(read("apps/app/src/update.test.tsx"), /"using bb's Plugin Guide\."/);
   });
@@ -485,5 +511,60 @@ describe("tests follow only the sources they can reach", () => {
     );
     assert.match(read("apps/server/src/agent.ts"), /Restart the 1ma host-daemon launch agent/);
     assert.match(read("apps/server/src/label.ts"), /the 1ma host-daemon launch agent/);
+  });
+});
+
+const tree = (files) => {
+  const root = mkdtempSync(path.join(tmpdir(), "rebrand-guard-"));
+  for (const [file, text] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    writeFileSync(path.join(root, file), text);
+  }
+  return root;
+};
+
+describe("prepare stops where a test could pass without testing anything", () => {
+  const source = {
+    "apps/app/package.json": manifest("@bb/app", { "@bb/templates": "workspace:*" }),
+    "apps/app/src/update.tsx": 'export const label = "Download the update and restart bb";\n',
+    "packages/templates/package.json": manifest("@bb/templates"),
+    "packages/templates/src/guide.ts": 'export const tip = "Restart bb when it updates";\n',
+  };
+  const negative = 'expect(alert).not.toContain("Restart bb");\n';
+  const rule = {
+    file: "apps/app/src/update.test.tsx",
+    find: 'not.toContain("Restart bb")',
+    replace: 'not.toContain("Restart 1ma")',
+    reason: "test",
+  };
+
+  test("a negative assertion that a renamed source could reach needs a reviewed rule", () => {
+    const root = tree({ ...source, "apps/app/src/update.test.tsx": negative });
+    after(() => rmSync(root, { recursive: true, force: true }));
+    assert.throws(
+      () => rebrandTree(root, { ...rules, testReplace: [], testKeep: [] }),
+      /negative assertions[\s\S]*"Restart bb"/,
+    );
+    rebrandTree(root, { ...rules, testReplace: [rule], testKeep: [] }, { write: true });
+    assert.match(
+      readFileSync(path.join(root, "apps/app/src/update.test.tsx"), "utf8"),
+      /not\.toContain\("Restart 1ma"\)/,
+    );
+  });
+
+  test("a test rule fails once its file no longer has the text", () => {
+    const root = tree({ ...source, "apps/app/src/update.test.tsx": "expect(1).toBe(1);\n" });
+    after(() => rmSync(root, { recursive: true, force: true }));
+    assert.throws(
+      () =>
+        rebrandTree(root, {
+          ...rules,
+          testReplace: [],
+          testKeep: [
+            { file: "apps/app/src/update.test.tsx", text: "Open bb settings", reason: "test" },
+          ],
+        }),
+      /testKeep "Open bb settings" no longer matches/,
+    );
   });
 });

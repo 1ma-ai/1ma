@@ -288,6 +288,14 @@
     {
       "text": "to use bb outside",
       "reason": "names the bb command on PATH, which keeps its name until the CLI is renamed (phase 3)"
+    },
+    {
+      "text": "submit a BB plugin to the Community marketplace",
+      "reason": "the Community marketplace is bb's community registry, a bb cloud service (phase 2)"
+    },
+    {
+      "text": "bb calls",
+      "reason": "calls to the bb object of the MCP code sandbox (bb.cli, bb.json), an identifier in the snippet"
     }
   ],
   "replace": [
@@ -300,6 +308,16 @@
       "text": "BB Official",
       "to": "Built-in",
       "reason": "The bb team writes the built-in plugins; 1ma labels them neutrally instead of claiming them"
+    },
+    {
+      "text": "Reloaded running bb server config.",
+      "to": "Reloaded running 1ma server config.",
+      "reason": "prose about the running server, not the bb server config command; the next message already says 1ma"
+    },
+    {
+      "text": "bb project id (proj_",
+      "to": "1ma project id (proj_",
+      "reason": "the id of a project in the app, not the bb project id command; the same plugin says 'never a 1ma project id'"
     }
   ],
   "testReplace": [
@@ -326,6 +344,12 @@
       "find": "label: \"spec\", from: 34, to: 39 }",
       "replace": "label: \"spec\", from: 35, to: 40 }",
       "reason": "the mention offsets count the characters of the renamed prompt prefix, which is one character longer"
+    },
+    {
+      "file": "apps/app/src/views/ToolsView.plugin-detail.test.tsx",
+      "find": "expect(alertText).not.toContain(\"Restart bb\");",
+      "replace": "expect(alertText).not.toContain(\"Restart 1ma\");",
+      "reason": "the degraded banner must not tell the user to restart the app; in 1ma that text would read Restart 1ma, so the old wording would make the check pass without testing anything"
     }
   ],
   "testKeep": [

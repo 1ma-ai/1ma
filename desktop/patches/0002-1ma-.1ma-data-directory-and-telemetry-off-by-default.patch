@@ -5,18 +5,52 @@ Subject: [PATCH] 1ma: ~/.1ma data directory and telemetry off by default
 
 1ma keeps its server data in ~/.1ma so it can sit next to an existing bb
 install without sharing a database, and it sends no usage telemetry unless
-the user sets BB_TELEMETRY=true. Tests follow the new defaults.
+the user sets BB_TELEMETRY=true. The places that name the default data
+directory directly follow it: a server move archives and checks ~/.1ma,
+never bb's ~/.bb; machine enrollment guards ~/.1ma; the Pi provider keeps
+its bridge sessions in ~/.1ma. Tests follow the new defaults.
 ---
+ .../src/commands/machine-enrollment.test.ts   |  2 +-
+ apps/cli/src/commands/machine-enrollment.ts   |  2 +-
  apps/desktop/src/main.ts                      |  2 +-
- packages/bb-app/test/index.test.ts            |  6 +++---
+ .../src/server-move/service.test.ts           | 26 +++++++++----------
+ apps/host-daemon/src/server-move/service.ts   |  2 +-
+ packages/bb-app/test/index.test.ts            |  6 ++---
  packages/config/src/env-vars.ts               |  2 +-
  packages/config/src/runtime.ts                |  2 +-
- packages/config/test/config.test.ts           |  6 +++---
+ packages/config/test/config.test.ts           |  6 ++---
  packages/scripts/test/reset-bb-data.test.ts   |  2 +-
- packages/scripts/test/run-dev.test.ts         | 12 ++++++------
+ packages/scripts/test/run-dev.test.ts         | 12 ++++-----
  packages/scripts/test/run-host-daemon.test.ts |  2 +-
- 8 files changed, 17 insertions(+), 17 deletions(-)
+ .../provider-pi/src/bridge/session-paths.ts   |  2 +-
+ 13 files changed, 34 insertions(+), 34 deletions(-)
 
+diff --git a/apps/cli/src/commands/machine-enrollment.test.ts b/apps/cli/src/commands/machine-enrollment.test.ts
+index 6f5ec80..469c988 100644
+--- a/apps/cli/src/commands/machine-enrollment.test.ts
++++ b/apps/cli/src/commands/machine-enrollment.test.ts
+@@ -188,7 +188,7 @@ describe("machine enroll", () => {
+ 
+   it("uses the default BB data directory only when it already holds this machine", async () => {
+     const h = await harness();
+-    const defaultDir = join(h.dir, ".bb");
++    const defaultDir = join(h.dir, ".1ma");
+     h.env.BB_DATA_DIR = defaultDir;
+     await expect(h.run()).rejects.toThrow(
+       "cannot use the default BB data directory",
+diff --git a/apps/cli/src/commands/machine-enrollment.ts b/apps/cli/src/commands/machine-enrollment.ts
+index 1b2d7b4..09a38f4 100644
+--- a/apps/cli/src/commands/machine-enrollment.ts
++++ b/apps/cli/src/commands/machine-enrollment.ts
+@@ -140,7 +140,7 @@ export async function enrollMachine(
+       ),
+   );
+   if (
+-    dataDir === resolve(home, ".bb") &&
++    dataDir === resolve(home, ".1ma") &&
+     (await readOptional(join(dataDir, "host-id")))?.trim() !== bootstrap.hostId
+   )
+     throw new Error(
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
 index 27863ca..a8dced8 100644
 --- a/apps/desktop/src/main.ts
@@ -30,6 +64,127 @@ index 27863ca..a8dced8 100644
    }
    if (rawDataDir === "~") {
      return args.homeDir;
+diff --git a/apps/host-daemon/src/server-move/service.test.ts b/apps/host-daemon/src/server-move/service.test.ts
+index 7433389..8f1a6f4 100644
+--- a/apps/host-daemon/src/server-move/service.test.ts
++++ b/apps/host-daemon/src/server-move/service.test.ts
+@@ -189,7 +189,7 @@ describe("ServerMoveService.prepare", () => {
+       JSON.stringify(originalConfig),
+     );
+     await writeFileWithDirs(
+-      join(fixture.homeDir, ".bb", "bb.db"),
++      join(fixture.homeDir, ".1ma", "bb.db"),
+       "standalone server",
+     );
+     const command = await prepareCommand(fixture, {
+@@ -197,7 +197,7 @@ describe("ServerMoveService.prepare", () => {
+     });
+ 
+     const result = await fixture.service.prepare(command);
+-    expect(await exists(join(fixture.homeDir, ".bb"))).toBe(false);
++    expect(await exists(join(fixture.homeDir, ".1ma"))).toBe(false);
+     expect(
+       (await readdir(fixture.homeDir)).some((name) =>
+         name.startsWith(".bb.before-move-"),
+@@ -223,7 +223,7 @@ describe("ServerMoveService.prepare", () => {
+     expect(await exists(join(fixture.dataDir, "server-move-incoming"))).toBe(
+       false,
+     );
+-    expect(await readFile(join(fixture.homeDir, ".bb", "bb.db"), "utf8")).toBe(
++    expect(await readFile(join(fixture.homeDir, ".1ma", "bb.db"), "utf8")).toBe(
+       "standalone server",
+     );
+     await expect(
+@@ -251,11 +251,11 @@ describe("ServerMoveService.prepare", () => {
+   it("refuses to archive ~/.bb while bb is running from it", async () => {
+     const fixture = await createFixture();
+     await writeFileWithDirs(
+-      join(fixture.homeDir, ".bb", "bb.db"),
++      join(fixture.homeDir, ".1ma", "bb.db"),
+       "standalone server",
+     );
+     await writeBbAppRuntime({
+-      dataDir: join(fixture.homeDir, ".bb"),
++      dataDir: join(fixture.homeDir, ".1ma"),
+       serverPort: 38_886,
+     });
+     const command = await prepareCommand(fixture, {
+@@ -264,10 +264,10 @@ describe("ServerMoveService.prepare", () => {
+ 
+     await expect(fixture.service.prepare(command)).rejects.toMatchObject({
+       code: "server_move_rejected",
+-      message: `bb is running from ${join(fixture.homeDir, ".bb")} on this machine (pid ${process.pid}). Quit bb there first, then start the move again.`,
++      message: `bb is running from ${join(fixture.homeDir, ".1ma")} on this machine (pid ${process.pid}). Quit bb there first, then start the move again.`,
+     });
+     expect(fixture.source.archiveRequests).toEqual([]);
+-    expect(await readFile(join(fixture.homeDir, ".bb", "bb.db"), "utf8")).toBe(
++    expect(await readFile(join(fixture.homeDir, ".1ma", "bb.db"), "utf8")).toBe(
+       "standalone server",
+     );
+ 
+@@ -281,11 +281,11 @@ describe("ServerMoveService.prepare", () => {
+       },
+     });
+     await writeFileWithDirs(
+-      join(stopped.homeDir, ".bb", "bb.db"),
++      join(stopped.homeDir, ".1ma", "bb.db"),
+       "standalone server",
+     );
+     await writeBbAppRuntime({
+-      dataDir: join(stopped.homeDir, ".bb"),
++      dataDir: join(stopped.homeDir, ".1ma"),
+       serverPort: 38_886,
+     });
+     await expect(
+@@ -293,7 +293,7 @@ describe("ServerMoveService.prepare", () => {
+         await prepareCommand(stopped, { archiveExistingServerData: true }),
+       ),
+     ).resolves.toMatchObject({ pid: expect.any(Number) });
+-    expect(await exists(join(stopped.homeDir, ".bb"))).toBe(false);
++    expect(await exists(join(stopped.homeDir, ".1ma"))).toBe(false);
+   });
+ });
+ 
+@@ -693,7 +693,7 @@ describe("ServerMoveService own data dir guards", () => {
+   it("hides ~/.bb when it is this daemon's data dir and refuses to archive it", async () => {
+     const fixture = await createFixture();
+     await writeFile(join(fixture.dataDir, "bb.db"), "old server");
+-    await symlink(fixture.dataDir, join(fixture.homeDir, ".bb"));
++    await symlink(fixture.dataDir, join(fixture.homeDir, ".1ma"));
+ 
+     const result = await fixture.service.inspect({
+       type: "server_move.inspect",
+@@ -807,7 +807,7 @@ describe("ServerMoveService.inspect and probe", () => {
+     const fixture = await createFixture({
+       env: { BB_SERVER_MOVE_SERVICE_MANAGER: "none", BB_APP_VERSION: "1.2.3" },
+     });
+-    await writeFileWithDirs(join(fixture.homeDir, ".bb", "bb.db"), "12345");
++    await writeFileWithDirs(join(fixture.homeDir, ".1ma", "bb.db"), "12345");
+     await writeFileWithDirs(join(fixture.homeDir, ".codex", "auth.json"), "{}");
+     await writeFileWithDirs(join(fixture.homeDir, "tools", "bin", "gh"), "");
+ 
+@@ -830,7 +830,7 @@ describe("ServerMoveService.inspect and probe", () => {
+       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+       bbAppVersion: "1.2.3",
+       serverEntryAvailable: true,
+-      existingServerData: { path: join(fixture.homeDir, ".bb"), sizeBytes: 5 },
++      existingServerData: { path: join(fixture.homeDir, ".1ma"), sizeBytes: 5 },
+       dataDirHasServerData: false,
+       portAvailable: true,
+       ghAuthenticated: null,
+diff --git a/apps/host-daemon/src/server-move/service.ts b/apps/host-daemon/src/server-move/service.ts
+index b19496b..d6c9e93 100644
+--- a/apps/host-daemon/src/server-move/service.ts
++++ b/apps/host-daemon/src/server-move/service.ts
+@@ -144,7 +144,7 @@ const PROGRESS_INTERVAL_MS = 1_000;
+ const BB_APP_MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+ const SERVER_DATABASE_PATHS = ["bb.db", "bb.db-wal", "bb.db-shm"] as const;
+ const HOST_ARTIFACT_DIGEST_FILE_NAME = "host-artifact.sha256";
+-const STANDALONE_DATA_DIR_NAME = ".bb";
++const STANDALONE_DATA_DIR_NAME = ".1ma";
+ const SERVER_DATABASE_FILE_NAME = "bb.db";
+ const SERVER_MOVE_LOG_FILE_NAME = "server-move.log";
+ const INSTALL_DAEMON_PID_FILE_NAME = "install-daemon.pid";
 diff --git a/packages/bb-app/test/index.test.ts b/packages/bb-app/test/index.test.ts
 index 33a3aff..9bd812a 100644
 --- a/packages/bb-app/test/index.test.ts
@@ -177,3 +332,16 @@ index 02ba6c3..9cfe702 100644
      expect(env.NODE_ENV).toBe("production");
    });
  
+diff --git a/plugins/provider-pi/src/bridge/session-paths.ts b/plugins/provider-pi/src/bridge/session-paths.ts
+index 371c0f3..7c1b646 100644
+--- a/plugins/provider-pi/src/bridge/session-paths.ts
++++ b/plugins/provider-pi/src/bridge/session-paths.ts
+@@ -19,7 +19,7 @@ export function resolvePiBridgeSessionDir(
+     return resolve(configuredSessionDir);
+   }
+ 
+-  return join(homedir(), ".bb", "pi-bridge-sessions");
++  return join(homedir(), ".1ma", "pi-bridge-sessions");
+ }
+ 
+ export function resolvePiSessionFilePath(
