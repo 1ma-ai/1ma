@@ -404,6 +404,20 @@ describe("tests follow only the sources they can reach", () => {
     'expect(out).toContain("Could not register the bb host-daemon launch agent x.");\n',
   );
 
+  write(
+    "plugins/guide/package.json",
+    `${JSON.stringify({ name: "bb-plugin-guide", bb: { name: "BB guide" } }, null, 2)}\n`,
+  );
+  write(
+    "plugins/plugin-api-docs/src/surfaces.ts",
+    'export const usedBy = ["Automations", "BB guide"];\nexport const intro = "Read the BB guide first";\n',
+  );
+  write(
+    "plugins/plugin-api-docs/src/first-party-plugins.json",
+    `${JSON.stringify([{ id: "guide", name: "BB guide" }], null, 2)}\n`,
+  );
+  write("plugins/plugin-api-docs/src/surfaces.test.ts", 'expect(usedBy).toContain("BB guide");\n');
+
   rebrandTree(
     root,
     {
@@ -416,6 +430,18 @@ describe("tests follow only the sources they can reach", () => {
     { write: true },
   );
   const read = (file) => readFileSync(path.join(root, file), "utf8");
+
+  test("a renamed plugin name follows its exact references everywhere", () => {
+    assert.match(read("plugins/guide/package.json"), /"name": "1ma guide"/);
+    const surfaces = read("plugins/plugin-api-docs/src/surfaces.ts");
+    assert.match(surfaces, /\["Automations", "1ma guide"\]/);
+    assert.match(surfaces, /"Read the BB guide first"/);
+    assert.match(
+      read("plugins/plugin-api-docs/src/first-party-plugins.json"),
+      /"name": "1ma guide"/,
+    );
+    assert.match(read("plugins/plugin-api-docs/src/surfaces.test.ts"), /toContain\("1ma guide"\)/);
+  });
 
   test("a test follows its package and dependencies through template values and case", () => {
     const spec = read("apps/app/src/update.test.tsx");

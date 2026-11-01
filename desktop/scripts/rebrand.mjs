@@ -147,7 +147,7 @@ function overrideRanges(text, rules) {
 function compose(text, decisions, replacement) {
   let result = text;
   const edits = decisions
-    .filter((decision) => decision.kind === "product" || decision.kind === "replace")
+    .filter((decision) => ["product", "replace", "name"].includes(decision.kind))
     .toSorted((a, b) => b.index - a.index);
   for (const edit of edits) {
     const length = edit.kind === "product" ? 2 : edit.length;
@@ -255,7 +255,7 @@ function editsFor(file, text, segment, decisions, replacement) {
       if (found.toLowerCase() !== "bb")
         throw new Error(`${file}: cannot map "bb" at ${at} (found ${JSON.stringify(found)})`);
       edits.push({ start: at, end: at + 2, text: replacement });
-    } else if (decision.kind === "replace") {
+    } else if (decision.kind === "replace" || decision.kind === "name") {
       const start = toRaw(decision.index);
       const end = toRaw(decision.index + decision.length);
       if (end - start !== decision.length)
@@ -450,7 +450,7 @@ function wordCount(text) {
 // Where the rules changed bb in a source text (product) and where it stays (kept).
 function marked(text, decisions) {
   const product = decisions.filter((d) => d.kind === "product").map((d) => d.index);
-  const replaced = decisions.filter((d) => d.kind === "replace");
+  const replaced = decisions.filter((d) => d.kind === "replace" || d.kind === "name");
   const kept = occurrences(text).filter(
     (offset) =>
       !product.includes(offset) &&
@@ -1080,6 +1080,7 @@ export function rebrandTree(root, rules, { write = false } = {}) {
     cloud: 0,
     identifier: 0,
     link: 0,
+    name: 0,
   };
   const record = (file, text, result, decisions) => {
     for (const decision of decisions) counts[decision.kind] += 1;
@@ -1107,6 +1108,22 @@ export function rebrandTree(root, rules, { write = false } = {}) {
   const graph = packageGraph(root, files);
   const shipped = (file) => !rules.notShipped.some((prefix) => file.startsWith(prefix));
   const sorted = files.toSorted();
+  // A renamed plugin name changes wherever a string is exactly that name, in
+  // code the rebrand otherwise leaves alone and in JSON too: those strings refer
+  // to the plugin (first-party tables, "used by" lists) and must keep matching.
+  const names = new Map();
+  for (const file of sorted.filter((name) => kindOf(name) === "manifest")) {
+    if (excluded(file, rules) || !shipped(file)) continue;
+    const value = JSON.parse(readFileSync(path.join(root, file), "utf8")).bb?.name;
+    if (typeof value !== "string") continue;
+    const { result } = rebrandString(value, { kind: "jsx-text" }, rules);
+    if (result !== value) names.set(value, result);
+  }
+  const named = (cooked) => {
+    const to = names.get(cooked);
+    if (to === undefined) return null;
+    return { result: to, decisions: [{ index: 0, length: cooked.length, kind: "name", to }] };
+  };
   for (const file of sorted.filter((name) => !TEST_PATH.test(name))) {
     const kind = kindOf(file);
     const leftAlone = excluded(file, rules) || !shipped(file);
@@ -1119,15 +1136,17 @@ export function rebrandTree(root, rules, { write = false } = {}) {
       continue;
     }
     if (leftAlone) {
-      literalEdits(file, text, {
+      const edits = literalEdits(file, text, {
         rules,
-        decide: (cooked) => ({ result: cooked, decisions: [] }),
+        record,
+        decide: (cooked) => named(cooked) ?? { result: cooked, decisions: [] },
         learn: (cooked) => {
-          if (/\s/.test(cooked.trim())) index.keep(cooked, scope);
+          if (/\s/.test(cooked.trim()) && !names.has(cooked)) index.keep(cooked, scope);
         },
         learnTemplate: (parts) => index.keepTemplate(parts, scope),
         wholeTemplates: true,
       });
+      rewrite(file, edits, text, changed);
       continue;
     }
     const edits =
@@ -1137,13 +1156,28 @@ export function rebrandTree(root, rules, { write = false } = {}) {
             record,
             learn: (cooked, decisions) => index.learn(cooked, decisions, scope),
             learnTemplate: (parts) => index.learnTemplate(parts, scope),
-            decide: (cooked, context) => rebrandString(cooked, context, rules),
+            decide: (cooked, context) => named(cooked) ?? rebrandString(cooked, context, rules),
             wholeTemplates: true,
           })
         : kind === "markdown"
           ? markdownEdits(file, text, rules, note(scope))
           : manifestEdits(file, text, rules, note(scope));
     rewrite(file, edits, text, changed);
+  }
+  for (const file of sorted.filter((name) => name.endsWith(".json"))) {
+    if (names.size === 0 || path.posix.basename(file) === "package.json") continue;
+    const text = readFileSync(path.join(root, file), "utf8");
+    let next = text;
+    for (const [from, to] of names) {
+      const needle = JSON.stringify(from);
+      if (!next.includes(needle)) continue;
+      next = next.replaceAll(needle, JSON.stringify(to));
+      if (!TEST_PATH.test(file)) record(file, from, to, [{ kind: "name" }]);
+    }
+    if (next !== text) {
+      (TEST_PATH.test(file) ? testsChanged : changed).push(file);
+      if (write) writeFileSync(path.join(root, file), next);
+    }
   }
   const testEdits = new Map(rules.testReplace.map((entry) => [entry.file, []]));
   for (const entry of rules.testReplace) testEdits.get(entry.file).push(entry);
@@ -1164,7 +1198,7 @@ export function rebrandTree(root, rules, { write = false } = {}) {
     const options = { scope, veto, keep, rebranded };
     const edits = literalEdits(file, text, {
       rules,
-      decide: (cooked) => propagate(cooked, index, options),
+      decide: (cooked) => named(cooked) ?? propagate(cooked, index, options),
       regexes: (pattern) => propagate(pattern, index, { ...options, regex: true }),
     });
     text = rewrite(file, edits, text, testsChanged);
@@ -1232,7 +1266,7 @@ function main(argv) {
     return;
   }
   console.log(
-    `rebrand ${command}: ${changed.length} files, ${counts.product} product mentions -> ${rules.replacement}, ${counts.replace} overrides; kept ${counts.command} commands, ${counts.code} code spans, ${counts.cloud} bb cloud mentions, ${counts.identifier} identifiers, ${counts.keep} kept by rule, ${counts.link} links`,
+    `rebrand ${command}: ${changed.length} files, ${counts.product} product mentions -> ${rules.replacement}, ${counts.replace} overrides, ${counts.name} plugin name references; kept ${counts.command} commands, ${counts.code} code spans, ${counts.cloud} bb cloud mentions, ${counts.identifier} identifiers, ${counts.keep} kept by rule, ${counts.link} links`,
   );
 }
 
