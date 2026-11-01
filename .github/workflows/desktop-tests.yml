@@ -3,6 +3,8 @@ name: Desktop bb tests
 # Runs bb's own test suite, in the shards bb's CI uses, on the tree 1ma Desktop
 # builds from: the pinned bb release with the 1ma patches, assets and rebrand.
 # A manual run with rebrand=false gives the baseline without the rebrand.
+# The paths cover everything the Desktop build depends on, so every build on
+# main has a test run for its commit: desktop-release.yml requires one.
 
 on:
   push:
@@ -10,11 +12,17 @@ on:
     paths:
       - "desktop/**"
       - "!desktop/**/*.md"
+      - "brand/**"
+      - "plugins/1ma-brand/assets/**"
+      - ".github/workflows/desktop.yml"
       - ".github/workflows/desktop-tests.yml"
   pull_request:
     paths:
       - "desktop/**"
       - "!desktop/**/*.md"
+      - "brand/**"
+      - "plugins/1ma-brand/assets/**"
+      - ".github/workflows/desktop.yml"
       - ".github/workflows/desktop-tests.yml"
   workflow_dispatch:
     inputs:
@@ -42,6 +50,8 @@ jobs:
       tests: ${{ steps.shards.outputs.tests }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - id: shards
         name: Plan the shards with bb's own CI planner at the pinned commit
         run: |
@@ -65,6 +75,8 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.tests) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: "22.x"

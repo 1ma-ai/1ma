@@ -96,6 +96,9 @@ for (const name of patches) {
   git(out, ["am", "--quiet", "--3way", path.join(desktop, "patches", name)]);
   console.log(`applied ${name}`);
 }
+// The patch series ends here; the asset swap and the rebrand come on top and are
+// never exported as patches.
+git(out, ["branch", "1ma-patches"]);
 
 for (const [from, to] of ASSETS) {
   const source = path.join(repo, from);
@@ -155,14 +158,16 @@ if (rebrand) {
   );
 }
 
+const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" });
+const oneMaCommit = head.status === 0 ? head.stdout.trim() : "";
+if (!/^[0-9a-f]{40}$/.test(oneMaCommit)) {
+  throw new Error(`cannot read the 1ma commit to record in the provenance: ${head.stderr}`);
+}
 const provenance = {
   upstream,
   patches,
   rebrand: rebranded,
-  oneMaCommit: spawnSync("git", ["rev-parse", "HEAD"], {
-    cwd: repo,
-    encoding: "utf8",
-  }).stdout.trim(),
+  oneMaCommit,
 };
 writeFileSync(path.join(out, "1ma-provenance.json"), `${JSON.stringify(provenance, null, 2)}\n`);
 console.log("wrote 1ma-provenance.json");

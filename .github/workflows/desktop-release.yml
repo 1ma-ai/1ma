@@ -1,11 +1,20 @@
 name: Desktop release
 
+# Publishes the macOS build of one Desktop workflow run as a pre-release. The
+# run is checked against GitHub's own records, not against files inside its
+# artifact: it must be a green Desktop build of main in this repository, and
+# bb's tests must have passed on the same commit in a push run on main.
+
 on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: "Desktop workflow run whose macOS build should be published"
+        description: "Desktop workflow run on main whose macOS build should be published"
         required: true
+      dry_run:
+        description: "Check the run and prepare the files, but publish nothing"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -17,47 +26,87 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: 1ma-desktop-macos-arm64
-          path: dist
-          run-id: ${{ inputs.run_id }}
-          github-token: ${{ github.token }}
-      - name: Create the pre-release
+      - name: Check the build run and bb's tests for its commit
+        id: build
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ inputs.run_id }}
         run: |
           set -euo pipefail
-          ls -R dist
-          version=$(node -p "require('./dist/apps/desktop/release/desktop-version.json').version")
-          upstream=$(node -p "require('./dist/1ma-provenance.json').upstream.tag")
-          commit=$(node -p "require('./dist/1ma-provenance.json').oneMaCommit")
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || fail "run_id must be a run number"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > run.json
+          field() { jq -r "$1" run.json; }
+          [[ "$(field .path)" == ".github/workflows/desktop.yml" ]] ||
+            fail "run $RUN_ID is $(field .path), not a Desktop build"
+          [[ "$(field .event)" == "push" || "$(field .event)" == "workflow_dispatch" ]] ||
+            fail "run $RUN_ID was triggered by $(field .event); only push and manual runs on main are published"
+          [[ "$(field .head_branch)" == "main" ]] || fail "run $RUN_ID built $(field .head_branch), not main"
+          [[ "$(field .head_repository.full_name)" == "$GITHUB_REPOSITORY" ]] ||
+            fail "run $RUN_ID built code from $(field .head_repository.full_name)"
+          [[ "$(field .conclusion)" == "success" ]] || fail "run $RUN_ID did not succeed"
+          commit="$(field .head_sha)"
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "run $RUN_ID has no commit"
+          gh api "repos/$GITHUB_REPOSITORY/compare/$commit...main" --jq .status > ancestry
+          [[ "$(cat ancestry)" == "ahead" || "$(cat ancestry)" == "identical" ]] ||
+            fail "$commit is not on main"
+          tests="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/desktop-tests.yml/runs?head_sha=$commit&event=push&branch=main&per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "none"')"
+          [[ "$tests" == "success" ]] ||
+            fail "the latest push run of desktop-tests.yml on main for $commit is '$tests'; bb's tests must pass on the 1ma tree before publishing"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - name: Download the build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name 1ma-desktop-macos-arm64 --dir dist
+      - name: Create the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          COMMIT: ${{ steps.build.outputs.commit }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          provenance="$(jq -r .oneMaCommit dist/1ma-provenance.json)"
+          [[ "$provenance" == "$COMMIT" ]] ||
+            fail "the artifact says it was built from '$provenance', but run $RUN_ID built $COMMIT"
+          version="$(jq -r .version dist/apps/desktop/release/desktop-version.json)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || fail "unexpected version '$version'"
+          upstream="$(jq -r .upstream.tag dist/1ma-provenance.json)"
           tag="desktop/v${version}-1ma.${RUN_ID}"
-          passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow desktop-tests.yml --commit "$commit" \
-            --json conclusion --jq '[.[] | select(.conclusion == "success")] | length')
-          if [ "$passed" = "0" ]; then
-            echo "::error::bb's tests have not passed on the 1ma tree for ${commit}; a green desktop-tests.yml run is required before publishing."
-            exit 1
-          fi
+          mkdir upload
+          for file in dist/apps/desktop/release/*.dmg dist/apps/desktop/release/*.zip; do
+            name="$(basename "$file")"
+            cp "$file" "upload/${name%.*}-${RUN_ID}.${name##*.}"
+          done
+          (cd upload && sha256sum -- * > SHA256SUMS)
           cat > notes.md <<NOTES
-          Test build of 1ma Desktop for macOS on Apple Silicon, built from bb ${upstream} with the 1ma patches at ${commit}.
+          Test build of 1ma Desktop for macOS on Apple Silicon, built from bb ${upstream} with the 1ma patches at ${COMMIT}. Download the .dmg; SHA256SUMS lists the checksums.
 
-          The build is signed ad hoc, not by Apple yet. First launch: open 1ma once, then System Settings > Privacy & Security > Open Anyway, and enter your password.
+          The build is signed ad hoc, not by Apple yet. First launch: open 1ma once, then System Settings > Privacy & Security > Open Anyway, and enter your password. macOS treats every test build as a new app, so it asks again after each update, also for permissions such as the microphone.
 
           Quit bb completely before opening 1ma: both use port 38886. 1ma keeps its data in ~/.1ma, separate from bb.
           NOTES
-          files=(dist/apps/desktop/release/*.dmg dist/apps/desktop/release/*.zip)
           # GITHUB_TOKEN may not create a release on a commit that changes workflow files
-          # (HTTP 403). A maintainer then creates the pre-release with these notes and the
-          # tag at the build commit, and a rerun of this workflow uploads the files into it.
+          # (HTTP 403). A maintainer then creates the pre-release with the tag at the build
+          # commit, and a rerun of this workflow uploads the files into it.
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "${files[@]}" --clobber
+            tagged="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)"
+            [[ "$tagged" == "$COMMIT" ]] || fail "$tag points at $tagged, not at the build commit $COMMIT"
+          fi
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "dry run: would publish $tag at $COMMIT with:"
+            cat upload/SHA256SUMS
+            exit 0
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" upload/* --clobber
           else
-            gh release create "$tag" --prerelease --target "$commit" \
+            gh release create "$tag" --prerelease --target "$COMMIT" \
               --title "1ma Desktop ${version} test build ${RUN_ID}" \
               --notes-file notes.md \
-              "${files[@]}"
+              upload/*
           fi
           echo "published $tag"
