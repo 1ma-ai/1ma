@@ -21,3 +21,8 @@ pnpm --filter bb-plugin-1ma-brand run test
 pnpm --filter bb-plugin-1ma-brand run build
 bb plugin install ./plugins/1ma-brand
 ```
+
+## История
+
+0.3.1 (01.11.2026): заголовок окна отслеживается только в `<head>`, а не на всей
+странице, где каждый токен ответа агента запускал проверку.

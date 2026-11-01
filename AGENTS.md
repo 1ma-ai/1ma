@@ -8,7 +8,8 @@
 - Один плагин — один каталог `plugins/<id>/` со своим `package.json`,
   `tsconfig.json`, `README.md`, `PLUGIN_OVERVIEW.md` и тестами рядом с кодом.
 - Зависимости плагина только из npm, без `workspace:`. bb ставит плагин из git
-  обычным `npm install --omit=dev --ignore-scripts` в его каталоге.
+  обычным `npm install --omit=dev --omit=optional --ignore-scripts` в его
+  каталоге.
 - Новые плагины получают id с префиксом `1ma-` (`bb-plugin-1ma-<имя>`).
   Переименование меняет id и ломает установленные копии.
 - Используй только публичный `@get-bb/plugin-sdk`. Копия встроенного плагина bb

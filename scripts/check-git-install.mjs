@@ -37,7 +37,9 @@ for (const entry of collection.plugins) {
       continue;
     }
     const build = run(bbBin, ["plugin", "build"], copy);
-    if (!build.ok || !existsSync(path.join(copy, "dist/server.js"))) {
+    const manifest = JSON.parse(readFileSync(path.join(copy, "package.json"), "utf8"));
+    const outputs = ["dist/server.js", ...(manifest.bb?.app ? ["dist/app.js"] : [])];
+    if (!build.ok || !outputs.every((file) => existsSync(path.join(copy, file)))) {
       failed += 1;
       console.error(
         `✗ ${entry.name}: bb plugin build failed after a production-only install\n${build.output}`,

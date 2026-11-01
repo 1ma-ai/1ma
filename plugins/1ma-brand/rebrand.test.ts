@@ -70,6 +70,13 @@ describe("mountBrand", () => {
     await flush();
     expect(document.title).toBe("1ma");
 
+    document.querySelector("title")?.remove();
+    const replaced = document.createElement("title");
+    replaced.textContent = "bb";
+    document.head.append(replaced);
+    await flush();
+    expect(document.title).toBe("1ma");
+
     document.getElementById("favicon-32")?.setAttribute("href", "/favicon-32x32-dark.png");
     await flush();
     await flush();

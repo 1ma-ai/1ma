@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { definePluginApp, experimental_Icon as Icon } from "@get-bb/plugin-sdk/app";
-
-type Choice = { id: string; name: string; active: boolean };
+import { optionLabel, type Choice } from "./labels";
+import { strings } from "./strings";
 type Desktop = {
   getServerChoices(): Promise<Choice[]>;
   onServerChoicesChange(listener: (choices: Choice[]) => void): () => void;
@@ -25,13 +25,23 @@ function ServerSwitcher() {
       const next = { left: box.right + 10, top: box.top };
       setPosition((old) => (old.left === next.left && old.top === next.top ? old : next));
     };
+    // bb's page changes on every streamed token; measure at most once a frame.
+    let frame = 0;
+    const schedule = () => {
+      if (frame !== 0) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        place();
+      });
+    };
     place();
-    const observer = new MutationObserver(place);
+    const observer = new MutationObserver(schedule);
     observer.observe(document.body, { childList: true, subtree: true });
-    window.addEventListener("resize", place);
+    window.addEventListener("resize", schedule);
     return () => {
       observer.disconnect();
-      window.removeEventListener("resize", place);
+      window.removeEventListener("resize", schedule);
+      if (frame !== 0) window.cancelAnimationFrame(frame);
     };
   }, []);
   useEffect(() => {
@@ -85,22 +95,14 @@ function ServerSwitcher() {
     >
       <div className="relative flex h-7 items-center rounded-md hover:bg-accent hover:text-accent-foreground focus-within:bg-accent">
         <select
-          aria-label="Сервер 1ma"
+          aria-label={strings.label}
           aria-busy={switching}
-          title={
-            switching
-              ? "Подключаемся…"
-              : failed
-                ? "Переключение не удалось. Повторите или откройте настройки десктопа."
-                : "Переключить сервер 1ma; запущенные задачи продолжаются"
-          }
-          className="h-full cursor-pointer rounded-md bg-transparent py-0 pl-2 pr-6 text-xs text-inherit disabled:opacity-50"
+          title={switching ? strings.connecting : failed ? strings.switchFailed : strings.hint}
+          className="h-full cursor-pointer rounded-md bg-transparent py-0 pl-2 pr-6 text-xs text-inherit shadow-none outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
           style={{
             appearance: "none",
             WebkitAppearance: "none",
             border: "none",
-            boxShadow: "none",
-            outline: "none",
             fontFamily: "inherit",
             fontWeight: 500,
           }}
@@ -116,7 +118,7 @@ function ServerSwitcher() {
         >
           {choices.map((item) => (
             <option key={item.id} value={item.id}>
-              {/linux/i.test(item.name) ? "Linux" : /mac/i.test(item.name) ? "Mac" : item.name}
+              {optionLabel(choices, item)}
             </option>
           ))}
         </select>
@@ -126,11 +128,7 @@ function ServerSwitcher() {
           className={`pointer-events-none absolute right-1.5 size-3 opacity-60${switching ? " animate-spin" : ""}`}
         />
         <span role="status" className="sr-only">
-          {switching
-            ? "Подключаемся…"
-            : failed
-              ? "Подключение не удалось. Повторите или откройте настройки десктопа."
-              : ""}
+          {switching ? strings.connecting : failed ? strings.connectFailed : ""}
         </span>
       </div>
     </div>

@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-1ma-server-switcher",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Переключатель серверов 1ma в десктоп-приложении, рядом с кнопкой сайдбара.",
   "license": "MIT",

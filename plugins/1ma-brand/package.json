@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-1ma-brand",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Бренд 1ma вместо bb внутри окна: заголовок, favicon и иконка приложения с человечком, логотип 1ma, PWA-манифест.",
   "license": "MIT",

@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-1ma-home-dashboard",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Компактная доска задач на домашнем экране 1ma: Needs you, Running, Done.",
   "license": "MIT",

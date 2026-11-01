@@ -128,8 +128,10 @@ export function mountBrand({ pluginId, signal, document: doc }: MountBrandOption
     if (next !== doc.title) doc.title = next;
   };
   applyTitle();
+  // The title lives in <head>; watching the whole page would run this on every
+  // streamed token in the chat.
   const titleObserver = new MutationObserver(applyTitle);
-  titleObserver.observe(doc.documentElement, {
+  titleObserver.observe(doc.head ?? doc.documentElement, {
     subtree: true,
     childList: true,
     characterData: true,
