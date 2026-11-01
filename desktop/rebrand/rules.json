@@ -264,6 +264,18 @@
     {
       "text": "A thread id is required: bb provider-retry ",
       "reason": "CLI usage hint for the bb provider-retry command"
+    },
+    {
+      "text": "BB Community",
+      "reason": "bb's community plugin registry is a bb cloud service (phase 2)"
+    },
+    {
+      "text": "Plugins published to the BB registry and reviewed by the BB team.",
+      "reason": "describes bb's community registry and the bb team's review (phase 2)"
+    },
+    {
+      "text": "bb exited with",
+      "reason": "names the bb CLI process, which keeps its name until phase 3"
     }
   ],
   "replace": [
@@ -271,6 +283,19 @@
       "text": "Written by bb: runs the bb command of the bb installed on this computer.",
       "to": "Written by 1ma: runs the bb command of the 1ma installed on this computer.",
       "reason": "CLI launcher marker: 1ma must not take over the bb command of a bb installed on the same computer; the CLI keeps its bb name until phase 3"
+    },
+    {
+      "text": "BB Official",
+      "to": "Built-in",
+      "reason": "The bb team writes the built-in plugins; 1ma labels them neutrally instead of claiming them"
+    }
+  ],
+  "testReplace": [
+    {
+      "file": "apps/app/src/views/ToolsView.plugin-detail.test.tsx",
+      "find": "/^BB/u",
+      "replace": "/^Built-in/u",
+      "reason": "the author page heading of built-in plugins reads Built-in; a two-letter pattern is too short to follow the source automatically"
     }
   ]
 }

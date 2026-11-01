@@ -130,6 +130,24 @@ describe("bb cloud services and identifiers stay", () => {
     assert.equal(prose("let bb run it while you rest"), "let 1ma run it while you rest");
     assert.equal(prose("Create a new bb skill that"), "Create a new 1ma skill that");
     assert.equal(prose("const bb = new BBSdk({ baseUrl })"), "const bb = new BBSdk({ baseUrl })");
+    assert.equal(
+      prose("$power = Add-Type -Name KeepAwake -Namespace Bb -PassThru"),
+      "$power = Add-Type -Name KeepAwake -Namespace Bb -PassThru",
+    );
+  });
+
+  test("substitutions in a template are arguments only on a command line", () => {
+    const at = "\uE000";
+    assert.equal(prose(`  bb tasks ${at} ${at}`), `  bb tasks ${at} ${at}`);
+    assert.equal(
+      prose(`Edit the bb plugin ${at} at ${at}.`),
+      `Edit the 1ma plugin ${at} at ${at}.`,
+    );
+    assert.equal(prose(`- Linked bb project: ${at}`), `- Linked 1ma project: ${at}`);
+    assert.equal(
+      prose(`BB ${at} components vendored from the BB app`),
+      `1ma ${at} components vendored from the 1ma app`,
+    );
   });
 
   test("a single word outside visible labels is an identifier", () => {
@@ -138,11 +156,19 @@ describe("bb cloud services and identifiers stay", () => {
     assert.equal(rebrandString("bb", { kind: "property", name: "title" }, rules).result, "1ma");
   });
 
-  test("exact-text overrides win over the rules", () => {
+  test("overrides apply inside longer texts and win over the rules", () => {
     const override = { ...rules, keep: [{ text: "Moved to bb git " }] };
     assert.equal(
       rebrandString("Moved to bb git ", { kind: "value" }, override).result,
       "Moved to bb git ",
+    );
+    assert.equal(
+      rebrandString("\n  BB Official\n", { kind: "jsx-text" }, rules).result,
+      "\n  Built-in\n",
+    );
+    assert.equal(
+      rebrandString("Reviewed by BB Community; bb shows it", { kind: "value" }, rules).result,
+      "Reviewed by BB Community; 1ma shows it",
     );
   });
 });
@@ -160,6 +186,11 @@ describe("rebrandTree edits only string contents", () => {
       'import { x } from "@bb/domain";',
       'const escaped = "line one\\nbb restores it";',
       "const template = `Open ${name} in bb or run bb thread list`;",
+      "const tick = `The \\`read\\` tool takes \\`${name}\\`, which inspects bb`;",
+      "const author = `${skill} is BB Official`;",
+      "export const Gone = () => <p>Relaunch bb to finish updating</p>;",
+      "export const Long = () => <p>Your data is saved first. If it fails to start,\n        bb restores the last version.</p>;",
+      'const window = "bb"; const id = "bb";',
       'export const View = () => <p title="bb">Reload bb now</p>;',
       'const key = { "bb": 1 }[name];',
       "",
@@ -171,19 +202,40 @@ describe("rebrandTree edits only string contents", () => {
     `${JSON.stringify({ name: "bb-plugin-demo", description: "Run bb threads.", bb: { name: "Demo", description: "Run bb threads." } }, null, 2)}\n`,
   );
   write("apps/web/src/site.ts", 'export const site = "Welcome to bb today";\n');
+  write("apps/cli/src/restart.ts", 'export const restart = "Restart bb when it updates";\n');
   write(
     "apps/app/src/view.test.tsx",
     [
       'expect(screen.getByText("Reload bb now")).toBeTruthy();',
       'expect(log).toContain("first, then Reload bb now please");',
       "const input = \"bb thread message thr_x 'Reload bb'\";",
+      'Reflect.deleteProperty(window, "bb");',
+      'expect(screen.getByRole("button", { name: /Relaunch bb to finish updating/ })).toBeTruthy();',
+      'expect(text).toContain("If it fails to start, bb restores");',
+      'expect(log).toContain("Restart bb when it updates");',
+      'expect(screen.getByText("BB Official\'s GitHub avatar")).toBeTruthy();',
+      'expect(screen.getByRole("heading", { name: /^BB/u })).toBeTruthy();',
       "",
     ].join("\n"),
   );
   write("apps/cli/src/help.ts", 'export const help = "Restart bb when done";\n');
   write("plugins/demo/skills/demo/SKILL.md", "Use bb carefully.\n");
 
-  const result = rebrandTree(root, rules, { write: true });
+  const result = rebrandTree(
+    root,
+    {
+      ...rules,
+      testReplace: [
+        {
+          file: "apps/app/src/view.test.tsx",
+          find: "/^BB/u",
+          replace: "/^Built-in/u",
+          reason: "test",
+        },
+      ],
+    },
+    { write: true },
+  );
 
   test("source literals, JSX text and labels change; code and keys do not", () => {
     const view = readFileSync(path.join(root, "apps/app/src/view.tsx"), "utf8");
@@ -192,6 +244,9 @@ describe("rebrandTree edits only string contents", () => {
     assert.match(view, /in 1ma or run bb thread list/);
     assert.match(view, /title="1ma">Reload 1ma now</);
     assert.match(view, /\{ "bb": 1 \}/);
+    assert.match(view, /which inspects 1ma`/);
+    assert.match(view, /\$\{skill\} is Built-in`/);
+    assert.match(view, /const window = "bb"; const id = "bb";/);
   });
 
   test("markdown outside code fences and the bb manifest section change", () => {
@@ -207,6 +262,12 @@ describe("rebrandTree edits only string contents", () => {
     assert.match(spec, /getByText\("Reload 1ma now"\)/);
     assert.match(spec, /toContain\("first, then Reload 1ma now please"\)/);
     assert.match(spec, /"bb thread message thr_x 'Reload bb'"/);
+    assert.match(spec, /deleteProperty\(window, "bb"\)/);
+    assert.match(spec, /name: \/Relaunch 1ma to finish updating\//);
+    assert.match(spec, /toContain\("If it fails to start, 1ma restores"\)/);
+    assert.match(spec, /toContain\("Restart bb when it updates"\)/);
+    assert.match(spec, /getByText\("Built-in's GitHub avatar"\)/);
+    assert.match(spec, /name: \/\^Built-in\/u/);
   });
 
   test("the CLI, skills and other later phases stay untouched", () => {
@@ -220,10 +281,10 @@ describe("rebrandTree edits only string contents", () => {
     );
   });
 
-  test("code that bb does not ship is rewritten but left out of the inventory", () => {
+  test("code that 1ma does not ship stays as bb wrote it", () => {
     assert.match(
       readFileSync(path.join(root, "apps/web/src/site.ts"), "utf8"),
-      /Welcome to 1ma today/,
+      /Welcome to bb today/,
     );
     assert.ok(![...result.inventory.keys()].some((key) => key.includes("Welcome")));
   });

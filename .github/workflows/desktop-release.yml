@@ -35,6 +35,12 @@ jobs:
           upstream=$(node -p "require('./dist/1ma-provenance.json').upstream.tag")
           commit=$(node -p "require('./dist/1ma-provenance.json').oneMaCommit")
           tag="desktop/v${version}-1ma.${RUN_ID}"
+          passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow desktop-tests.yml --commit "$commit" \
+            --json conclusion --jq '[.[] | select(.conclusion == "success")] | length')
+          if [ "$passed" = "0" ]; then
+            echo "::error::bb's tests have not passed on the 1ma tree for ${commit}; a green desktop-tests.yml run is required before publishing."
+            exit 1
+          fi
           cat > notes.md <<NOTES
           Test build of 1ma Desktop for macOS on Apple Silicon, built from bb ${upstream} with the 1ma patches at ${commit}.
 
