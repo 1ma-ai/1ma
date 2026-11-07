@@ -1,16 +1,18 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: 1ma <hello@1ma.ai>
-Date: Sat, 31 Oct 2026 12:07:29 +0100
+Date: Sat, 7 Nov 2026 08:16:47 +0100
 Subject: [PATCH] 1ma: bb cloud account, cloud AI and bb connect off by default
 
 1ma does not depend on getbb.app: the bb account, bb cloud AI and bb
 connect built-in plugins start disabled. Users can still enable them in
 Settings. The web marketplace lists them as off by default too, so it
-keeps matching the server registry.
+keeps matching the server registry, and the bb-app tarball smoke test no
+longer expects bb connect to be running in a fresh install.
 ---
  apps/server/src/services/plugins/builtin-registry.ts | 6 +++---
  apps/web/src/marketplace/bundled-marketplace.ts      | 3 +++
- 2 files changed, 6 insertions(+), 3 deletions(-)
+ packages/bb-app/scripts/smoke-tarball.mjs            | 1 -
+ 3 files changed, 6 insertions(+), 4 deletions(-)
 
 diff --git a/apps/server/src/services/plugins/builtin-registry.ts b/apps/server/src/services/plugins/builtin-registry.ts
 index 7b8f53a..7b2974b 100644
@@ -51,3 +53,15 @@ index 0a0baad..3e25822 100644
    "connect-next",
    "mcp",
    "monaco-editor",
+diff --git a/packages/bb-app/scripts/smoke-tarball.mjs b/packages/bb-app/scripts/smoke-tarball.mjs
+index 9ec10cd..5fd1b2f 100644
+--- a/packages/bb-app/scripts/smoke-tarball.mjs
++++ b/packages/bb-app/scripts/smoke-tarball.mjs
+@@ -44,7 +44,6 @@ const EXPECTED_RUNNING_BUILTIN_PLUGINS = [
+   "provider-claude-code",
+   "provider-codex",
+   "push-notifications",
+-  "connect",
+   "custom-instructions",
+   "inline-vis",
+   "keep-awake",

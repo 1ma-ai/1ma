@@ -1,6 +1,7 @@
 name: Desktop release
 
-# Publishes the macOS build of one Desktop workflow run as a pre-release. The
+# Publishes the macOS app and the Linux server package of one Desktop workflow
+# run as a pre-release. The
 # run is checked against GitHub's own records, not against files inside its
 # artifact: it must be a green Desktop build of main in this repository, and
 # bb's tests must have passed on the same commit in a push run on main.
@@ -9,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: "Desktop workflow run on main whose macOS build should be published"
+        description: "Desktop workflow run on main whose macOS app and Linux server should be published"
         required: true
       dry_run:
         description: "Check the run and prepare the files, but publish nothing"
@@ -59,7 +60,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ inputs.run_id }}
-        run: gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name 1ma-desktop-macos-arm64 --dir dist
+        run: |
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name 1ma-desktop-macos-arm64 --dir dist
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name 1ma-server-linux --dir dist-server
       - name: Create the pre-release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -69,9 +72,11 @@ jobs:
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
-          provenance="$(jq -r .oneMaCommit dist/1ma-provenance.json)"
-          [[ "$provenance" == "$COMMIT" ]] ||
-            fail "the artifact says it was built from '$provenance', but run $RUN_ID built $COMMIT"
+          for record in dist/1ma-provenance.json dist-server/1ma-provenance.json; do
+            provenance="$(jq -r .oneMaCommit "$record")"
+            [[ "$provenance" == "$COMMIT" ]] ||
+              fail "$record says it was built from '$provenance', but run $RUN_ID built $COMMIT"
+          done
           version="$(jq -r .version dist/apps/desktop/release/desktop-version.json)"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || fail "unexpected version '$version'"
           upstream="$(jq -r .upstream.tag dist/1ma-provenance.json)"
@@ -81,9 +86,14 @@ jobs:
             name="$(basename "$file")"
             cp "$file" "upload/${name%.*}-${RUN_ID}.${name##*.}"
           done
+          server="dist-server/1ma-server-${version}.tgz"
+          [[ -f "$server" ]] || fail "run $RUN_ID has no Linux server package for $version"
+          cp "$server" "upload/1ma-server-${version}-${RUN_ID}.tgz"
           (cd upload && sha256sum -- * > SHA256SUMS)
           cat > notes.md <<NOTES
           Test build of 1ma Desktop for macOS on Apple Silicon, built from bb ${upstream} with the 1ma patches at ${COMMIT}. Download the .dmg; SHA256SUMS lists the checksums.
+
+          1ma-server-${version}-${RUN_ID}.tgz is the 1ma server for Linux from the same commit (bb's bb-app package with the 1ma patches and rebrand). Install it with npm install <file> in an empty folder and start node_modules/.bin/bb-app with Node 24; the command keeps the name bb-app for now.
 
           The build is signed ad hoc, not by Apple yet. First launch: open 1ma once, then System Settings > Privacy & Security > Open Anyway, and enter your password. macOS treats every test build as a new app, so it asks again after each update, also for permissions such as the microphone.
 
