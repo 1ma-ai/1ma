@@ -490,6 +490,12 @@
       "find": "toContain(\"Resume after bb restarted\")",
       "replace": "toContain(\"Resume after 1ma restarted\")",
       "reason": "the CLI titles a restart resume with the renamed constant"
+    },
+    {
+      "file": "apps/server/test/services/plugin-catalog/plugin-catalog-service.test.ts",
+      "find": "author: { name: \"BB\", url: null },",
+      "replace": "author: { name: \"1ma\", url: null },",
+      "reason": "the catalog lists 1ma as the author of the built-in plugins (generate-bb-official-marketplace.ts); a two-letter name does not follow the source automatically"
     }
   ],
   "testKeep": [
