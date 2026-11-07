@@ -41,8 +41,8 @@ env -i HOME=/home/dev PATH=/home/dev/.local/opt/node24/bin:/usr/bin:/bin node /h
 Должно закончиться строкой «exported the bb server to …». Сразу переходить к шагу 4: всё, что сделано в bb после экспорта, в 1ma не попадёт.
 
 Шаг 4. Остановить bb механизмом запуска сервера (и сделать так, чтобы хост не запустил его снова сам). Проверить в контейнере:
-ls /home/dev/.bb/bb-app-runtime.json ; curl -s -m 3 http://127.0.0.1:38886/ >/dev/null && echo "still answering"
-Первая команда пишет «No such file», вторая ничего не выводит.
+curl -s -m 3 http://127.0.0.1:38886/ >/dev/null && echo "still answering"
+Команда ничего не выводит. Скрипт переноса сам откажется работать, пока работает сервер bb, его демон или его плагины.
 
 Шаг 5. Перенос, сначала пробный прогон, потом настоящий:
 env -i HOME=/home/dev PATH=/home/dev/.local/opt/node24/bin:/usr/bin:/bin node /home/dev/1ma-migration/migrate-from-bb.mjs import --archive /home/dev/1ma-migration/bb-server.tar --cli /home/dev/.local/opt/1ma-linux/node_modules/bb-app/dist/bb.js --move-aside --dry-run
