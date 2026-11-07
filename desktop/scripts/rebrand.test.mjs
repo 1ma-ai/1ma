@@ -183,7 +183,7 @@ describe("bb cloud services and identifiers stay", () => {
     );
     assert.equal(
       rebrandString("\n  BB Official\n", { kind: "jsx-text" }, rules).result,
-      "\n  Built-in\n",
+      "\n  1ma\n",
     );
     assert.equal(
       rebrandString("Reviewed by BB Community; bb shows it", { kind: "value" }, rules).result,
@@ -207,6 +207,7 @@ describe("rebrandTree edits only string contents", () => {
       "const template = `Open ${name} in bb or run bb thread list`;",
       "const tick = `The \\`read\\` tool takes \\`${name}\\`, which inspects bb`;",
       "const author = `${skill} is BB Official`;",
+      'const publisher = "BB Official";',
       "export const Gone = () => <p>Relaunch bb to finish updating</p>;",
       "export const Long = () => <p>Your data is saved first. If it fails to start,\n        bb restores the last version.</p>;",
       'const window = "bb"; const id = "bb";',
@@ -248,7 +249,7 @@ describe("rebrandTree edits only string contents", () => {
         {
           file: "apps/app/src/view.test.tsx",
           find: "/^BB/u",
-          replace: "/^Built-in/u",
+          replace: "/^1ma/u",
           reason: "test",
         },
       ],
@@ -265,7 +266,7 @@ describe("rebrandTree edits only string contents", () => {
     assert.match(view, /title="1ma">Reload 1ma now</);
     assert.match(view, /\{ "bb": 1 \}/);
     assert.match(view, /which inspects 1ma`/);
-    assert.match(view, /\$\{skill\} is Built-in`/);
+    assert.match(view, /\$\{skill\} is from 1ma`/);
     assert.match(view, /const window = "bb"; const id = "bb";/);
   });
 
@@ -286,8 +287,8 @@ describe("rebrandTree edits only string contents", () => {
     assert.match(spec, /name: \/Relaunch 1ma to finish updating\//);
     assert.match(spec, /toContain\("If it fails to start, 1ma restores"\)/);
     assert.match(spec, /toContain\("Restart bb when it updates"\)/);
-    assert.match(spec, /getByText\("Built-in's GitHub avatar"\)/);
-    assert.match(spec, /name: \/\^Built-in\/u/);
+    assert.match(spec, /getByText\("1ma's GitHub avatar"\)/);
+    assert.match(spec, /name: \/\^1ma\/u/);
   });
 
   test("the CLI, skills and other later phases stay untouched", () => {
@@ -494,7 +495,7 @@ describe("tests follow only the sources they can reach", () => {
     const spec = read("apps/app/src/update.test.tsx");
     assert.match(spec, /getByRole\("region", \{ name: "bb" \}\)/);
     assert.match(spec, /const project = \{ name: "bb" \}/);
-    assert.match(spec, /publisher%3ABuilt-in"/);
+    assert.match(spec, /publisher%3A1ma"/);
     assert.match(spec, /toContain\("bb plugin update fresh"\)/);
     assert.match(spec, /name: "Open bb settings"/);
   });
@@ -559,6 +560,24 @@ describe("an override can be limited to one file or one whole literal", () => {
       rebrandString("BB Official", author("apps/server/scripts/gen.ts"), scoped).result,
       rebrandString("BB Official", author("apps/server/scripts/other.ts"), scoped).result,
     );
+  });
+
+  test("an override shorter than a phrase changes its source but never spreads into tests", () => {
+    const root = tree({
+      "apps/server/package.json": manifest("@bb/server"),
+      "apps/server/scripts/gen.ts": 'export const author = { name: "BB" };\n',
+      "apps/server/test/gen.test.ts": [
+        'expect(author).toEqual({ name: "BB" });',
+        'expect(file).toBe("bb.db");',
+        "",
+      ].join("\n"),
+    });
+    after(() => rmSync(root, { recursive: true, force: true }));
+    rebrandTree(root, { ...scoped, product: [], testReplace: [], testKeep: [] }, { write: true });
+    assert.match(readFileSync(path.join(root, "apps/server/scripts/gen.ts"), "utf8"), /"1ma"/);
+    const spec = readFileSync(path.join(root, "apps/server/test/gen.test.ts"), "utf8");
+    assert.match(spec, /\{ name: "BB" \}/);
+    assert.match(spec, /"bb\.db"/);
   });
 
   test("prepare stops when a rule for one file no longer matches or names a missing file", () => {

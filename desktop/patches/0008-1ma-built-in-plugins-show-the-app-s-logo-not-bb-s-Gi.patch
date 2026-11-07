@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Sat, 7 Nov 2026 08:00:41 +0100
+Subject: [PATCH] 1ma: built-in plugins show the app's logo, not bb's GitHub
+ avatar
+
+Built-in plugins are listed as 1ma's own. Their author avatar used the
+GitHub picture of the get-bb account; it now always shows the logo that
+ships with the app, so it matches the author name and the app loads no
+picture from github.com for them. Plugins from a marketplace keep their
+author's GitHub avatar.
+---
+ .../components/plugin/management/PluginAuthorAvatar.tsx    | 2 +-
+ apps/app/src/views/ToolsView.plugin-detail.test.tsx        | 7 ++++++-
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/apps/app/src/components/plugin/management/PluginAuthorAvatar.tsx b/apps/app/src/components/plugin/management/PluginAuthorAvatar.tsx
+index 15b5f2b..7d2c56b 100644
+--- a/apps/app/src/components/plugin/management/PluginAuthorAvatar.tsx
++++ b/apps/app/src/components/plugin/management/PluginAuthorAvatar.tsx
+@@ -23,7 +23,7 @@ export function PluginAuthorAvatar({
+   size: "detail" | "page";
+   official?: boolean;
+ }) {
+-  const githubUsername = github ?? (official ? "get-bb" : null);
++  const githubUsername = official ? null : github;
+   return (
+     <Avatar
+       role="img"
+diff --git a/apps/app/src/views/ToolsView.plugin-detail.test.tsx b/apps/app/src/views/ToolsView.plugin-detail.test.tsx
+index 7cce1c8..e2fe817 100644
+--- a/apps/app/src/views/ToolsView.plugin-detail.test.tsx
++++ b/apps/app/src/views/ToolsView.plugin-detail.test.tsx
+@@ -983,9 +983,14 @@ describe("BB Official plugin detail routing", () => {
+       expect(within(header).getAllByText("BB Official")).toHaveLength(1);
+       expect(
+         within(header).getByRole("img", {
+-          name: "BB Official's GitHub avatar",
++          name: "BB Official's avatar",
+         }),
+       ).toBeTruthy();
++      expect(
++        within(header).queryByRole("img", {
++          name: "BB Official's GitHub avatar",
++        }),
++      ).toBeNull();
+       fireEvent.click(authorLink);
+       expect(
+         await screen.findByRole("heading", { name: /^BB Official/u, level: 1 }),

@@ -542,6 +542,13 @@ function escapedForm(text, product, kept) {
 // left it alone, where the rules changed bb (product) and where bb stays (kept).
 // Overrides are indexed for the packages where they were applied; keep rules
 // from rules.json are explicit and win over learned entries.
+// At least 8 characters and two words once surrounding whitespace is gone:
+// enough text for a test to share with a source by more than chance.
+function followable(text) {
+  const body = text.trim();
+  return body.length >= 8 && /\S\s+\S/u.test(body);
+}
+
 export function createIndex(rules) {
   const byKey = new Map();
   const seen = new Set();
@@ -645,12 +652,12 @@ export function createIndex(rules) {
     learn(text, decisions, scope = null) {
       const { product, kept, replaced } = marked(text, decisions);
       variants(text, product, kept, scope, false, true);
-      for (const decision of replaced)
-        replaceEntry(
-          text.slice(decision.index, decision.index + decision.length),
-          decision.to,
-          scope,
-        );
+      // A replaced text reaches tests as a plain substring, so only a phrase
+      // may: a two-letter override would rewrite every bb of those tests.
+      for (const decision of replaced) {
+        const from = text.slice(decision.index, decision.index + decision.length);
+        if (followable(from)) replaceEntry(from, decision.to, scope);
+      }
     },
     keep(text, scope = null, explicit = false) {
       variants(text, [], occurrences(text), scope, explicit, false);
@@ -741,7 +748,7 @@ export function propagate(
         while (start < end && /\s/u.test(haystack[start])) start += 1;
         while (end > start && /\s/u.test(haystack[end - 1])) end -= 1;
         const overlap = haystack.slice(start, end);
-        if (overlap.length < 8 || !/\S\s+\S/u.test(overlap)) continue;
+        if (!followable(overlap)) continue;
         const words = wordCount(overlap);
         if (!whole && words < partialWords) continue;
         for (const [offset, kind] of own) {

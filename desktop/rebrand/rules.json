@@ -310,8 +310,13 @@
     },
     {
       "text": "BB Official",
-      "to": "Built-in",
-      "reason": "The bb team writes the built-in plugins; 1ma labels them neutrally instead of claiming them"
+      "to": "1ma",
+      "reason": "owner decision 2026-11-07: the built-in plugins are 1ma's own, as their author (1ma will adapt all of them); bb's MIT notice stays in the license files"
+    },
+    {
+      "text": " is BB Official",
+      "to": " is from 1ma",
+      "reason": "the accessible label of the publisher badge of a built-in skill (deploy is from 1ma); 'is 1ma' would not read"
     },
     {
       "text": "Reloaded running bb server config.",
@@ -324,9 +329,9 @@
       "reason": "the id of a project in the app, not the bb project id command; the same plugin says 'never a 1ma project id'"
     },
     {
-      "text": "a bb-managed workspace",
-      "to": "a 1ma-managed workspace",
-      "reason": "a workspace the app manages; bb joined to a word by a hyphen is never matched as the product, and the same message goes on with When 1ma removes that workspace"
+      "text": "bb-managed workspace",
+      "to": "1ma-managed workspace",
+      "reason": "a workspace the app manages; bb joined to a word by a hyphen is never matched as the product, and the same messages go on with When 1ma removes that workspace"
     }
   ],
   "product": [
@@ -345,14 +350,38 @@
       "text": "bb",
       "exact": true,
       "reason": "the JSX text before the version and the date of a release (bb {version} · {date}); the heading above already reads What's new in 1ma"
+    },
+    {
+      "file": "apps/server/scripts/generate-bb-official-marketplace.ts",
+      "text": "BB",
+      "exact": true,
+      "reason": "the author name of every built-in plugin in the generated marketplace (owner decision 2026-11-07: built-in plugins are 1ma's own); a two-letter literal is otherwise an identifier"
+    },
+    {
+      "file": "apps/app/src/components/layout/AppLayout.tsx",
+      "text": "BB",
+      "exact": true,
+      "reason": "the page title when a route has none"
+    },
+    {
+      "file": "apps/app/src/components/layout/core-page-title.tsx",
+      "text": "BB",
+      "exact": true,
+      "reason": "the section label of a page title when the page has no breadcrumbs"
+    },
+    {
+      "file": "apps/app/src/components/thread/timeline/ConversationMessageContent.tsx",
+      "text": "BB",
+      "exact": true,
+      "reason": "the sender shown on a message the app itself added to a thread"
     }
   ],
   "testReplace": [
     {
       "file": "apps/app/src/views/ToolsView.plugin-detail.test.tsx",
       "find": "/^BB/u",
-      "replace": "/^Built-in/u",
-      "reason": "the author page heading of built-in plugins reads Built-in; a two-letter pattern is too short to follow the source automatically"
+      "replace": "/^1ma/u",
+      "reason": "the author page heading of built-in plugins reads 1ma; a two-letter pattern is too short to follow the source automatically"
     },
     {
       "file": "plugins/automations/src/composer.test.ts",
@@ -383,6 +412,84 @@
       "find": "expect(blockedStatus.textContent).not.toContain(\"Update bb\");",
       "replace": "expect(blockedStatus.textContent).not.toContain(\"Update 1ma\");",
       "reason": "a blocked plugin update must not suggest updating the app; in 1ma that advice reads Update 1ma., so the old wording would make the check pass without testing anything"
+    },
+    {
+      "file": "apps/server/test/services/plugin-catalog/bb-official-generator.test.ts",
+      "find": "expect(entry?.author).toEqual({ name: \"BB\" });",
+      "replace": "expect(entry?.author).toEqual({ name: \"1ma\" });",
+      "reason": "the generator names 1ma as the author of the built-in plugins; a two-letter name does not follow the source automatically"
+    },
+    {
+      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
+      "find": "name: `bb ${version} changelog`,",
+      "replace": "name: `1ma ${version} changelog`,",
+      "reason": "the release notes panel names the product and its version (1ma 0.47.0); bb followed by a version in a test cannot be told from a command line, so it does not follow the source"
+    },
+    {
+      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
+      "find": "name: \"bb 0.47.0 changelog\",",
+      "replace": "name: \"1ma 0.47.0 changelog\",",
+      "reason": "the release notes panel names the product and its version (1ma 0.47.0); bb followed by a version in a test cannot be told from a command line, so it does not follow the source"
+    },
+    {
+      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
+      "find": "\"bb 0.48.0 · October 28, 2026\"",
+      "replace": "\"1ma 0.48.0 · October 28, 2026\"",
+      "reason": "the release notes panel names the product and its version (1ma 0.47.0); bb followed by a version in a test cannot be told from a command line, so it does not follow the source"
+    },
+    {
+      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
+      "find": "\"bb 0.47.0 · October 23, 2026\"",
+      "replace": "\"1ma 0.47.0 · October 23, 2026\"",
+      "reason": "the release notes panel names the product and its version (1ma 0.47.0); bb followed by a version in a test cannot be told from a command line, so it does not follow the source"
+    },
+    {
+      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
+      "find": "\"bb 0.0.5 · January 2, 2026\"",
+      "replace": "\"1ma 0.0.5 · January 2, 2026\"",
+      "reason": "the release notes panel names the product and its version (1ma 0.47.0); bb followed by a version in a test cannot be told from a command line, so it does not follow the source"
+    },
+    {
+      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
+      "find": "name: \"What's new in bb 0.0.5\"",
+      "replace": "name: \"What's new in 1ma 0.0.5\"",
+      "reason": "the heading of the release notes; the source is JSX text with &apos;, which a test spells as an apostrophe"
+    },
+    {
+      "file": "apps/app/src/components/promptbox/banner/QueuedMessagesList.test.tsx",
+      "find": ".toBe(\"· 1 from bb\");",
+      "replace": ".toBe(\"· 1 from 1ma\");",
+      "reason": "the count of notices the app itself queued (· 1 from 1ma); from bb is too short to follow the source"
+    },
+    {
+      "file": "apps/app/src/lib/queued-message-wait.test.ts",
+      "find": "reason: \"bb restarted\",",
+      "replace": "reason: \"1ma restarted\",",
+      "reason": "the retry reason of a restart resume is the shared constant RESTART_RESUME_RETRY_REASON, renamed with the product; the agent's restart notice (packages/templates, phase 3) still says bb restarted, so the short phrase ties and stays"
+    },
+    {
+      "file": "apps/app/src/lib/queued-message-wait.test.ts",
+      "find": ".toBe(\"Resume after bb restarted\");",
+      "replace": ".toBe(\"Resume after 1ma restarted\");",
+      "reason": "the title of a restart resume is built from the renamed constant"
+    },
+    {
+      "file": "apps/server/test/threads/restart-resume.test.ts",
+      "find": "reason: \"bb restarted\",",
+      "replace": "reason: \"1ma restarted\",",
+      "reason": "the server stores the renamed constant RESTART_RESUME_RETRY_REASON as the retry reason"
+    },
+    {
+      "file": "apps/cli/src/__tests__/command-output/thread-organization.test.ts",
+      "find": "reason: \"bb restarted\",",
+      "replace": "reason: \"1ma restarted\",",
+      "reason": "the CLI reads the restart reason from the renamed constant of @bb/domain"
+    },
+    {
+      "file": "apps/cli/src/__tests__/command-output/thread-organization.test.ts",
+      "find": "toContain(\"Resume after bb restarted\")",
+      "replace": "toContain(\"Resume after 1ma restarted\")",
+      "reason": "the CLI titles a restart resume with the renamed constant"
     }
   ],
   "testKeep": [
