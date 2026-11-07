@@ -4,22 +4,23 @@ Date: Sat, 31 Oct 2026 12:06:59 +0100
 Subject: [PATCH] 1ma: desktop app identity, installer names and update feed
 
 Rename the stable and nightly desktop identities to 1ma: app id
-ai.1ma.desktop, product name 1ma, artifact and executable names, the
-Windows AppUserModelID, the macOS microphone purpose string, and point the
-update feed at the 1ma-ai/1ma releases. Tests follow the new identity.
+ai.1ma.desktop (also used for the Windows installer mutex), product name
+1ma, artifact and executable names, the Windows AppUserModelID, the macOS
+microphone and Apple Events purpose strings, and point the update feed at
+the 1ma-ai/1ma releases. Tests follow the new identity.
 ---
- apps/desktop/electron-builder.config.json     | 10 +++++-----
+ apps/desktop/electron-builder.config.json     | 12 +++++------
  .../scripts/desktop-release-channel.d.mts     |  8 ++++----
  .../scripts/desktop-release-channel.mjs       | 20 +++++++++----------
- apps/desktop/src/desktop-update-provider.ts   |  6 +++---
+ apps/desktop/src/desktop-update-provider.ts   | 10 +++++-----
  apps/desktop/src/main.ts                      |  4 ++--
  .../test/desktop-update-provider.test.ts      |  6 +++---
  .../test/electron-builder-config.test.ts      | 14 ++++++-------
  .../electron-builder-windows-config.test.ts   |  4 ++--
- 8 files changed, 36 insertions(+), 36 deletions(-)
+ 8 files changed, 39 insertions(+), 39 deletions(-)
 
 diff --git a/apps/desktop/electron-builder.config.json b/apps/desktop/electron-builder.config.json
-index 1f3ddf3..a2630ec 100644
+index 0c862a6..0af9626 100644
 --- a/apps/desktop/electron-builder.config.json
 +++ b/apps/desktop/electron-builder.config.json
 @@ -1,6 +1,6 @@
@@ -31,7 +32,7 @@ index 1f3ddf3..a2630ec 100644
    "artifactName": "${productName}-${version}-${arch}.${ext}",
    "toolsets": {
      "appimage": "1.0.3"
-@@ -33,13 +33,13 @@
+@@ -33,14 +33,14 @@
      {
        "channel": "latest",
        "provider": "generic",
@@ -42,12 +43,14 @@ index 1f3ddf3..a2630ec 100644
    "mac": {
      "category": "public.app-category.developer-tools",
      "extendInfo": {
+-      "NSAppleEventsUsageDescription": "bb lets agents you run control other apps on this Mac, such as Computer Use.",
 -      "NSMicrophoneUsageDescription": "bb uses your microphone for voice input and sites you allow in the in-app browser."
++      "NSAppleEventsUsageDescription": "1ma lets agents you run control other apps on this Mac, such as Computer Use.",
 +      "NSMicrophoneUsageDescription": "1ma uses your microphone for voice input and sites you allow in the in-app browser."
      },
      "minimumSystemVersion": "13.0.0",
      "entitlements": "build/entitlements.mac.plist",
-@@ -62,7 +62,7 @@
+@@ -63,7 +63,7 @@
    },
    "linux": {
      "category": "Development",
@@ -133,23 +136,27 @@ index 6620891..708b42e 100644
 +  return `https://github.com/1ma-ai/1ma/releases/download/${releaseTag}/`;
  }
 diff --git a/apps/desktop/src/desktop-update-provider.ts b/apps/desktop/src/desktop-update-provider.ts
-index 27f9b3c..a2c09fd 100644
+index a944cef..7c25886 100644
 --- a/apps/desktop/src/desktop-update-provider.ts
 +++ b/apps/desktop/src/desktop-update-provider.ts
-@@ -6,7 +6,7 @@ import {
+@@ -6,8 +6,8 @@ import {
  type DesktopReleaseChannel = "latest" | "nightly";
  
  interface DesktopReleaseInfo {
+-  appId: "dev.bb.desktop" | "dev.bb.desktop.nightly";
 -  applicationName: "bb" | "bb Nightly";
++  appId: "ai.1ma.desktop" | "ai.1ma.desktop.nightly";
 +  applicationName: "1ma" | "1ma Nightly";
    channel: DesktopReleaseChannel;
    iconFileName: "icon.png" | "icon-nightly.png";
    releaseTag: "desktop-latest" | "desktop-nightly";
-@@ -20,11 +20,11 @@ export function createDesktopReleaseInfo(
+@@ -21,12 +21,12 @@ export function createDesktopReleaseInfo(
    const releaseTag = nightly ? "desktop-nightly" : "desktop-latest";
  
    return {
+-    appId: nightly ? "dev.bb.desktop.nightly" : "dev.bb.desktop",
 -    applicationName: nightly ? "bb Nightly" : "bb",
++    appId: nightly ? "ai.1ma.desktop.nightly" : "ai.1ma.desktop",
 +    applicationName: nightly ? "1ma Nightly" : "1ma",
      channel,
      iconFileName: nightly ? "icon-nightly.png" : "icon.png",
@@ -160,10 +167,10 @@ index 27f9b3c..a2c09fd 100644
  }
  
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 97d29cd..27863ca 100644
+index 3f538f9..58aa52c 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -2918,8 +2918,8 @@ async function runDesktopApp(): Promise<void> {
+@@ -2956,8 +2956,8 @@ async function runDesktopApp(): Promise<void> {
  
    app.setAppUserModelId(
      DESKTOP_RELEASE_CHANNEL === "nightly"
@@ -196,7 +203,7 @@ index a8ecf46..19529ee 100644
    });
  });
 diff --git a/apps/desktop/test/electron-builder-config.test.ts b/apps/desktop/test/electron-builder-config.test.ts
-index 3892742..44b303d 100644
+index b9fc823..760ec7c 100644
 --- a/apps/desktop/test/electron-builder-config.test.ts
 +++ b/apps/desktop/test/electron-builder-config.test.ts
 @@ -67,7 +67,7 @@ const macConfigSchema = z
@@ -217,7 +224,7 @@ index 3892742..44b303d 100644
        target: [{ arch: ["x64"], target: "AppImage" }],
      });
      expect(config.toolsets.appimage).toBe("1.0.3");
-@@ -559,7 +559,7 @@ describe("electron-builder signing config", () => {
+@@ -579,7 +579,7 @@ describe("electron-builder signing config", () => {
  
      expect(config.publish[0]).toMatchObject(DESKTOP_AUTO_UPDATE_FEED_CONFIG);
      expect(DESKTOP_AUTO_UPDATE_FEED_CONFIG.url).toBe(
@@ -226,7 +233,7 @@ index 3892742..44b303d 100644
      );
    });
  
-@@ -569,11 +569,11 @@ describe("electron-builder signing config", () => {
+@@ -589,11 +589,11 @@ describe("electron-builder signing config", () => {
      });
      const nightlyRelease = createDesktopReleaseInfo("nightly");
  

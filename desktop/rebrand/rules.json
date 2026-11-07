@@ -296,6 +296,10 @@
     {
       "text": "bb calls",
       "reason": "calls to the bb object of the MCP code sandbox (bb.cli, bb.json), an identifier in the snippet"
+    },
+    {
+      "text": "A star on GitHub helps bb grow.",
+      "reason": "bb's GitHub star prompt links to github.com/get-bb/bb; it is off by default in 1ma (patch 0007) and, when turned on, must name the product whose repository it asks to star"
     }
   ],
   "replace": [
@@ -318,6 +322,29 @@
       "text": "bb project id (proj_",
       "to": "1ma project id (proj_",
       "reason": "the id of a project in the app, not the bb project id command; the same plugin says 'never a 1ma project id'"
+    },
+    {
+      "text": "a bb-managed workspace",
+      "to": "a 1ma-managed workspace",
+      "reason": "a workspace the app manages; bb joined to a word by a hyphen is never matched as the product, and the same message goes on with When 1ma removes that workspace"
+    }
+  ],
+  "product": [
+    {
+      "file": "apps/app/src/components/settings/ReleaseNotesPanel.tsx",
+      "text": "bb ${…} changelog",
+      "reason": "the label of the release notes of a version; bb followed by a value at the start of a text reads as a command line otherwise"
+    },
+    {
+      "file": "apps/app/src/components/settings/ReleaseNotesPanel.tsx",
+      "text": "bb ${…} has no changelog in the app.",
+      "reason": "the product and its version, not a command line"
+    },
+    {
+      "file": "apps/app/src/components/settings/ReleaseNotesPanel.tsx",
+      "text": "bb",
+      "exact": true,
+      "reason": "the JSX text before the version and the date of a release (bb {version} · {date}); the heading above already reads What's new in 1ma"
     }
   ],
   "testReplace": [
@@ -347,9 +374,15 @@
     },
     {
       "file": "apps/app/src/views/ToolsView.plugin-detail.test.tsx",
-      "find": "expect(alertText).not.toContain(\"Restart bb\");",
-      "replace": "expect(alertText).not.toContain(\"Restart 1ma\");",
+      "find": "expect(alerts[0]?.textContent).not.toContain(\"Restart bb\");",
+      "replace": "expect(alerts[0]?.textContent).not.toContain(\"Restart 1ma\");",
       "reason": "the degraded banner must not tell the user to restart the app; in 1ma that text would read Restart 1ma, so the old wording would make the check pass without testing anything"
+    },
+    {
+      "file": "apps/app/src/components/plugin/management/PluginUpdatesCard.test.tsx",
+      "find": "expect(blockedStatus.textContent).not.toContain(\"Update bb\");",
+      "replace": "expect(blockedStatus.textContent).not.toContain(\"Update 1ma\");",
+      "reason": "a blocked plugin update must not suggest updating the app; in 1ma that advice reads Update 1ma., so the old wording would make the check pass without testing anything"
     }
   ],
   "testKeep": [

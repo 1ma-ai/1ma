@@ -41,10 +41,10 @@ index f6b7401..37fb49e 100644
    "display": "standalone",
    "background_color": "#ffffff",
 diff --git a/apps/app/src/components/layout/AppLayout.tsx b/apps/app/src/components/layout/AppLayout.tsx
-index 0e078fa..69df073 100644
+index 1a5fc19..17dcdeb 100644
 --- a/apps/app/src/components/layout/AppLayout.tsx
 +++ b/apps/app/src/components/layout/AppLayout.tsx
-@@ -336,7 +336,7 @@ function SidebarTriggerOverlay({
+@@ -337,7 +337,7 @@ function SidebarTriggerOverlay({
  }
  
  const routeTitles: Record<string, { title: string }> = {

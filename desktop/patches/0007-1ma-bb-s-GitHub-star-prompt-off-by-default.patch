@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Sat, 7 Nov 2026 07:33:15 +0100
+Subject: [PATCH] 1ma: bb's GitHub star prompt off by default
+
+bb 0.49 adds a built-in plugin that asks once for a star on
+github.com/get-bb/bb. In 1ma it would ask people to star another
+product's repository, so it starts disabled, like the bb cloud plugins.
+It can still be enabled in Settings. The web marketplace lists it as off
+by default too, so it keeps matching the server registry.
+---
+ apps/server/src/services/plugins/builtin-registry.ts | 2 +-
+ apps/web/src/marketplace/bundled-marketplace.ts      | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/apps/server/src/services/plugins/builtin-registry.ts b/apps/server/src/services/plugins/builtin-registry.ts
+index 7b2974b..ab47686 100644
+--- a/apps/server/src/services/plugins/builtin-registry.ts
++++ b/apps/server/src/services/plugins/builtin-registry.ts
+@@ -238,7 +238,7 @@ export const BUILTIN_PLUGINS = [
+   {
+     name: "github-star",
+     pluginId: "bb--github-star",
+-    defaultEnabled: true,
++    defaultEnabled: false,
+   },
+ ].map((plugin): BundledPluginDefinition => ({
+   ...plugin,
+diff --git a/apps/web/src/marketplace/bundled-marketplace.ts b/apps/web/src/marketplace/bundled-marketplace.ts
+index 3e25822..a893589 100644
+--- a/apps/web/src/marketplace/bundled-marketplace.ts
++++ b/apps/web/src/marketplace/bundled-marketplace.ts
+@@ -35,6 +35,7 @@ export const OFF_BY_DEFAULT_BUNDLED_PLUGINS: ReadonlySet<string> = new Set([
+   "bb-ai",
+   "connect",
+   "connect-next",
++  "github-star",
+   "mcp",
+   "monaco-editor",
+   "plugin-api-docs",

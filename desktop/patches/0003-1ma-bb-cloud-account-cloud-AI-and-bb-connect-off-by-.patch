@@ -13,7 +13,7 @@ keeps matching the server registry.
  2 files changed, 6 insertions(+), 3 deletions(-)
 
 diff --git a/apps/server/src/services/plugins/builtin-registry.ts b/apps/server/src/services/plugins/builtin-registry.ts
-index 6958dbc..e3ccd23 100644
+index 7b8f53a..7b2974b 100644
 --- a/apps/server/src/services/plugins/builtin-registry.ts
 +++ b/apps/server/src/services/plugins/builtin-registry.ts
 @@ -63,17 +63,17 @@ export const BUILTIN_PLUGINS = [

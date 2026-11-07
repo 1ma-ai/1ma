@@ -126,19 +126,30 @@ function occurrences(text) {
   return found;
 }
 
-function overrideRanges(text, rules) {
+// Overrides are texts the rules decide by hand: replace swaps the text, keep
+// leaves its bb alone, product renames every bb inside it. An entry with a file
+// applies only in that file; with exact, only to a literal that is the text
+// once surrounding whitespace is trimmed. ${…} in a text stands for a template
+// value. The longest text claims a range first.
+function overrideRanges(text, rules, file) {
   const ranges = [];
   const claim = (start, end, range) => {
-    if (ranges.some((other) => start < other.end && other.start < end)) return;
+    if (ranges.some((other) => start < other.end && other.start < end)) return false;
     ranges.push({ start, end, ...range });
+    return true;
   };
   const entries = [
-    ...rules.replace.map((entry) => ({ ...entry, kind: "replace" })),
-    ...rules.keep.map((entry) => ({ ...entry, kind: "keep" })),
-  ].toSorted((a, b) => b.text.length - a.text.length);
-  for (const entry of entries) {
-    for (let at = text.indexOf(entry.text); at !== -1; at = text.indexOf(entry.text, at + 1)) {
-      claim(at, at + entry.text.length, { kind: entry.kind, to: entry.to });
+    ...rules.replace.map((entry) => ({ entry, kind: "replace" })),
+    ...(rules.product ?? []).map((entry) => ({ entry, kind: "product" })),
+    ...rules.keep.map((entry) => ({ entry, kind: "keep" })),
+  ]
+    .filter(({ entry }) => entry.file === undefined || entry.file === file)
+    .toSorted((a, b) => b.entry.text.length - a.entry.text.length);
+  for (const { entry, kind } of entries) {
+    const needle = entry.text.replaceAll("${…}", PLACEHOLDER);
+    if (entry.exact && text.trim() !== needle) continue;
+    for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) {
+      if (claim(at, at + needle.length, { kind, to: entry.to })) rules.used?.add(entry);
     }
   }
   return ranges;
@@ -166,12 +177,18 @@ export function rebrandProse(text, rules) {
 }
 
 export function rebrandString(text, context, rules) {
-  const ranges = overrideRanges(text, rules);
-  const decisions = ranges.map((range) =>
-    range.kind === "replace"
-      ? { index: range.start, length: range.end - range.start, kind: "replace", to: range.to }
-      : { index: range.start, kind: "keep" },
-  );
+  const ranges = overrideRanges(text, rules, context.file);
+  const decisions = ranges.flatMap((range) => {
+    if (range.kind === "replace")
+      return [
+        { index: range.start, length: range.end - range.start, kind: "replace", to: range.to },
+      ];
+    if (range.kind === "product")
+      return occurrences(text)
+        .filter((index) => range.start <= index && index < range.end)
+        .map((index) => ({ index, kind: "product" }));
+    return [{ index: range.start, kind: "keep" }];
+  });
   if (LINK.test(text)) decisions.push({ kind: "link" });
   const found = occurrences(text).filter(
     (index) => !ranges.some((range) => range.start <= index && index < range.end),
@@ -338,7 +355,7 @@ function literalEdits(file, text, options) {
     const full = segments.map((segment) => segment.cooked).join(PLACEHOLDER);
     if (!/bb/i.test(full)) return;
     if (context.kind === "module" || context.kind === "key") return;
-    const { result, decisions } = decide(full, context);
+    const { result, decisions } = decide(full, { ...context, file });
     record?.(
       file,
       display ? full.replaceAll(PLACEHOLDER, "${…}") : full,
@@ -639,7 +656,9 @@ export function createIndex(rules) {
       variants(text, [], occurrences(text), scope, explicit, false);
     },
   };
-  for (const entry of rules.keep) index.keep(entry.text, null, true);
+  for (const entry of rules.keep)
+    if (entry.file === undefined)
+      index.keep(entry.text.replaceAll("${…}", PLACEHOLDER), null, true);
   return index;
 }
 
@@ -949,7 +968,7 @@ function markdownEdits(file, text, rules, record) {
   for (const line of text.split("\n")) {
     if (/^\s*(?:```|~~~)/.test(line)) fenced = !fenced;
     else if (!fenced && /bb/i.test(line)) {
-      const { result, decisions } = rebrandString(line, { kind: "jsx-text" }, rules);
+      const { result, decisions } = rebrandString(line, { kind: "jsx-text", file }, rules);
       record(file, line, result, decisions);
       if (result !== line) edits.push({ start: offset, end: offset + line.length, text: result });
     }
@@ -965,7 +984,7 @@ function manifestEdits(file, text, rules, record) {
   for (const key of ["name", "description"]) {
     const value = manifest[key];
     if (typeof value !== "string") continue;
-    const { result, decisions } = rebrandString(value, { kind: "jsx-text" }, rules);
+    const { result, decisions } = rebrandString(value, { kind: "jsx-text", file }, rules);
     record(file, value, result, decisions);
     if (result === value) continue;
     const needle = `${JSON.stringify(key)}: ${JSON.stringify(value)}`;
@@ -1136,7 +1155,7 @@ export function rebrandTree(root, rules, { write = false } = {}) {
       // a root bb does not have
     }
   }
-  rules = { ...rules, vocabulary: collectVocabulary(root, files) };
+  rules = { ...rules, vocabulary: collectVocabulary(root, files), used: new Set() };
   const inventory = new Map();
   const changed = [];
   const testsChanged = [];
@@ -1185,7 +1204,7 @@ export function rebrandTree(root, rules, { write = false } = {}) {
     if (excluded(file, rules) || !shipped(file)) continue;
     const value = JSON.parse(readFileSync(path.join(root, file), "utf8")).bb?.name;
     if (typeof value !== "string") continue;
-    const { result } = rebrandString(value, { kind: "jsx-text" }, rules);
+    const { result } = rebrandString(value, { kind: "jsx-text", file }, rules);
     if (result !== value) names.set(value, result);
   }
   const named = (cooked) => {
@@ -1307,6 +1326,14 @@ export function rebrandTree(root, rules, { write = false } = {}) {
   }
   for (const file of [...testEdits.keys(), ...testKeeps.keys()])
     if (!files.includes(file)) throw new Error(`a test rule names a missing file: ${file}`);
+  for (const kind of ["replace", "product", "keep"])
+    for (const entry of rules[kind] ?? []) {
+      if (entry.file === undefined) continue;
+      if (!files.includes(entry.file))
+        throw new Error(`a ${kind} rule names a missing file: ${entry.file}`);
+      if (!rules.used.has(entry))
+        throw new Error(`${entry.file}: ${kind} rule "${entry.text}" no longer matches; review it`);
+    }
   if (suspicious.length > 0)
     throw new Error(
       `These negative assertions in bb's tests may check text the rebrand renamed, so they could pass without testing anything. Add a testReplace or testKeep entry with a reason for each:\n${suspicious.join("\n")}`,

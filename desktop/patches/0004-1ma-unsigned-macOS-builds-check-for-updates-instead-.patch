@@ -15,10 +15,10 @@ version check that reports new releases and skips auto-install.
  3 files changed, 7 insertions(+), 4 deletions(-)
 
 diff --git a/apps/desktop/src/desktop-update-provider.ts b/apps/desktop/src/desktop-update-provider.ts
-index a2c09fd..4e05087 100644
+index 7c25886..81b6900 100644
 --- a/apps/desktop/src/desktop-update-provider.ts
 +++ b/apps/desktop/src/desktop-update-provider.ts
-@@ -84,9 +84,12 @@ interface ResolveDesktopUpdateSupportArgs {
+@@ -86,9 +86,12 @@ interface ResolveDesktopUpdateSupportArgs {
  export function resolveDesktopUpdateSupport(
    args: ResolveDesktopUpdateSupportArgs,
  ): DesktopUpdateSupport {
@@ -33,10 +33,10 @@ index a2c09fd..4e05087 100644
    const appImagePath = args.env.APPIMAGE?.trim() ?? "";
    if (appImagePath.length === 0) {
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index a8dced8..505e05e 100644
+index 59a72bb..92cdadc 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -3305,7 +3305,7 @@ async function runDesktopApp(): Promise<void> {
+@@ -3351,7 +3351,7 @@ async function runDesktopApp(): Promise<void> {
      desktopAutoUpdateService.start();
    } else {
      desktopLogger.info(

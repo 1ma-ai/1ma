@@ -7,13 +7,20 @@ import {
   diffInventory,
   formatInventory,
   loadRules,
+  PLACEHOLDER,
   rebrandProse,
   rebrandString,
   rebrandTree,
 } from "./rebrand.mjs";
 
+// Rules limited to one file of bb's tree name files these fixtures do not have.
+const loaded = loadRules();
+const general = (entries = []) => entries.filter((entry) => entry.file === undefined);
 const rules = {
-  ...loadRules(),
+  ...loaded,
+  replace: general(loaded.replace),
+  keep: general(loaded.keep),
+  product: general(loaded.product),
   vocabulary: new Map([
     ["thread", new Set(["list", "show", "tell", "spawn"])],
     ["server", new Set(["move", "export", "import"])],
@@ -522,6 +529,74 @@ const tree = (files) => {
   }
   return root;
 };
+
+const label = (file) => ({ kind: "jsx-attribute", name: "aria-label", file });
+const author = (file) => ({ kind: "property", name: "name", file });
+
+describe("an override can be limited to one file or one whole literal", () => {
+  const version = `bb ${PLACEHOLDER} changelog`;
+  const scoped = {
+    ...rules,
+    product: [{ file: "apps/app/src/notes.tsx", text: "bb ${…} changelog", reason: "test" }],
+    replace: [
+      ...rules.replace,
+      { file: "apps/server/scripts/gen.ts", text: "BB", exact: true, to: "1ma", reason: "test" },
+    ],
+  };
+
+  test("product renames every bb of its text in its file, template values included", () => {
+    assert.equal(
+      rebrandString(version, label("apps/app/src/notes.tsx"), scoped).result,
+      `1ma ${PLACEHOLDER} changelog`,
+    );
+    assert.equal(rebrandString(version, label("apps/app/src/other.tsx"), scoped).result, version);
+  });
+
+  test("exact replaces only a literal that is the whole text", () => {
+    assert.equal(rebrandString("BB", author("apps/server/scripts/gen.ts"), scoped).result, "1ma");
+    assert.equal(rebrandString("BB", author("apps/server/scripts/other.ts"), scoped).result, "BB");
+    assert.equal(
+      rebrandString("BB Official", author("apps/server/scripts/gen.ts"), scoped).result,
+      rebrandString("BB Official", author("apps/server/scripts/other.ts"), scoped).result,
+    );
+  });
+
+  test("prepare stops when a rule for one file no longer matches or names a missing file", () => {
+    const files = {
+      "apps/app/package.json": manifest("@bb/app"),
+      "apps/app/src/notes.tsx":
+        "export const Notes = ({ version }) => <section aria-label={`bb ${version} changelog`} />;\n",
+    };
+    const root = tree(files);
+    after(() => rmSync(root, { recursive: true, force: true }));
+    rebrandTree(
+      root,
+      { ...scoped, replace: rules.replace, testReplace: [], testKeep: [] },
+      {
+        write: true,
+      },
+    );
+    assert.match(
+      readFileSync(path.join(root, "apps/app/src/notes.tsx"), "utf8"),
+      /aria-label=\{`1ma \$\{version\} changelog`\}/,
+    );
+    assert.throws(
+      () =>
+        rebrandTree(root, {
+          ...scoped,
+          replace: rules.replace,
+          product: [{ file: "apps/app/src/notes.tsx", text: "bb ${…} notes", reason: "test" }],
+          testReplace: [],
+          testKeep: [],
+        }),
+      /apps\/app\/src\/notes\.tsx: product rule "bb \$\{…\} notes" no longer matches/,
+    );
+    assert.throws(
+      () => rebrandTree(root, { ...scoped, testReplace: [], testKeep: [] }),
+      /a replace rule names a missing file: apps\/server\/scripts\/gen\.ts/,
+    );
+  });
+});
 
 describe("prepare stops where a test could pass without testing anything", () => {
   const source = {

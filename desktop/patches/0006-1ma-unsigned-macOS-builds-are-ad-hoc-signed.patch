@@ -71,10 +71,10 @@ index c4efca3..1d62ee8 100644
        : "false";
  
 diff --git a/apps/desktop/test/electron-builder-config.test.ts b/apps/desktop/test/electron-builder-config.test.ts
-index 44b303d..9c0b50e 100644
+index 760ec7c..7c4f39a 100644
 --- a/apps/desktop/test/electron-builder-config.test.ts
 +++ b/apps/desktop/test/electron-builder-config.test.ts
-@@ -607,12 +607,12 @@ describe("electron-builder signing config", () => {
+@@ -627,12 +627,12 @@ describe("electron-builder signing config", () => {
      expect(config.dmg.sign).toBe(false);
    });
  
