@@ -18,6 +18,7 @@ import {
   hostCopyPlan,
   importIntoOneMa,
   parseArgs,
+  processesUsing,
   runningFrom,
 } from "./migrate-from-bb.mjs";
 
@@ -45,6 +46,12 @@ function bbFolder() {
   write(from, "plugins/provider-claude-code/bridge-data/session.json", "{}");
   write(from, "plugins/environment-git-worktree/host-data/worktrees/proj/wt/file", "code");
   write(from, "plugins/environment-git-worktree/host-data/state.json", "{}");
+  write(
+    from,
+    "plugins/environment-personal-workspace/host-data/workspaces/thr_1/notes.md",
+    "draft",
+  );
+  write(from, "checkouts/demo/README.md", "cloned");
   write(from, "logs/server.log", "log");
   write(from, "bin/bb", "#!/bin/sh");
   return from;
@@ -52,7 +59,7 @@ function bbFolder() {
 
 // Stands in for 1ma's bb.js: "server import" writes a database into the data
 // folder and prints what the real command prints with --json.
-function fakeCli({ sourceDataDir, sourceServerHostId }) {
+function fakeCli({ sourceDataDir, sourceServerHostId, fail = false }) {
   const cli = `${fresh("cli")}.mjs`;
   writeFileSync(
     cli,
@@ -64,6 +71,7 @@ const dir = args[args.indexOf("--data-dir") + 1];
 mkdirSync(dir, { recursive: true });
 writeFileSync(dir + "/bb.db", "imported");
 writeFileSync(dir + "/server-import.json", "{}");
+if (${JSON.stringify(fail)}) { console.error("This export came from bb 0.50.0; install that version or newer before importing."); process.exit(1); }
 process.stdout.write(JSON.stringify({
   dataDir: dir,
   bbVersion: "0.49.0",
@@ -82,8 +90,22 @@ function archive() {
   return file;
 }
 
-const importArgs = (from, to, cli, more = []) =>
-  parseArgs(["import", "--from", from, "--to", to, "--archive", archive(), "--cli", cli, ...more]);
+const noProcesses = () => [];
+const importArgs = (from, to, cli, more = []) => ({
+  ...parseArgs([
+    "import",
+    "--from",
+    from,
+    "--to",
+    to,
+    "--archive",
+    archive(),
+    "--cli",
+    cli,
+    ...more,
+  ]),
+  listProcesses: noProcesses,
+});
 
 describe("arguments", () => {
   test("each command names what it needs, and a typo stops it", () => {
@@ -126,6 +148,7 @@ describe("the machine data an export leaves behind", () => {
         "local-plugins",
         "plugins/browser-automation/host-data",
         "plugins/environment-git-worktree/host-data",
+        "plugins/environment-personal-workspace/host-data",
         "plugins/provider-claude-code/bridge-data",
       ],
     );
@@ -145,6 +168,14 @@ describe("importing into 1ma", () => {
     assert.ok(existsSync(path.join(to, "plugins/browser-automation/host-data/profile/Cookies")));
     assert.ok(existsSync(path.join(to, "plugins/environment-git-worktree/host-data/state.json")));
     assert.ok(!existsSync(path.join(to, "plugins/environment-git-worktree/host-data/worktrees")));
+    assert.ok(
+      !existsSync(path.join(to, "plugins/environment-personal-workspace/host-data/workspaces")),
+    );
+    assert.ok(!existsSync(path.join(to, "checkouts")));
+    assert.ok(record.sharedWithBb.includes("checkouts"));
+    assert.ok(
+      record.sharedWithBb.includes("plugins/environment-personal-workspace/host-data/workspaces"),
+    );
     assert.ok(!existsSync(path.join(to, "logs")));
     assert.ok(!existsSync(path.join(to, "bin")));
     assert.equal(record.bbVersion, "0.49.0");
@@ -163,10 +194,80 @@ describe("importing into 1ma", () => {
     assert.throws(() => importIntoOneMa(importArgs(from, to, cli), quiet), /not from/);
     assert.ok(!existsSync(to));
     const kept = readdirSync(path.dirname(to)).find((name) =>
-      name.startsWith(`${path.basename(to)}.wrong-archive-`),
+      name.startsWith(`${path.basename(to)}.failed-`),
     );
     assert.ok(kept);
     assert.ok(!existsSync(path.join(path.dirname(to), kept, "host-id")));
+  });
+
+  test("a failed import puts the 1ma folder that was moved aside back", () => {
+    const from = bbFolder();
+    const to = fresh("1ma");
+    write(to, "bb.db", "earlier 1ma");
+    const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1", fail: true });
+    assert.throws(
+      () => importIntoOneMa(importArgs(from, to, cli, ["--move-aside"]), quiet),
+      /install that version or newer[\s\S]*is back as it was/,
+    );
+    assert.equal(readFileSync(path.join(to, "bb.db"), "utf8"), "earlier 1ma");
+    const names = readdirSync(path.dirname(to));
+    assert.ok(names.some((name) => name.startsWith(`${path.basename(to)}.failed-`)));
+    assert.ok(!names.some((name) => name.startsWith(`${path.basename(to)}.before-migration-`)));
+  });
+
+  test("an export older than bb's latest work is refused unless confirmed", () => {
+    const from = bbFolder();
+    const to = fresh("1ma");
+    const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
+    const options = importArgs(from, to, cli);
+    const later = new Date(Date.now() + 10 * 60_000);
+    utimesSync(path.join(from, "thread-storage/thr_1/page.html"), later, later);
+    assert.throws(() => importIntoOneMa(options, quiet), /bb wrote files after the export/);
+    assert.ok(!existsSync(to));
+    importIntoOneMa({ ...options, archiveIsCurrent: true }, quiet);
+    assert.ok(existsSync(path.join(to, "bb.db")));
+  });
+
+  test("refuses folders inside each other and processes still using them", () => {
+    const from = bbFolder();
+    const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
+    assert.throws(
+      () => importIntoOneMa(importArgs(from, path.join(from, "copy"), cli), quiet),
+      /two separate folders/,
+    );
+    assert.throws(
+      () => importIntoOneMa(importArgs(from, from, cli), quiet),
+      /two separate folders/,
+    );
+    const to = fresh("1ma");
+    const browser = () => [
+      {
+        pid: 4242,
+        ppid: 1,
+        command: `chrome --user-data-dir=${from}/plugins/browser-automation/host-data/profile`,
+      },
+    ];
+    assert.throws(
+      () => importIntoOneMa({ ...importArgs(from, to, cli), listProcesses: browser }, quiet),
+      /4242 chrome/,
+    );
+    assert.ok(!existsSync(to));
+    // The script and the shells that started it may name a file inside the
+    // folder on their own command line; they do not count.
+    const chain = () => [
+      { pid: 500, ppid: 400, command: `node migrate-from-bb.mjs import && cat ${from}/host-id` },
+      {
+        pid: 400,
+        ppid: 1,
+        command: `bash -c "node migrate-from-bb.mjs import; cat ${from}/host-id"`,
+      },
+      ...browser(),
+    ];
+    assert.deepEqual(
+      processesUsing([from], chain, 500).map((found) => found.pid),
+      [4242],
+    );
+    assert.ok(Array.isArray(processesUsing([from])));
   });
 
   test("a 1ma folder in use is kept aside only when asked", () => {
