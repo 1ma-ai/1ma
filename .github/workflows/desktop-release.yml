@@ -26,6 +26,9 @@ jobs:
     name: Publish a 1ma Desktop test build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # The job has no checkout, so gh release needs the repository named.
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Check the build run and bb's tests for its commit
         id: build
@@ -102,9 +105,13 @@ jobs:
           # GITHUB_TOKEN may not create a release on a commit that changes workflow files
           # (HTTP 403). A maintainer then creates the pre-release with the tag at the build
           # commit, and a rerun of this workflow uploads the files into it.
-          if gh release view "$tag" >/dev/null 2>&1; then
+          # Fails on any error other than a missing release, so a dry run cannot pass
+          # on a check that never ran.
+          if gh release view "$tag" --json tagName >/dev/null 2>release-view.err; then
             tagged="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)"
             [[ "$tagged" == "$COMMIT" ]] || fail "$tag points at $tagged, not at the build commit $COMMIT"
+          elif ! grep -q "release not found" release-view.err; then
+            fail "cannot read release $tag: $(cat release-view.err)"
           fi
           if [[ "$DRY_RUN" == "true" ]]; then
             echo "dry run: would publish $tag at $COMMIT with:"
