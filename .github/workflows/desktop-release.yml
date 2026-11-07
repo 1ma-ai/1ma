@@ -96,7 +96,7 @@ jobs:
           cat > notes.md <<NOTES
           Test build of 1ma Desktop for macOS on Apple Silicon, built from bb ${upstream} with the 1ma patches at ${COMMIT}. Download the .dmg; SHA256SUMS lists the checksums.
 
-          1ma-server-${version}-${RUN_ID}.tgz is the 1ma server for Linux from the same commit (bb's bb-app package with the 1ma patches and rebrand). Install it with npm install <file> in an empty folder and start node_modules/.bin/bb-app with Node 24; the command keeps the name bb-app for now.
+          1ma-server-${version}-${RUN_ID}.tgz is the 1ma server for Linux from the same commit (bb's bb-app package with the 1ma patches and rebrand). Install it with npm install <file> in an empty folder and start node_modules/.bin/bb-app with Node 24 and --no-in-app-updates (without it, bb-app's own updater installs upstream bb from npm); the command keeps the name bb-app for now.
 
           The build is signed ad hoc, not by Apple yet. First launch: open 1ma once, then System Settings > Privacy & Security > Open Anyway, and enter your password. macOS treats every test build as a new app, so it asks again after each update, also for permissions such as the microphone.
 
