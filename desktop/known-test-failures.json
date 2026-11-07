@@ -1,0 +1,30 @@
+{
+  "$comment": "Tests of the pinned bb release that fail on GitHub's runners with and without the 1ma changes, while bb's own CI passes them. Desktop bb tests still run them; a shard fails on anything not listed here. Review every entry when upstream.json moves to another bb release and set bb to that tag; see desktop/README.md.",
+  "bb": "desktop-v0.49.0",
+  "tests": [
+    {
+      "package": "bb-plugin-connect",
+      "file": "app.test.tsx",
+      "name": "connect setup guide section > reports a sign-in that could not start or was denied as a sign-in failure",
+      "reason": "the test clicks Set up before the status has loaded, which slower runners expose; bb fixed the test after 0.49.0 (get-bb/bb#7201); fails in the baseline run 42350376395 too"
+    },
+    {
+      "package": "bb-environment-provider-host",
+      "file": "test/workspace-git-fetch.test.ts",
+      "name": "remote branch refresh > fetches and prunes only origin when other remotes exist (interactive: true)",
+      "reason": "Git 2.56, on GitHub's ubuntu-24.04 image, updates the remote-tracking refs of the remote whose URL a push names; the test's setup pushes to remote URLs and expects their refs untouched, which holds on the older Git of bb's runners; fails in the baseline run 42350376395 too"
+    },
+    {
+      "package": "bb-environment-provider-host",
+      "file": "test/workspace-git-fetch.test.ts",
+      "name": "remote branch refresh > fetches and prunes only origin when other remotes exist (interactive: false)",
+      "reason": "the same Git 2.56 push-to-URL behaviour as the interactive case"
+    },
+    {
+      "package": "bb-environment-provider-host",
+      "file": "test/workspace-git-fetch.test.ts",
+      "name": "remote branch refresh > skips repositories with several remotes and none named origin",
+      "reason": "the same Git 2.56 push-to-URL behaviour: the setup's pushes move refs the test expects to stay"
+    }
+  ]
+}

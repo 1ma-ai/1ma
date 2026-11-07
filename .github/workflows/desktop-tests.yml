@@ -132,7 +132,14 @@ jobs:
         env:
           BB_CI_TEST_SHARD: ${{ matrix.vitestShard }}
           VITEST_MAX_WORKERS: ${{ (startsWith(matrix.shard, 'server-') || matrix.shard == 'integration') && '4' || '2' }}
-        run: ${{ contains(matrix.filter, '--filter=@bb/desktop') && 'xvfb-run -a' || '' }} pnpm exec turbo run test ${{ matrix.filter }} --continue --output-logs=new-only --concurrency=4
+        # Failures bb's own CI does not see (another git, faster runners) are listed
+        # with a reason in desktop/known-test-failures.json; any other failure fails.
+        run: |
+          set +e
+          ${{ contains(matrix.filter, '--filter=@bb/desktop') && 'xvfb-run -a' || '' }} pnpm exec turbo run test ${{ matrix.filter }} --continue --output-logs=new-only --concurrency=4 2>&1 | tee "$RUNNER_TEMP/test.log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          node "$GITHUB_WORKSPACE/desktop/scripts/known-test-failures.mjs" "$RUNNER_TEMP/test.log" "$status"
       - name: Test native browser address interactions
         if: contains(matrix.filter, '--filter=@bb/desktop')
         working-directory: ${{ runner.temp }}/bb-src
