@@ -15,8 +15,9 @@ const known = {
   ],
 };
 const gitFailure = `${ESC}[41m${ESC}[1m FAIL ${ESC}[22m${ESC}[49m ${ESC}[30m${ESC}[42m bb-environment-provider-host:isolated ${ESC}[49m${ESC}[39m test/workspace-git-fetch.test.ts${ESC}[2m > ${ESC}[22mremote branch refresh${ESC}[2m > ${ESC}[22mfetches and prunes only origin when other remotes exist (interactive: true)`;
-const summary = (tasks) =>
-  `\n Tasks:    51 successful, 52 total\nFailed:    ${tasks}\n ERROR  run failed: command  exited (1)\n`;
+const counts = (failed) => `\n      Tests  ${failed} failed | 45 passed (${45 + failed})\n`;
+const summary = (tasks, failed = 1) =>
+  `${counts(failed)}\n Tasks:    51 successful, 52 total\nFailed:    ${tasks}\n ERROR  run failed: command  exited (1)\n`;
 const run = (log, status = 1, list = known) =>
   decide({ status, log, known: list, tag: "desktop-v0.49.0" });
 
@@ -54,7 +55,7 @@ describe("deciding a shard", () => {
 
   test("fails on a failure that is not listed", () => {
     const other = gitFailure.replace("(interactive: true)", "(interactive: false)");
-    const result = run(`${gitFailure}\n${other}${summary("bb-environment-provider-host#test")}`);
+    const result = run(`${gitFailure}\n${other}${summary("bb-environment-provider-host#test", 2)}`);
     assert.equal(result.ok, false);
     assert.ok(result.lines.some((line) => line.startsWith("new failure:")));
   });
@@ -75,6 +76,19 @@ describe("deciding a shard", () => {
       false,
     );
     assert.equal(run(gitFailure).ok, false);
+  });
+
+  test("an error outside any test, next to a known failure, fails the shard", () => {
+    const unhandled = `\n⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯\nVitest caught 1 unhandled error during the test run.\n      Errors  1 error\n`;
+    const result = run(`${gitFailure}${unhandled}${summary("bb-environment-provider-host#test")}`);
+    assert.equal(result.ok, false);
+    assert.ok(result.lines.some((line) => line.includes("outside any test")));
+  });
+
+  test("a failed test vitest counted but the log does not name fails the shard", () => {
+    const result = run(`${gitFailure}${summary("bb-environment-provider-host#test", 2)}`);
+    assert.equal(result.ok, false);
+    assert.ok(result.lines.some((line) => line.includes("counted 2 failed tests")));
   });
 
   test("a list reviewed for another bb release fails even a green shard", () => {

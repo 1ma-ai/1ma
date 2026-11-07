@@ -6,7 +6,7 @@
 // test, fails the shard. The list names the bb tag it was reviewed for, so a
 // new bb release cannot inherit it unreviewed.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,6 +17,10 @@ const FAILED = /(?:^|\s)FAIL\s+(.+?)\s*$/u;
 const TASK = String.raw`[@\w./-]+#[\w:-]+`;
 const FAILED_TASKS = new RegExp(String.raw`(?:^|\s)Failed:\s+(${TASK}(?:,\s*${TASK})*)\s*$`, "u");
 const TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]sx?$/u;
+// vitest's own counts: the failed tests of a run, and errors outside any test.
+const FAILED_COUNT = /(?:^|\s)Tests\s+(\d+)\s+failed\b/u;
+const UNHANDLED =
+  /Unhandled (?:Errors?|Rejections?)\b|Vitest caught \d+ unhandled|(?:^|\s)Errors\s+\d+\s+errors?\b/u;
 
 // vitest reports each failed test as "FAIL  <project>  <file> > <suite> > <test>"
 // and a file that failed as a whole without " > <test>"; such a file, or a test
@@ -24,8 +28,14 @@ const TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]sx?$/u;
 export function failuresIn(log) {
   const tests = [];
   const tasks = new Set();
+  let reported = 0;
+  let named = 0;
+  let unhandled = false;
   for (const raw of log.split("\n")) {
     const line = raw.replaceAll(ANSI, "");
+    const count = FAILED_COUNT.exec(line);
+    if (count) reported += Number(count[1]);
+    if (UNHANDLED.test(line)) unhandled = true;
     const failedTasks = FAILED_TASKS.exec(line);
     if (failedTasks)
       for (const task of failedTasks[1].split(",")) if (task.trim()) tasks.add(task.trim());
@@ -36,9 +46,10 @@ export function failuresIn(log) {
     const file = parts.find((part) => TEST_FILE.test(part)) ?? parts.at(-1);
     const label = parts[0] === file ? null : parts[0];
     const test = { package: label?.split(":")[0] ?? null, file, name: names.join(" > ") };
+    if (test.name !== "") named += 1;
     if (!tests.some((seen) => sameTest(seen, test))) tests.push(test);
   }
-  return { tests, tasks: [...tasks] };
+  return { tests, tasks: [...tasks], reported, named, unhandled };
 }
 
 function sameTest(a, b) {
@@ -54,10 +65,18 @@ export function decide({ status, log, known, tag }) {
       ],
     };
   if (status === 0) return { ok: true, lines: [] };
-  const { tests, tasks } = failuresIn(log);
+  const { tests, tasks, reported, named, unhandled } = failuresIn(log);
   const lines = [];
   let ok = tasks.length > 0;
   if (!ok) lines.push(`turbo exited with ${status}, but no failed task was reported`);
+  if (unhandled) {
+    ok = false;
+    lines.push("vitest reported errors outside any test; they are never on the list");
+  }
+  if (reported !== named) {
+    ok = false;
+    lines.push(`vitest counted ${reported} failed tests, but the log names ${named}`);
+  }
   for (const task of tasks) {
     const [name, script] = task.split("#");
     const failed = tests.filter((test) => test.package === name);
@@ -99,4 +118,5 @@ function main(argv) {
   process.exitCode = ok ? 0 : 1;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) main(process.argv.slice(2));
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url))
+  main(process.argv.slice(2));
