@@ -46,7 +46,7 @@ curl -s -m 3 http://127.0.0.1:38886/ >/dev/null && echo "still answering"
 
 Шаг 5. Перенос, сначала пробный прогон, потом настоящий:
 env -i HOME=/home/dev PATH=/home/dev/.local/opt/node24/bin:/usr/bin:/bin node /home/dev/1ma-migration/migrate-from-bb.mjs import --archive /home/dev/1ma-migration/bb-server.tar --cli /home/dev/.local/opt/1ma-linux/node_modules/bb-app/dist/bb.js --move-aside --dry-run
-(проверить вывод: bb data /home/dev/.bb, 1ma data /home/dev/.1ma; старая тестовая папка /home/dev/.1ma будет отложена в сторону)
+(проверить вывод: bb data /home/dev/.bb, 1ma data /home/dev/.1ma. Папки /home/dev/.1ma сейчас нет: прежний тестовый экземпляр удалён 9 ноября 2026 года. Если она появилась, скрипт отложит её в сторону.)
 та же команда без --dry-run. Должно закончиться строками «imported …» и «next: start 1ma». Если скрипт отказывает (запущенные процессы, экспорт старше работы в bb, ошибка импорта) — прислать вывод; при ошибке он сам возвращает отложенную папку на место.
 
 Шаг 6. Запустить 1ma той же командой и тем же механизмом, заменив только путь
@@ -59,6 +59,7 @@ cat /home/dev/.1ma/bb-app-runtime.json                           → version 0.4
 env -i HOME=/home/dev PATH=/home/dev/.local/opt/node24/bin:/usr/bin:/bin /home/dev/.1ma/bin/bb machine list    → одна машина, server, connected, с тем же id, что в /home/dev/.bb/host-id
 env -i HOME=/home/dev PATH=/home/dev/.local/opt/node24/bin:/usr/bin:/bin /home/dev/.1ma/bin/bb thread list     → те же треды
 env -i HOME=/home/dev PATH=/home/dev/.local/opt/node24/bin:/usr/bin:/bin /home/dev/.1ma/bin/bb plugin list     → плагины 1ma running, ни одного в error (плагин, установленный из рабочей папки треда, надо поставить заново из его папки)
+env -i HOME=/home/dev PATH=/home/dev/.local/opt/node24/bin:/usr/bin:/bin /home/dev/.1ma/bin/bb automation list --project proj_personal     → есть «Daily updates: Claude Code, Codex» (переехала из bb, ежедневно в 04:30 обновляет Claude Code)
 И с Mac: в 1ma открыть Linux-сервер (меню Server) — интерфейс 1ma, треды на месте.
 
 Шаг 8. Отчёт владельцу: что нашлось в шаге 0 и что изменено, вывод шагов 2, 3, 5, 7. Экспорт не удалять до подтверждения владельца.
