@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: 1ma <hello@1ma.ai>
-Date: Wed, 11 Nov 2026 14:20:20 +0100
+Date: Wed, 11 Nov 2026 14:44:36 +0100
 Subject: [PATCH] 1ma: a failed update download or install is tried again after
  six hours
 
@@ -14,8 +14,8 @@ startup) is still left alone, so a broken build does not restart the server
 in a loop.
 ---
  .../services/system/app-update-schedule.ts    | 20 ++++++-
- apps/server/test/system/app-update.test.ts    | 54 +++++++++++++++++--
- 2 files changed, 69 insertions(+), 5 deletions(-)
+ apps/server/test/system/app-update.test.ts    | 55 +++++++++++++++++--
+ 2 files changed, 70 insertions(+), 5 deletions(-)
 
 diff --git a/apps/server/src/services/system/app-update-schedule.ts b/apps/server/src/services/system/app-update-schedule.ts
 index ff3da50..d9898a2 100644
@@ -79,10 +79,27 @@ index ff3da50..d9898a2 100644
        if (skipReason !== null) {
          args.logger.debug(
 diff --git a/apps/server/test/system/app-update.test.ts b/apps/server/test/system/app-update.test.ts
-index 7968914..4e7eccc 100644
+index 7968914..8105e52 100644
 --- a/apps/server/test/system/app-update.test.ts
 +++ b/apps/server/test/system/app-update.test.ts
-@@ -734,17 +734,23 @@ function createScheduledService(args: {
+@@ -629,6 +629,7 @@ const PREPARING_STATUS = {
+ 
+ function createScheduledService(args: {
+   autoCheck?: boolean;
++  now?: () => Date;
+   runningThreads: number;
+ }) {
+   const running = { count: args.runningThreads };
+@@ -673,7 +674,7 @@ function createScheduledService(args: {
+     isEnabled: () => experiment.enabled,
+     logger: testLogger,
+     notifyChanged,
+-    now: () => new Date("2026-10-23T00:00:00.000Z"),
++    now: args.now ?? (() => new Date("2026-10-23T00:00:00.000Z")),
+     onChangedMessage: (listener) => {
+       listeners.add(listener);
+       return () => listeners.delete(listener);
+@@ -734,17 +735,23 @@ function createScheduledService(args: {
    };
  }
  
@@ -109,18 +126,7 @@ index 7968914..4e7eccc 100644
        to: { kind: "npm", packageRoot: `/pkg/${version}`, version },
      },
    };
-@@ -885,7 +891,9 @@ describe("checking for bb updates automatically", () => {
-       autoCheck: true,
-       runningThreads: 0,
-     });
--    launcher.push(failedResult("1.1.0"));
-+    launcher.push(
-+      failedResult("1.1.0", { finishedAt: new Date().toISOString() }),
-+    );
- 
-     await vi.advanceTimersByTimeAsync(first + interval);
-     expect(applyRequests()).toEqual([]);
-@@ -897,6 +905,44 @@ describe("checking for bb updates automatically", () => {
+@@ -897,6 +904,46 @@ describe("checking for bb updates automatically", () => {
      ]);
    });
  
@@ -130,6 +136,7 @@ index 7968914..4e7eccc 100644
 +      const sixHours = 6 * 60 * 60_000;
 +      const { applyRequests, launcher } = createScheduledService({
 +        autoCheck: true,
++        now: () => new Date(),
 +        runningThreads: 0,
 +      });
 +      launcher.push(
@@ -149,6 +156,7 @@ index 7968914..4e7eccc 100644
 +  it("does not try again a version that failed to start", async () => {
 +    const { applyRequests, launcher } = createScheduledService({
 +      autoCheck: true,
++      now: () => new Date(),
 +      runningThreads: 0,
 +    });
 +    launcher.push(
