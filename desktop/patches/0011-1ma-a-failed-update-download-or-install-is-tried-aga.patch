@@ -1,0 +1,167 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Wed, 11 Nov 2026 14:20:20 +0100
+Subject: [PATCH] 1ma: a failed update download or install is tried again after
+ six hours
+
+Once an attempt at a version fails, bb's automatic updates leave that version
+alone until a newer one appears. When the install runs through a wrapper that
+can give up, such as a shared job queue that stays busy, one busy evening
+would keep the server on its old build until the next release. A version
+whose download or install failed (phase prepare or install) is now tried
+again six hours after the failure; a version that failed to start (phase
+startup) is still left alone, so a broken build does not restart the server
+in a loop.
+---
+ .../services/system/app-update-schedule.ts    | 20 ++++++-
+ apps/server/test/system/app-update.test.ts    | 54 +++++++++++++++++--
+ 2 files changed, 69 insertions(+), 5 deletions(-)
+
+diff --git a/apps/server/src/services/system/app-update-schedule.ts b/apps/server/src/services/system/app-update-schedule.ts
+index ff3da50..d9898a2 100644
+--- a/apps/server/src/services/system/app-update-schedule.ts
++++ b/apps/server/src/services/system/app-update-schedule.ts
+@@ -1,5 +1,6 @@
+ import type {
+   SystemAppUpdateAvailable,
++  SystemAppUpdateResult,
+   SystemAppUpdateRevision,
+   SystemAppUpdateStatus,
+ } from "@bb/server-contract";
+@@ -16,6 +17,8 @@ const IDLE_SETTLE_MS = 5_000;
+ 
+ export const AUTO_UPDATE_IDLE_MS = 15 * 60_000;
+ 
++export const FAILED_UPDATE_RETRY_MS = 6 * 60 * 60_000;
++
+ export interface AutoUpdateCheckMs {
+   first: number;
+   interval: number;
+@@ -67,9 +70,22 @@ function revisionKey(revision: SystemAppUpdateRevision): string {
+   return revision.commit ?? revision.version;
+ }
+ 
++function retriesFailedUpdate(
++  result: SystemAppUpdateResult,
++  now: Date,
++): boolean {
++  if (result.phase !== "prepare" && result.phase !== "install") return false;
++  const finishedAt = Date.parse(result.finishedAt);
++  return (
++    Number.isFinite(finishedAt) &&
++    now.getTime() - finishedAt >= FAILED_UPDATE_RETRY_MS
++  );
++}
++
+ function automaticUpdateSkipReason(
+   status: SystemAppUpdateStatus,
+   skippedKey: string | null,
++  now: Date,
+ ): string | null {
+   if (status.available === null) return "up to date";
+   if (status.blocked !== null) return status.blocked.message;
+@@ -81,7 +97,8 @@ function automaticUpdateSkipReason(
+   if (
+     status.lastResult !== null &&
+     status.lastResult.outcome === "failed" &&
+-    revisionKey(status.lastResult.to) === key
++    revisionKey(status.lastResult.to) === key &&
++    !retriesFailedUpdate(status.lastResult, now)
+   ) {
+     return "the last attempt at this update failed";
+   }
+@@ -333,6 +350,7 @@ export function createScheduledAppUpdateService(args: {
+       const skipReason = automaticUpdateSkipReason(
+         status,
+         args.skippedUpdate.get(),
++        now(),
+       );
+       if (skipReason !== null) {
+         args.logger.debug(
+diff --git a/apps/server/test/system/app-update.test.ts b/apps/server/test/system/app-update.test.ts
+index 7968914..4e7eccc 100644
+--- a/apps/server/test/system/app-update.test.ts
++++ b/apps/server/test/system/app-update.test.ts
+@@ -734,17 +734,23 @@ function createScheduledService(args: {
+   };
+ }
+ 
+-function failedResult(version: string): Partial<LauncherAppUpdateStatus> {
++function failedResult(
++  version: string,
++  options: {
++    finishedAt?: string;
++    phase?: "prepare" | "install" | "startup";
++  } = {},
++): Partial<LauncherAppUpdateStatus> {
+   return {
+     lastResult: {
+       acknowledged: true,
+-      finishedAt: "2026-10-23T00:00:00.000Z",
++      finishedAt: options.finishedAt ?? "2026-10-23T00:00:00.000Z",
+       from: { kind: "npm", packageRoot: "/pkg/1.0.0", version: "1.0.0" },
+       id: "result-1",
+       logTail: [],
+       message: "npm install failed",
+       outcome: "failed",
+-      phase: "prepare",
++      phase: options.phase ?? "prepare",
+       to: { kind: "npm", packageRoot: `/pkg/${version}`, version },
+     },
+   };
+@@ -885,7 +891,9 @@ describe("checking for bb updates automatically", () => {
+       autoCheck: true,
+       runningThreads: 0,
+     });
+-    launcher.push(failedResult("1.1.0"));
++    launcher.push(
++      failedResult("1.1.0", { finishedAt: new Date().toISOString() }),
++    );
+ 
+     await vi.advanceTimersByTimeAsync(first + interval);
+     expect(applyRequests()).toEqual([]);
+@@ -897,6 +905,44 @@ describe("checking for bb updates automatically", () => {
+     ]);
+   });
+ 
++  it.each(["prepare", "install"] as const)(
++    "tries a version whose %s step failed again six hours later",
++    async (phase) => {
++      const sixHours = 6 * 60 * 60_000;
++      const { applyRequests, launcher } = createScheduledService({
++        autoCheck: true,
++        runningThreads: 0,
++      });
++      launcher.push(
++        failedResult("1.1.0", { finishedAt: new Date().toISOString(), phase }),
++      );
++
++      await vi.advanceTimersByTimeAsync(sixHours - 1_000);
++      expect(applyRequests()).toEqual([]);
++
++      await vi.advanceTimersByTimeAsync(interval);
++      expect(applyRequests()).toEqual([
++        expect.objectContaining({ targetVersion: "1.1.0" }),
++      ]);
++    },
++  );
++
++  it("does not try again a version that failed to start", async () => {
++    const { applyRequests, launcher } = createScheduledService({
++      autoCheck: true,
++      runningThreads: 0,
++    });
++    launcher.push(
++      failedResult("1.1.0", {
++        finishedAt: new Date().toISOString(),
++        phase: "startup",
++      }),
++    );
++
++    await vi.advanceTimersByTimeAsync(24 * interval);
++    expect(applyRequests()).toEqual([]);
++  });
++
+   it("skips a cancelled version until a newer one appears", async () => {
+     const { applyRequests, latest, service, skipped } = createScheduledService({
+       autoCheck: true,
