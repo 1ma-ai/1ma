@@ -12,7 +12,7 @@ const worktree =
 const heavy = process.env.ONEMA_HEAVY ?? path.join(homedir(), ".claude/bin/heavy");
 const bb = process.env.BB_CLI ?? "bb";
 const github = process.env.ONEMA_REPO ?? "1ma-ai/1ma";
-const { ref, replaceManaged } = parseArgs(process.argv.slice(2));
+const { ref, replaceManaged, add } = parseArgs(process.argv.slice(2));
 const env = { ...process.env, PATH: `${path.dirname(process.execPath)}:${process.env.PATH ?? ""}` };
 
 function run(command, commandArgs, options = {}) {
@@ -94,6 +94,7 @@ const entries = collection.plugins.map((entry) => {
 const blocked = deployPlugins({
   entries,
   replaceManaged,
+  add,
   log: (line) => console.log(line),
   bb: {
     activeTheme: () => JSON.parse(run(bb, ["theme", "list", "--json"])).active?.themeId ?? null,

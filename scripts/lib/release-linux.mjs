@@ -3,13 +3,22 @@
 // may be deployed, and the install loop with its rollback and theme restore.
 
 const FLAGS = new Set(["--replace-managed"]);
+const ADD = "--add=";
 
 export function parseArgs(argv) {
-  const unknown = argv.filter((arg) => arg.startsWith("-") && !FLAGS.has(arg));
+  const unknown = argv.filter(
+    (arg) => arg.startsWith("-") && !FLAGS.has(arg) && !arg.startsWith(ADD),
+  );
   if (unknown.length > 0) throw new Error(`unknown option ${unknown.join(", ")}`);
+  const add = argv.filter((arg) => arg.startsWith(ADD)).map((arg) => arg.slice(ADD.length));
+  if (add.some((id) => id.length === 0)) throw new Error("--add= needs a plugin id");
   const refs = argv.filter((arg) => !arg.startsWith("-"));
   if (refs.length > 1) throw new Error(`expected at most one ref, got ${refs.join(", ")}`);
-  return { ref: refs[0] ?? "origin/main", replaceManaged: argv.includes("--replace-managed") };
+  return {
+    ref: refs[0] ?? "origin/main",
+    replaceManaged: argv.includes("--replace-managed"),
+    add,
+  };
 }
 
 // A commit may be deployed only if it is on main and the newest CI run of
@@ -32,16 +41,25 @@ export function installedSource(json) {
   return typeof requested === "string" && requested.length > 0 ? requested : "unknown";
 }
 
-// Installs each plugin from its directory in the release worktree. A plugin
+// Installs each plugin from its directory in the release worktree. Only
+// plugins the server already has are updated: one the owner removed stays
+// removed, and a new one is installed only when named in `add`. A plugin
 // installed from git or npm is replaced only with replaceManaged; if its new
 // install fails, the previous install is put back so the plugin is not left
 // missing. The active theme is restored whatever happens.
-export function deployPlugins({ entries, replaceManaged, bb, log }) {
+export function deployPlugins({ entries, replaceManaged, add = [], bb, log }) {
+  const unknown = add.filter((id) => !entries.some((entry) => entry.id === id));
+  if (unknown.length > 0)
+    throw new Error(`--add names plugins this release does not have: ${unknown.join(", ")}`);
   const blocked = [];
   const themeBefore = bb.activeTheme();
   try {
     for (const { id, directory, version } of entries) {
       const current = bb.source(id);
+      if (current === null && !add.includes(id)) {
+        log(`${id}: not on this server, left out; install it with --add=${id}`);
+        continue;
+      }
       const managed = current !== null && !current.startsWith("path:");
       if (managed && !replaceManaged) {
         blocked.push(`${id} (installed from ${current})`);

@@ -47,11 +47,21 @@ describe("arguments", () => {
   test("a typo in a flag stops the release instead of being ignored", () => {
     assert.throws(() => parseArgs(["--replace-manged"]), /unknown option --replace-manged/);
     assert.throws(() => parseArgs(["main", "feature"]), /at most one ref/);
-    assert.deepEqual(parseArgs([]), { ref: "origin/main", replaceManaged: false });
+    assert.deepEqual(parseArgs([]), { ref: "origin/main", replaceManaged: false, add: [] });
     assert.deepEqual(parseArgs(["--replace-managed", "abc123"]), {
       ref: "abc123",
       replaceManaged: true,
+      add: [],
     });
+  });
+
+  test("new plugins are named one by one with --add=<id>", () => {
+    assert.deepEqual(parseArgs(["--add=1ma-theme", "--add=1ma-brand"]).add, [
+      "1ma-theme",
+      "1ma-brand",
+    ]);
+    assert.throws(() => parseArgs(["--add="]), /--add= needs a plugin id/);
+    assert.throws(() => parseArgs(["--add", "1ma-theme"]), /unknown option --add/);
   });
 });
 
@@ -96,9 +106,57 @@ describe("installed sources", () => {
 });
 
 describe("deploying", () => {
+  const onServer = {
+    "1ma-theme": "path:/release/plugins/1ma-theme",
+    "1ma-brand": "path:/release/plugins/1ma-brand",
+  };
+
+  test("a plugin the server does not have stays off it unless named with --add", () => {
+    const lines = [];
+    const fake = fakeBb({ sources: { "1ma-theme": onServer["1ma-theme"] } });
+    deployPlugins({ entries, replaceManaged: false, bb: fake.bb, log: (line) => lines.push(line) });
+    assert.deepEqual(fake.calls, ["install /release/plugins/1ma-theme"]);
+    assert.equal(fake.installed["1ma-brand"], undefined);
+    assert.ok(
+      lines.includes("1ma-brand: not on this server, left out; install it with --add=1ma-brand"),
+    );
+
+    const added = fakeBb({ sources: { "1ma-theme": onServer["1ma-theme"] } });
+    deployPlugins({
+      entries,
+      replaceManaged: false,
+      add: ["1ma-brand"],
+      bb: added.bb,
+      log: () => {},
+    });
+    assert.deepEqual(added.calls, [
+      "install /release/plugins/1ma-theme",
+      "install /release/plugins/1ma-brand",
+    ]);
+  });
+
+  test("--add with a plugin the release does not have stops before anything changes", () => {
+    const fake = fakeBb({ sources: onServer });
+    assert.throws(
+      () =>
+        deployPlugins({
+          entries,
+          replaceManaged: false,
+          add: ["1ma-home-dashboard"],
+          bb: fake.bb,
+          log: () => {},
+        }),
+      /does not have: 1ma-home-dashboard/,
+    );
+    assert.deepEqual(fake.calls, []);
+  });
+
   test("managed installs are left alone without --replace-managed", () => {
     const fake = fakeBb({
-      sources: { "1ma-brand": "git+https://github.com/1ma-ai/1ma#1ma-brand/v0.3.0" },
+      sources: {
+        "1ma-theme": onServer["1ma-theme"],
+        "1ma-brand": "git+https://github.com/1ma-ai/1ma#1ma-brand/v0.3.0",
+      },
     });
     const blocked = deployPlugins({ entries, replaceManaged: false, bb: fake.bb, log: () => {} });
     assert.deepEqual(blocked, [
@@ -138,6 +196,7 @@ describe("deploying", () => {
 
   test("the theme comes back even when an install fails", () => {
     const fake = fakeBb({
+      sources: onServer,
       theme: "1ma",
       themeAfterInstall: "bb-default",
       failInstall: new Set(["/release/plugins/1ma-brand"]),
