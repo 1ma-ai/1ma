@@ -1,0 +1,151 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Wed, 11 Nov 2026 09:56:54 +0100
+Subject: [PATCH] 1ma: Claude plan usage waits for a fresh Claude Code session
+ to fetch it
+
+bb reads Claude plan usage by starting a Claude Code session and asking for
+it right after initialization. A fresh session can answer before its first
+fetch of the claude.ai usage endpoint has finished, with rate_limits null
+although they apply; bb then reports "Claude Code could not read this
+account's plan usage" and usage displays such as Pool Usage stay empty. The
+probe now asks again, up to six times a second apart, while the limits apply
+but are still missing.
+---
+ .../src/bridge/initialization-probe.test.ts   | 68 +++++++++++++++++++
+ .../src/bridge/initialization-probe.ts        | 39 ++++++++---
+ 2 files changed, 99 insertions(+), 8 deletions(-)
+ create mode 100644 plugins/provider-claude-code/src/bridge/initialization-probe.test.ts
+
+diff --git a/plugins/provider-claude-code/src/bridge/initialization-probe.test.ts b/plugins/provider-claude-code/src/bridge/initialization-probe.test.ts
+new file mode 100644
+index 0000000..3a890cc
+--- /dev/null
++++ b/plugins/provider-claude-code/src/bridge/initialization-probe.test.ts
+@@ -0,0 +1,68 @@
++import { beforeEach, describe, expect, it, vi } from "vitest";
++
++const { queryMock } = vi.hoisted(() => ({ queryMock: vi.fn() }));
++
++vi.mock("@anthropic-ai/claude-agent-sdk", () => ({ query: queryMock }));
++
++import {
++  CLAUDE_USAGE_ATTEMPTS,
++  probeClaudeUsage,
++} from "./initialization-probe.js";
++
++const account = { email: "dev@example.com", subscriptionType: "pro" };
++const limits = { five_hour: { utilization: 67, resets_at: null } };
++
++function usage(rateLimitsAvailable: boolean, rateLimits: unknown) {
++  return {
++    rate_limits_available: rateLimitsAvailable,
++    rate_limits: rateLimits,
++  };
++}
++
++function fakeSession(answers: unknown[]) {
++  const usageCall = vi.fn(async () => answers.shift());
++  const close = vi.fn();
++  queryMock.mockReturnValue({
++    initializationResult: async () => ({ account }),
++    usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: usageCall,
++    close,
++  });
++  return { usageCall, close };
++}
++
++const args = { env: {}, cwd: "/tmp" };
++
++describe("reading Claude plan usage", () => {
++  beforeEach(() => queryMock.mockReset());
++
++  it("asks again until a fresh session has fetched the plan limits", async () => {
++    const session = fakeSession([usage(true, null), usage(true, limits)]);
++
++    const result = await probeClaudeUsage(args, { retryDelayMs: 0 });
++
++    expect(result.usage.rate_limits).toEqual(limits);
++    expect(result.account).toEqual(account);
++    expect(session.usageCall).toHaveBeenCalledTimes(2);
++    expect(session.close).toHaveBeenCalledOnce();
++  });
++
++  it("stops after a bounded number of attempts and returns the empty answer", async () => {
++    const answers = Array.from({ length: CLAUDE_USAGE_ATTEMPTS + 2 }, () =>
++      usage(true, null),
++    );
++    const session = fakeSession(answers);
++
++    const result = await probeClaudeUsage(args, { retryDelayMs: 0 });
++
++    expect(result.usage.rate_limits).toBeNull();
++    expect(session.usageCall).toHaveBeenCalledTimes(CLAUDE_USAGE_ATTEMPTS);
++  });
++
++  it("does not ask again when plan limits do not apply, as with an API key", async () => {
++    const session = fakeSession([usage(false, null)]);
++
++    await probeClaudeUsage(args, { retryDelayMs: 0 });
++
++    expect(session.usageCall).toHaveBeenCalledOnce();
++  });
++});
+diff --git a/plugins/provider-claude-code/src/bridge/initialization-probe.ts b/plugins/provider-claude-code/src/bridge/initialization-probe.ts
+index 7557dd4..30d5086 100644
+--- a/plugins/provider-claude-code/src/bridge/initialization-probe.ts
++++ b/plugins/provider-claude-code/src/bridge/initialization-probe.ts
+@@ -6,6 +6,7 @@ import {
+   type SDKControlInitializeResponse,
+   type SDKUserMessage,
+ } from "@anthropic-ai/claude-agent-sdk";
++import { setTimeout as delay } from "node:timers/promises";
+ import { translateMissingClaudeCliCatalogError } from "./missing-cli-error.js";
+ import { resolveClaudeCodeExecutable } from "./session-options.js";
+ 
+@@ -71,15 +72,37 @@ export function probeClaudeInitialization(
+   );
+ }
+ 
+-export function probeClaudeUsage(args: ClaudeProbeArgs): Promise<{
++export const CLAUDE_USAGE_ATTEMPTS = 6;
++const CLAUDE_USAGE_RETRY_MS = 1_000;
++
++function readClaudeUsage(session: Query): Promise<SDKControlGetUsageResponse> {
++  return session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
++    skipBehaviors: true,
++  });
++}
++
++// A fresh Claude Code session can answer before its first fetch of the plan
++// limits has finished, with the limits null although they apply; ask again.
++export function probeClaudeUsage(
++  args: ClaudeProbeArgs,
++  options: { retryDelayMs?: number } = {},
++): Promise<{
+   account: AccountInfo;
+   usage: SDKControlGetUsageResponse;
+ }> {
+-  return withInitializedClaude(args, async (session, initialization) => ({
+-    account: initialization.account,
+-    usage:
+-      await session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
+-        skipBehaviors: true,
+-      }),
+-  }));
++  const retryDelayMs = options.retryDelayMs ?? CLAUDE_USAGE_RETRY_MS;
++  return withInitializedClaude(args, async (session, initialization) => {
++    let usage = await readClaudeUsage(session);
++    for (
++      let attempt = 1;
++      attempt < CLAUDE_USAGE_ATTEMPTS &&
++      usage.rate_limits_available &&
++      usage.rate_limits === null;
++      attempt += 1
++    ) {
++      await delay(retryDelayMs);
++      usage = await readClaudeUsage(session);
++    }
++    return { account: initialization.account, usage };
++  });
+ }
