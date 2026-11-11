@@ -23,6 +23,12 @@ permissions:
   contents: write
   actions: read
 
+# One release at a time: two runs could otherwise both pass the "only forward"
+# check on the feeds and the older one could upload last.
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Publish a 1ma Desktop test build
@@ -138,7 +144,7 @@ jobs:
               fail "desktop-latest already announces $announced, newer than $version"
           elif grep -q "release not found" feed.err; then
             fail "the desktop-latest release is missing; a maintainer creates it once (desktop/README.md)"
-          elif ! grep -q "no assets match" feed.err; then
+          elif ! grep -qE "no assets (match|to download)" feed.err; then
             fail "cannot read desktop-latest: $(cat feed.err)"
           fi
           if [[ "$DRY_RUN" == "true" ]]; then
@@ -149,7 +155,18 @@ jobs:
             exit 0
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" upload/* --clobber
+            # A published file is never replaced: one that is already there
+            # must be the same file, and only missing ones are uploaded.
+            gh release view "$tag" --json assets --jq '.assets[] | "\(.name) \(.digest)"' > existing
+            for file in upload/*; do
+              name="$(basename "$file")"
+              digest="$(awk -v name="$name" '$1 == name { print $2 }' existing)"
+              if [[ -z "$digest" ]]; then
+                gh release upload "$tag" "$file"
+              elif [[ "$digest" != "sha256:$(sha256sum "$file" | cut -d' ' -f1)" ]]; then
+                fail "$tag already has a different $name; refusing to replace a published file"
+              fi
+            done
           else
             gh release create "$tag" --prerelease --target "$COMMIT" \
               --title "1ma ${version}" \
