@@ -51,7 +51,7 @@ ps -A -ww -o pid,command | grep -F ".bb/mail0" | grep -v grep      → пуст�
 /opt/homebrew/opt/postgresql@14/bin/pg_ctl -D ~/.bb/mail0/mail0-local/runtime/postgres status   → no server running
 4.3. Перенести (переименование на том же диске, данные не копируются):
 mv ~/.bb/mail0 ~/mail0
-4.4. В каждом файле из 4.1 (после переноса файлы из ~/.bb/mail0 лежат в ~/mail0) заменить /Users/<имя>/.bb/mail0 на /Users/<имя>/mail0 (копии — в ~/remove-bb-backup). Файлы с секретами (.env и подобные) на экран не выводить.
+4.4. В каждом файле из 4.1 (после переноса файлы из ~/.bb/mail0 лежат в ~/mail0) заменить старый путь на новый в том же виде: /Users/<имя>/.bb/mail0 → /Users/<имя>/mail0, ~/.bb/mail0 → ~/mail0, $HOME/.bb/mail0 → $HOME/mail0 (копии — в ~/remove-bb-backup). Файлы с секретами (.env и подобные) на экран не выводить.
 4.5. Запустить и проверить:
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.msg8.bb-mail.plist
 ps -A -ww -o pid,command | grep -F "/mail0/" | grep -v grep          → postgres работает с ~/mail0/mail0-local/runtime/postgres
