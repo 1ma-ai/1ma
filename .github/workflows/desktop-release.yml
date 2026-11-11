@@ -1,10 +1,12 @@
 name: Desktop release
 
 # Publishes the macOS app and the Linux server package of one Desktop workflow
-# run as a pre-release. The
-# run is checked against GitHub's own records, not against files inside its
-# artifact: it must be a green Desktop build of main in this repository, and
-# bb's tests must have passed on the same commit in a push run on main.
+# run as the pre-release desktop/v<version>, then points the version feeds in
+# the desktop-latest release at it: desktop-version.json for the app and
+# server-version.json for the server's self-update. The run is checked against
+# GitHub's own records, not against files inside its artifact: it must be a
+# green Desktop build of main in this repository, and bb's tests must have
+# passed on the same commit in a push run on main.
 
 on:
   workflow_dispatch:
@@ -59,6 +61,13 @@ jobs:
           [[ "$tests" == "success" ]] ||
             fail "the latest push run of desktop-tests.yml on main for $commit is '$tests'; bb's tests must pass on the 1ma tree before publishing"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - name: Check out the version tool at the build commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.build.outputs.commit }}
+          path: 1ma
+          sparse-checkout: desktop/scripts
+          persist-credentials: false
       - name: Download the build
         env:
           GH_TOKEN: ${{ github.token }}
@@ -81,22 +90,30 @@ jobs:
               fail "$record says it was built from '$provenance', but run $RUN_ID built $COMMIT"
           done
           version="$(jq -r .version dist/apps/desktop/release/desktop-version.json)"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || fail "unexpected version '$version'"
-          upstream="$(jq -r .upstream.tag dist/1ma-provenance.json)"
-          tag="desktop/v${version}-1ma.${RUN_ID}"
-          mkdir upload
-          for file in dist/apps/desktop/release/*.dmg dist/apps/desktop/release/*.zip; do
-            name="$(basename "$file")"
-            cp "$file" "upload/${name%.*}-${RUN_ID}.${name##*.}"
+          node 1ma/desktop/scripts/version.mjs compare "$version" "$version" >/dev/null ||
+            fail "unexpected version '$version'"
+          [[ "$version" == *"-1ma.${RUN_ID}."* ]] ||
+            fail "run $RUN_ID built version '$version', which does not name the run"
+          for record in dist/1ma-provenance.json dist-server/1ma-provenance.json; do
+            [[ "$(jq -r .version "$record")" == "$version" ]] ||
+              fail "$record is for version $(jq -r .version "$record"), not $version"
           done
+          upstream="$(jq -r .upstream.tag dist/1ma-provenance.json)"
+          tag="desktop/v${version}"
+          mkdir upload feeds
+          cp dist/apps/desktop/release/*.dmg dist/apps/desktop/release/*.zip upload/
           server="dist-server/1ma-server-${version}.tgz"
           [[ -f "$server" ]] || fail "run $RUN_ID has no Linux server package for $version"
-          cp "$server" "upload/1ma-server-${version}-${RUN_ID}.tgz"
+          cp "$server" upload/
           (cd upload && sha256sum -- * > SHA256SUMS)
+          cp dist/apps/desktop/release/desktop-version.json feeds/
+          jq -n --arg version "$version" --arg commit "$COMMIT" --arg bb "$upstream" \
+            '{schemaVersion: 1, channel: "latest", version: $version, release: ("desktop/v" + $version),
+              package: ("1ma-server-" + $version + ".tgz"), commit: $commit, bb: $bb}' > feeds/server-version.json
           cat > notes.md <<NOTES
-          Test build of 1ma Desktop for macOS on Apple Silicon, built from bb ${upstream} with the 1ma patches at ${COMMIT}. Download the .dmg; SHA256SUMS lists the checksums.
+          Test build of 1ma ${version} for macOS on Apple Silicon, built from bb ${upstream} with the 1ma patches at ${COMMIT}. Download the .dmg; SHA256SUMS lists the checksums.
 
-          1ma-server-${version}-${RUN_ID}.tgz is the 1ma server for Linux from the same commit (bb's bb-app package with the 1ma patches and rebrand). Install it with npm install <file> in an empty folder and start node_modules/.bin/bb-app with Node 24 and --no-in-app-updates (without it, bb-app's own updater installs upstream bb from npm); the command keeps the name bb-app for now.
+          1ma-server-${version}.tgz is the 1ma server for Linux from the same commit (bb's bb-app package with the 1ma patches and rebrand; the command keeps the name bb-app for now). Install it with npm install <file> in an empty folder and start node_modules/.bin/bb-app with Node 24. It updates itself from the releases of this repository; ONEMA_UPDATE_COMMAND_PREFIX runs its npm install under a wrapper, such as a resource limit. Builds older than 0.49.1 install bb from npm instead and must be started with --no-in-app-updates.
 
           The build is signed ad hoc, not by Apple yet. First launch: open 1ma once, then System Settings > Privacy & Security > Open Anyway, and enter your password. macOS treats every test build as a new app, so it asks again after each update, also for permissions such as the microphone.
 
@@ -113,17 +130,32 @@ jobs:
           elif ! grep -q "release not found" release-view.err; then
             fail "cannot read release $tag: $(cat release-view.err)"
           fi
+          # The feeds only move forward: an older run never replaces a newer one.
+          if gh release download desktop-latest --pattern server-version.json --dir announced 2>feed.err; then
+            announced="$(jq -r .version announced/server-version.json)"
+            order="$(node 1ma/desktop/scripts/version.mjs compare "$version" "$announced")"
+            [[ "$order" -ge 0 ]] ||
+              fail "desktop-latest already announces $announced, newer than $version"
+          elif grep -q "release not found" feed.err; then
+            fail "the desktop-latest release is missing; a maintainer creates it once (desktop/README.md)"
+          elif ! grep -q "no assets match" feed.err; then
+            fail "cannot read desktop-latest: $(cat feed.err)"
+          fi
           if [[ "$DRY_RUN" == "true" ]]; then
             echo "dry run: would publish $tag at $COMMIT with:"
             cat upload/SHA256SUMS
+            echo "and point desktop-latest at it:"
+            cat feeds/server-version.json
             exit 0
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" upload/* --clobber
           else
             gh release create "$tag" --prerelease --target "$COMMIT" \
-              --title "1ma Desktop ${version} test build ${RUN_ID}" \
+              --title "1ma ${version}" \
               --notes-file notes.md \
               upload/*
           fi
           echo "published $tag"
+          gh release upload desktop-latest feeds/* --clobber
+          echo "desktop-latest now announces $version"

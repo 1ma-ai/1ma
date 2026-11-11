@@ -85,6 +85,15 @@ jobs:
           node desktop/scripts/prepare.mjs --out bb-src
           # bb-src sits inside this checkout; drop the tooling's packages so bb resolves only its own.
           rm -rf node_modules desktop/node_modules
+      - name: Number the build (the next bb patch, as a prerelease naming this run)
+        run: |
+          set -euo pipefail
+          version="$(node "$GITHUB_WORKSPACE/desktop/scripts/version.mjs" next \
+            "$(jq -r .version packages/bb-app/package.json)" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")"
+          node scripts/bump-version.mjs "$version"
+          jq --arg version "$version" '.version = $version' 1ma-provenance.json > "$RUNNER_TEMP/provenance.json"
+          mv "$RUNNER_TEMP/provenance.json" 1ma-provenance.json
+          echo "1ma $version"
       - name: Enable the pnpm version bb pins
         run: |
           corepack enable
@@ -141,6 +150,15 @@ jobs:
           node desktop/scripts/prepare.mjs --out bb-src
           # bb-src sits inside this checkout; drop the tooling's packages so bb resolves only its own.
           rm -rf node_modules desktop/node_modules
+      - name: Number the build (the next bb patch, as a prerelease naming this run)
+        run: |
+          set -euo pipefail
+          version="$(node "$GITHUB_WORKSPACE/desktop/scripts/version.mjs" next \
+            "$(jq -r .version packages/bb-app/package.json)" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")"
+          node scripts/bump-version.mjs "$version"
+          jq --arg version "$version" '.version = $version' 1ma-provenance.json > "$RUNNER_TEMP/provenance.json"
+          mv "$RUNNER_TEMP/provenance.json" 1ma-provenance.json
+          echo "1ma $version"
       - name: Verify arm64 runner
         run: test "$(uname -m)" = "arm64"
       - name: Enable the pnpm version bb pins

@@ -922,6 +922,7 @@
 ["bb submits the draft through the normal send path, so the scheduled message is the same message you would send with Enter. At the chosen time it starts a turn, or waits behind the one running, even if Enter steers. In the new-thread screen, the thread starts at the chosen time with the provider and environment you selected. The entry is disabled when the draft is empty or a send is in progress.","1ma submits the draft through the normal send path, so the scheduled message is the same message you would send with Enter. At the chosen time it starts a turn, or waits behind the one running, even if Enter steers. In the new-thread screen, the thread starts at the chosen time with the provider and environment you selected. The entry is disabled when the draft is empty or a send is in progress."],
 ["bb system notices cannot be edited","1ma system notices cannot be edited"],
 ["bb update available","1ma update available"],
+["bb updates app apply"],
 ["bb updates available","1ma updates available"],
 ["bb was not running (removed a stale record of pid ${…})","1ma was not running (removed a stale record of pid ${…})"],
 ["bb will not re-resolve a missing release tag. Restore the tag, or remove and install the plugin again","1ma will not re-resolve a missing release tag. Restore the tag, or remove and install the plugin again"],

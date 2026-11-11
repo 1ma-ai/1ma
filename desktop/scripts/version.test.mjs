@@ -1,0 +1,61 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { describe, test } from "node:test";
+import { compareVersions, oneMaVersion } from "./version.mjs";
+
+const script = fileURLToPath(new URL("version.mjs", import.meta.url));
+const run = (...args) => spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+
+describe("the version of a 1ma build", () => {
+  test("is the next patch of the bb release, as a prerelease naming the run", () => {
+    assert.equal(oneMaVersion("0.49.0", "42358180199", "1"), "0.49.1-1ma.42358180199.1");
+    assert.equal(oneMaVersion("1.9.9", "7", "3"), "1.9.10-1ma.7.3");
+  });
+
+  test("refuses a bb version that is not a release, and runs that are not numbers", () => {
+    assert.throws(() => oneMaVersion("0.49.0-nightly.1.1", "7", "1"), /not a bb release/);
+    assert.throws(() => oneMaVersion("0.49", "7", "1"), /not a bb release/);
+    assert.throws(() => oneMaVersion("0.49.0", "", "1"), /run id must be a positive integer/);
+    assert.throws(() => oneMaVersion("0.49.0", "7", "0"), /run attempt must be a positive integer/);
+  });
+});
+
+describe("version order", () => {
+  test("a 1ma build is newer than the bb release it is built on, older than bb's next one", () => {
+    const build = oneMaVersion("0.49.0", "100", "1");
+    assert.equal(compareVersions(build, "0.49.0"), 1);
+    assert.equal(compareVersions(build, "0.49.1"), -1);
+    assert.equal(compareVersions(oneMaVersion("0.50.0", "1", "1"), build), 1);
+  });
+
+  test("later runs and attempts are newer, compared as numbers", () => {
+    assert.equal(compareVersions("0.49.1-1ma.10.1", "0.49.1-1ma.9.1"), 1);
+    assert.equal(compareVersions("0.49.1-1ma.9.2", "0.49.1-1ma.9.1"), 1);
+    assert.equal(compareVersions("0.49.1-1ma.9.1", "0.49.1-1ma.9.1"), 0);
+    assert.equal(compareVersions("0.49.1-1ma.9", "0.49.1-1ma.9.1"), -1);
+  });
+
+  test("numeric prerelease identifiers sort before alphanumeric ones", () => {
+    assert.equal(compareVersions("1.0.0-1", "1.0.0-alpha"), -1);
+    assert.equal(compareVersions("1.0.0-beta", "1.0.0-alpha"), 1);
+  });
+
+  test("rejects what is not a semantic version", () => {
+    assert.throws(() => compareVersions("0.49", "0.49.0"), /not a semantic version/);
+    assert.throws(() => compareVersions("0.49.0-01", "0.49.0"), /not a semantic version/);
+  });
+});
+
+describe("the command line", () => {
+  test("prints the next version and comparisons", () => {
+    assert.equal(run("next", "0.49.0", "5", "1").stdout.trim(), "0.49.1-1ma.5.1");
+    assert.equal(run("compare", "0.49.1-1ma.5.1", "0.49.0").stdout.trim(), "1");
+  });
+
+  test("fails with its usage on unknown input", () => {
+    const result = run("bump");
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /usage:/);
+  });
+});

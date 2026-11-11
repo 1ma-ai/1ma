@@ -1,0 +1,585 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Wed, 11 Nov 2026 08:36:30 +0100
+Subject: [PATCH] 1ma: the server updates itself from 1ma's GitHub releases
+
+bb's in-app update installs bb-app@<version> from npm, which would replace
+1ma with bb. The server now reads the newest version from
+server-version.json in 1ma's desktop-latest release and installs that
+version's 1ma-server-<version>.tgz from its desktop/v<version> release,
+after checking it against the release's SHA256SUMS. ONEMA_UPDATE_COMMAND_PREFIX
+can wrap the npm install, for hosts that run installs under a resource limit.
+---
+ .../server/src/services/system/app-version.ts |  19 ++--
+ apps/server/test/system/app-version.test.ts   |  22 ++--
+ .../bb-app/src/app-update/npm-revision.ts     | 106 +++++++++++++++--
+ .../app-update-launcher-controller.test.ts    |  21 +++-
+ .../test/app-update-npm-revision.test.ts      | 107 +++++++++++++++++-
+ packages/config/src/app-update.ts             |  29 +++++
+ 6 files changed, 276 insertions(+), 28 deletions(-)
+
+diff --git a/apps/server/src/services/system/app-version.ts b/apps/server/src/services/system/app-version.ts
+index 01f7dec..cada9ba 100644
+--- a/apps/server/src/services/system/app-version.ts
++++ b/apps/server/src/services/system/app-version.ts
+@@ -1,11 +1,14 @@
+ import type { AppInstallKind } from "@bb/config/app-install";
+ import semver from "semver";
+ import { z } from "zod";
+-import { isNightlyAppVersion } from "@bb/config/app-update";
++import {
++  formatServerVersionFeedUrl,
++  isNightlyAppVersion,
++} from "@bb/config/app-update";
+ import type { SystemVersionResponse } from "@bb/server-contract";
+ import type { ServerLogger, ServerRuntimeConfig } from "../../types.js";
+ 
+-const NPM_REGISTRY_PACKAGE_URL = "https://registry.npmjs.org/bb-app";
++const UPGRADE_COMMAND = "bb updates app apply";
+ const NPM_LATEST_TIMEOUT_MS = 5_000;
+ const NPM_LATEST_CACHE_TTL_MS = 60 * 60 * 1000;
+ 
+@@ -66,7 +69,7 @@ export function createAppVersionService(
+   let inflight: Promise<NpmLatestRelease | null> | null = null;
+ 
+   async function fetchNpmDistTag(tag: NpmDistTag): Promise<string | null> {
+-    const npmDistTagUrl = `${NPM_REGISTRY_PACKAGE_URL}/${tag}`;
++    const npmDistTagUrl = formatServerVersionFeedUrl(tag);
+     const controller = new AbortController();
+     const timeoutHandle = setTimeout(
+       () => controller.abort(),
+@@ -80,7 +83,7 @@ export function createAppVersionService(
+       if (!response.ok) {
+         logger.warn(
+           { status: response.status, url: npmDistTagUrl },
+-          "Failed to fetch latest bb-app version from npm",
++          "Failed to fetch the latest server version feed",
+         );
+         return null;
+       }
+@@ -89,7 +92,7 @@ export function createAppVersionService(
+       if (!parsed.success) {
+         logger.warn(
+           { url: npmDistTagUrl, issue: parsed.error.message },
+-          "npm latest response did not match expected shape",
++          "The server version feed did not match the expected shape",
+         );
+         return null;
+       }
+@@ -98,7 +101,7 @@ export function createAppVersionService(
+       const message = error instanceof Error ? error.message : String(error);
+       logger.warn(
+         { url: npmDistTagUrl, error: message },
+-        "npm latest lookup failed",
++        "The server version feed lookup failed",
+       );
+       return null;
+     } finally {
+@@ -170,7 +173,7 @@ export function createAppVersionService(
+         source: "npm",
+         updateAvailable: false,
+         isDevelopment: config.isDevelopment,
+-        upgradeCommand: `npx bb-app@${distTag}`,
++        upgradeCommand: UPGRADE_COMMAND,
+       };
+ 
+       if (config.isDevelopment || installKind === "source") {
+@@ -187,7 +190,7 @@ export function createAppVersionService(
+       const releaseResponse: SystemVersionResponse = {
+         ...baseResponse,
+         latestVersion,
+-        upgradeCommand: `npx bb-app@${release.distTag}`,
++        upgradeCommand: UPGRADE_COMMAND,
+       };
+ 
+       const parsedCurrent = semver.parse(config.appVersion);
+diff --git a/apps/server/test/system/app-version.test.ts b/apps/server/test/system/app-version.test.ts
+index 59d1049..aa62dfa 100644
+--- a/apps/server/test/system/app-version.test.ts
++++ b/apps/server/test/system/app-version.test.ts
+@@ -91,7 +91,7 @@ describe("createAppVersionService", () => {
+       installKind: "npm",
+       source: "npm",
+       updateAvailable: false,
+-      upgradeCommand: "npx bb-app@latest",
++      upgradeCommand: "bb updates app apply",
+     });
+     expect(calls).toEqual([]);
+   });
+@@ -109,7 +109,9 @@ describe("createAppVersionService", () => {
+     expect(response.latestVersion).toBe("0.0.6");
+     expect(response.updateAvailable).toBe(true);
+     expect(calls).toHaveLength(1);
+-    expect(calls[0]?.url).toBe("https://registry.npmjs.org/bb-app/latest");
++    expect(calls[0]?.url).toBe(
++      "https://github.com/1ma-ai/1ma/releases/download/desktop-latest/server-version.json",
++    );
+   });
+ 
+   it("checks the nightly dist-tag when running a nightly build", async () => {
+@@ -125,9 +127,11 @@ describe("createAppVersionService", () => {
+       logger: testLogger,
+     });
+     const response = await service.getSystemVersion();
+-    expect(calls[0]?.url).toBe("https://registry.npmjs.org/bb-app/nightly");
++    expect(calls[0]?.url).toBe(
++      "https://github.com/1ma-ai/1ma/releases/download/desktop-nightly/server-version.json",
++    );
+     expect(response.updateAvailable).toBe(true);
+-    expect(response.upgradeCommand).toBe("npx bb-app@nightly");
++    expect(response.upgradeCommand).toBe("bb updates app apply");
+   });
+ 
+   it("offers a newer stable release to a nightly build when nightly lags behind", async () => {
+@@ -135,7 +139,7 @@ describe("createAppVersionService", () => {
+     const fetchImpl = (async (input: RequestInfo | URL) => {
+       const url = String(input);
+       calls.push({ url, signal: null });
+-      const version = url.endsWith("/nightly")
++      const version = url.includes("/desktop-nightly/")
+         ? "0.43.5-nightly.100.1"
+         : "0.44.0";
+       return new Response(JSON.stringify({ version }), {
+@@ -154,11 +158,11 @@ describe("createAppVersionService", () => {
+     const response = await service.getSystemVersion();
+ 
+     expect(calls.map((call) => call.url).sort()).toEqual([
+-      "https://registry.npmjs.org/bb-app/latest",
+-      "https://registry.npmjs.org/bb-app/nightly",
++      "https://github.com/1ma-ai/1ma/releases/download/desktop-latest/server-version.json",
++      "https://github.com/1ma-ai/1ma/releases/download/desktop-nightly/server-version.json",
+     ]);
+     expect(response.latestVersion).toBe("0.44.0");
+-    expect(response.upgradeCommand).toBe("npx bb-app@latest");
++    expect(response.upgradeCommand).toBe("bb updates app apply");
+   });
+ 
+   it("reports updateAvailable=false when versions are equal", async () => {
+@@ -208,7 +212,7 @@ describe("createAppVersionService", () => {
+       installKind: "npm",
+       source: "npm",
+       updateAvailable: false,
+-      upgradeCommand: "npx bb-app@latest",
++      upgradeCommand: "bb updates app apply",
+     });
+     expect(warn).toHaveBeenCalled();
+   });
+diff --git a/packages/bb-app/src/app-update/npm-revision.ts b/packages/bb-app/src/app-update/npm-revision.ts
+index cb99a40..d940be7 100644
+--- a/packages/bb-app/src/app-update/npm-revision.ts
++++ b/packages/bb-app/src/app-update/npm-revision.ts
+@@ -1,4 +1,5 @@
+ import { hostToolchain } from "@bb/process-utils";
++import { createHash } from "node:crypto";
+ import { existsSync, readFileSync } from "node:fs";
+ import { mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
+ import { join } from "node:path";
+@@ -6,12 +7,15 @@ import semver from "semver";
+ import { z } from "zod";
+ import {
+   formatAppUpdateVersionsDir,
++  formatServerPackageDownload,
+   type NpmAppRevision,
+ } from "@bb/config/app-update";
+ import { runCheckedCommand, type RunCommand } from "./run-command.js";
+ import { isSamePath } from "./shim-support.js";
+ 
+ const NPM_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
++const PACKAGE_DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
++export const UPDATE_COMMAND_PREFIX_ENV_NAME = "ONEMA_UPDATE_COMMAND_PREFIX";
+ const NATIVE_CHECK_TIMEOUT_MS = 60 * 1000;
+ const NATIVE_INSTALL_SCRIPT_PACKAGES = [
+   "better-sqlite3",
+@@ -74,7 +78,9 @@ export function formatNpmRevisionPackageRoot(
+ }
+ 
+ export interface InstallNpmRevisionArgs {
++  commandPrefix?: readonly string[];
+   dataDir: string;
++  fetchImpl?: typeof fetch;
+   onLine: (line: string) => void;
+   onStep: (step: string) => void;
+   runner: RunCommand;
+@@ -82,6 +88,73 @@ export interface InstallNpmRevisionArgs {
+   version: string;
+ }
+ 
++export function parseUpdateCommandPrefix(
++  value: string | undefined,
++): readonly string[] {
++  return (value ?? "").trim().split(/\s+/u).filter((part) => part.length > 0);
++}
++
++export function findPackageChecksum(
++  checksums: string,
++  fileName: string,
++): string | null {
++  for (const line of checksums.split(/\r?\n/u)) {
++    const match = /^([0-9a-f]{64}) [ *](.+)$/u.exec(line.trim());
++    if (match?.[2] === fileName) return match[1] ?? null;
++  }
++  return null;
++}
++
++async function fetchOk(
++  fetchImpl: typeof fetch,
++  url: string,
++  signal: AbortSignal | undefined,
++): Promise<Response> {
++  const timeout = AbortSignal.timeout(PACKAGE_DOWNLOAD_TIMEOUT_MS);
++  const response = await fetchImpl(url, {
++    signal:
++      signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
++  });
++  if (!response.ok) {
++    throw new Error(
++      `Downloading ${url} failed with HTTP ${String(response.status)}.`,
++    );
++  }
++  return response;
++}
++
++export async function downloadServerPackage(args: {
++  directory: string;
++  fetchImpl: typeof fetch;
++  signal?: AbortSignal;
++  version: string;
++}): Promise<string> {
++  const download = formatServerPackageDownload(args.version);
++  const checksums = await (
++    await fetchOk(args.fetchImpl, download.checksumsUrl, args.signal)
++  ).text();
++  const expected = findPackageChecksum(checksums, download.fileName);
++  if (expected === null) {
++    throw new Error(
++      `${download.checksumsUrl} does not list ${download.fileName}.`,
++    );
++  }
++  const body = Buffer.from(
++    await (
++      await fetchOk(args.fetchImpl, download.packageUrl, args.signal)
++    ).arrayBuffer(),
++  );
++  const actual = createHash("sha256").update(body).digest("hex");
++  if (actual !== expected) {
++    throw new Error(
++      `${download.fileName} does not match its SHA-256 in ${download.checksumsUrl}.`,
++    );
++  }
++  const path = join(args.directory, download.fileName);
++  await writeFile(path, body);
++  return path;
++}
++
+ export async function installNpmRevision(
+   args: InstallNpmRevisionArgs,
+ ): Promise<NpmAppRevision> {
+@@ -133,19 +206,33 @@ export async function installNpmRevision(
+     [hostToolchain.bundledNpmCli()],
+     { env },
+   );
++  const commandPrefix =
++    args.commandPrefix ??
++    parseUpdateCommandPrefix(process.env[UPDATE_COMMAND_PREFIX_ENV_NAME]);
+   try {
+     args.signal?.throwIfAborted();
+     args.onStep(`Downloading bb-app ${args.version}`);
++    const serverPackage = await downloadServerPackage({
++      directory: stagingDir,
++      fetchImpl: args.fetchImpl ?? fetch,
++      ...(args.signal === undefined ? {} : { signal: args.signal }),
++      version: args.version,
++    });
++    const npmArgs = [
++      ...npmCommand.args,
++      "install",
++      "--no-audit",
++      "--no-fund",
++      "--omit=dev",
++      serverPackage,
++    ];
++    const [prefixCommand, ...prefixArgs] = commandPrefix;
+     await runCheckedCommand(args.runner, "npm install", {
+-      args: [
+-        ...npmCommand.args,
+-        "install",
+-        "--no-audit",
+-        "--no-fund",
+-        "--omit=dev",
+-        `bb-app@${args.version}`,
+-      ],
+-      command: npmCommand.command,
++      args:
++        prefixCommand === undefined
++          ? npmArgs
++          : [...prefixArgs, npmCommand.command, ...npmArgs],
++      command: prefixCommand ?? npmCommand.command,
+       cwd: stagingDir,
+       env,
+       onLine: args.onLine,
+@@ -153,6 +240,7 @@ export async function installNpmRevision(
+       timeoutMs: NPM_INSTALL_TIMEOUT_MS,
+     });
+     args.signal?.throwIfAborted();
++    await rm(serverPackage, { force: true });
+     await rm(installDir, { force: true, recursive: true });
+     await rename(stagingDir, installDir);
+   } catch (error) {
+diff --git a/packages/bb-app/test/app-update-launcher-controller.test.ts b/packages/bb-app/test/app-update-launcher-controller.test.ts
+index fdc24b5..e150e5a 100644
+--- a/packages/bb-app/test/app-update-launcher-controller.test.ts
++++ b/packages/bb-app/test/app-update-launcher-controller.test.ts
+@@ -1,3 +1,4 @@
++import { createHash } from "node:crypto";
+ import { EventEmitter } from "node:events";
+ import {
+   mkdirSync,
+@@ -9,7 +10,7 @@ import {
+ } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { dirname, join } from "node:path";
+-import { afterEach, describe, expect, it, vi } from "vitest";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ import {
+   formatAppUpdateStatePath,
+   formatAppUpdateVersionsDir,
+@@ -34,7 +35,25 @@ import type { RunCommand } from "../src/app-update/run-command.js";
+ const scratchDirs: string[] = [];
+ const controllers: LauncherAppUpdateController[] = [];
+ 
++// Installing a version first downloads the 1ma server package and its
++// SHA256SUMS from the GitHub release; serve both for 1.1.0.
++beforeEach(() => {
++  const tarball = Buffer.from("1ma server 1.1.0");
++  const sum = createHash("sha256").update(tarball).digest("hex");
++  const release =
++    "https://github.com/1ma-ai/1ma/releases/download/desktop/v1.1.0";
++  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
++    const url = String(input);
++    if (url === `${release}/SHA256SUMS`) {
++      return new Response(`${sum}  1ma-server-1.1.0.tgz\n`);
++    }
++    if (url === `${release}/1ma-server-1.1.0.tgz`) return new Response(tarball);
++    return new Response("not found", { status: 404 });
++  });
++});
++
+ afterEach(async () => {
++  vi.unstubAllGlobals();
+   await Promise.all(
+     controllers.splice(0).map((controller) => controller.dispose()),
+   );
+diff --git a/packages/bb-app/test/app-update-npm-revision.test.ts b/packages/bb-app/test/app-update-npm-revision.test.ts
+index 2857f57..7248a07 100644
+--- a/packages/bb-app/test/app-update-npm-revision.test.ts
++++ b/packages/bb-app/test/app-update-npm-revision.test.ts
+@@ -7,14 +7,17 @@ import {
+   rmSync,
+   writeFileSync,
+ } from "node:fs";
++import { createHash } from "node:crypto";
+ import { tmpdir } from "node:os";
+ import { dirname, join } from "node:path";
+ import { afterEach, describe, expect, it } from "vitest";
+ import { formatAppUpdateVersionsDir } from "@bb/config/app-update";
+ import {
++  findPackageChecksum,
+   formatNpmRevisionPackageRoot,
+   installNpmRevision,
+   NPM_REVISION_REQUIRED_FILES,
++  parseUpdateCommandPrefix,
+   pruneNpmRevisions,
+ } from "../src/app-update/npm-revision.js";
+ import type {
+@@ -86,10 +89,35 @@ function fakeNpm(args: {
+   return { calls, runner, stagedPackageJsons };
+ }
+ 
++const RELEASE =
++  "https://github.com/1ma-ai/1ma/releases/download/desktop/v1.1.0";
++
++function fakeRelease(args: { checksums?: string; tarball?: string } = {}) {
++  const tarball = Buffer.from(args.tarball ?? "1ma server 1.1.0");
++  const sum = createHash("sha256").update(tarball).digest("hex");
++  const urls: string[] = [];
++  const fetchImpl = (async (input: RequestInfo | URL) => {
++    const url = String(input);
++    urls.push(url);
++    if (url === `${RELEASE}/SHA256SUMS`) {
++      return new Response(
++        args.checksums ??
++          `${"0".repeat(64)}  1ma-1.1.0-arm64.dmg\n${sum}  1ma-server-1.1.0.tgz\n`,
++      );
++    }
++    if (url === `${RELEASE}/1ma-server-1.1.0.tgz`) {
++      return new Response(tarball);
++    }
++    return new Response("not found", { status: 404 });
++  }) as typeof fetch;
++  return { fetchImpl, urls };
++}
++
+ describe("installNpmRevision", () => {
+   it("installs into a staging dir, verifies native modules, then moves it into place", async () => {
+     const dataDir = scratchDir();
+     const npm = fakeNpm({});
++    const release = fakeRelease();
+     const steps: string[] = [];
+ 
+     const revision = await installNpmRevision({
+@@ -98,6 +126,8 @@ describe("installNpmRevision", () => {
+       onStep: (step) => steps.push(step),
+       runner: npm.runner,
+       version: "1.1.0",
++      fetchImpl: release.fetchImpl,
++      commandPrefix: [],
+     });
+ 
+     expect(revision).toEqual({
+@@ -115,9 +145,14 @@ describe("installNpmRevision", () => {
+       expect.arrayContaining([
+         expect.stringMatching(/npm-cli\.js$/u),
+         "install",
+-        "bb-app@1.1.0",
++        expect.stringMatching(/\/1ma-server-1\.1\.0\.tgz$/u),
+       ]),
+     );
++    expect(install?.args.some((arg) => arg.includes("bb-app@"))).toBe(false);
++    expect(release.urls).toEqual([
++      `${RELEASE}/SHA256SUMS`,
++      `${RELEASE}/1ma-server-1.1.0.tgz`,
++    ]);
+     expect(install?.args.some((arg) => arg.startsWith("--allow-scripts"))).toBe(
+       false,
+     );
+@@ -161,6 +196,8 @@ describe("installNpmRevision", () => {
+         onStep: () => undefined,
+         runner: npm.runner,
+         version: "1.1.0",
++        fetchImpl: fakeRelease().fetchImpl,
++        commandPrefix: [],
+       }),
+     ).rejects.toThrow("Could not locate the bindings file");
+     expect(readdirSync(formatAppUpdateVersionsDir(dataDir))).toEqual([]);
+@@ -177,6 +214,8 @@ describe("installNpmRevision", () => {
+         onStep: () => undefined,
+         runner: npm.runner,
+         version: "1.1.0",
++        fetchImpl: fakeRelease().fetchImpl,
++        commandPrefix: [],
+       }),
+     ).rejects.toThrow("reports a different version");
+     expect(existsSync(formatNpmRevisionPackageRoot(dataDir, "1.1.0"))).toBe(
+@@ -184,6 +223,72 @@ describe("installNpmRevision", () => {
+     );
+   });
+ 
++  it("refuses a package that does not match its SHA-256, before npm runs", async () => {
++    const dataDir = scratchDir();
++    const npm = fakeNpm({});
++    const release = fakeRelease({
++      checksums: `${"f".repeat(64)}  1ma-server-1.1.0.tgz\n`,
++    });
++
++    await expect(
++      installNpmRevision({
++        dataDir,
++        onLine: () => undefined,
++        onStep: () => undefined,
++        runner: npm.runner,
++        version: "1.1.0",
++        fetchImpl: release.fetchImpl,
++        commandPrefix: [],
++      }),
++    ).rejects.toThrow("does not match its SHA-256");
++    expect(npm.calls).toEqual([]);
++    expect(readdirSync(formatAppUpdateVersionsDir(dataDir))).toEqual([]);
++  });
++
++  it("refuses a release whose SHA256SUMS does not list the package", async () => {
++    const npm = fakeNpm({});
++
++    await expect(
++      installNpmRevision({
++        dataDir: scratchDir(),
++        onLine: () => undefined,
++        onStep: () => undefined,
++        runner: npm.runner,
++        version: "1.1.0",
++        fetchImpl: fakeRelease({ checksums: "" }).fetchImpl,
++        commandPrefix: [],
++      }),
++    ).rejects.toThrow("does not list 1ma-server-1.1.0.tgz");
++    expect(npm.calls).toEqual([]);
++  });
++
++  it("runs npm through the configured command prefix", async () => {
++    const npm = fakeNpm({});
++
++    await installNpmRevision({
++      dataDir: scratchDir(),
++      onLine: () => undefined,
++      onStep: () => undefined,
++      runner: npm.runner,
++      version: "1.1.0",
++      fetchImpl: fakeRelease().fetchImpl,
++      commandPrefix: parseUpdateCommandPrefix(" /usr/bin/nice  -n 10 "),
++    });
++
++    const [install] = npm.calls;
++    expect(install?.command).toBe("/usr/bin/nice");
++    expect(install?.args.slice(0, 3)).toEqual(["-n", "10", process.execPath]);
++    expect(install?.args).toContain("install");
++  });
++
++  it("reads checksums in sha256sum's text and binary formats only", () => {
++    const sum = "a".repeat(64);
++    expect(findPackageChecksum(`${sum}  x.tgz\n`, "x.tgz")).toBe(sum);
++    expect(findPackageChecksum(`${sum} *x.tgz`, "x.tgz")).toBe(sum);
++    expect(findPackageChecksum(`${sum}  x.tgz.sig`, "x.tgz")).toBeNull();
++    expect(findPackageChecksum(`${sum.slice(1)}  x.tgz`, "x.tgz")).toBeNull();
++  });
++
+   it("refuses versions that are not semver", async () => {
+     await expect(
+       installNpmRevision({
+diff --git a/packages/config/src/app-update.ts b/packages/config/src/app-update.ts
+index 3ab0c26..c52f934 100644
+--- a/packages/config/src/app-update.ts
++++ b/packages/config/src/app-update.ts
+@@ -169,6 +169,35 @@ export function isNightlyAppVersion(version: string): boolean {
+   return /-nightly\.\d+\.\d+$/u.test(version);
+ }
+ 
++// 1ma publishes its server package and version feeds as GitHub release
++// assets; on npm, bb-app is bb's own package.
++export const SERVER_RELEASES_DOWNLOAD_URL =
++  "https://github.com/1ma-ai/1ma/releases/download";
++
++export function formatServerVersionFeedUrl(
++  channel: "latest" | "nightly",
++): string {
++  return `${SERVER_RELEASES_DOWNLOAD_URL}/desktop-${channel}/server-version.json`;
++}
++
++export interface ServerPackageDownload {
++  checksumsUrl: string;
++  fileName: string;
++  packageUrl: string;
++}
++
++export function formatServerPackageDownload(
++  version: string,
++): ServerPackageDownload {
++  const release = `${SERVER_RELEASES_DOWNLOAD_URL}/desktop/v${version}`;
++  const fileName = `1ma-server-${version}.tgz`;
++  return {
++    checksumsUrl: `${release}/SHA256SUMS`,
++    fileName,
++    packageUrl: `${release}/${fileName}`,
++  };
++}
++
+ export const appUpdateTargetSchema = z.discriminatedUnion("kind", [
+   z.object({ kind: z.literal("npm"), version: z.string().min(1) }),
+   z.object({ commit: gitCommitSchema, kind: z.literal("source") }),
