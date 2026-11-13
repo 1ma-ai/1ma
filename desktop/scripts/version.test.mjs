@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import { compareVersions, oneMaVersion } from "./version.mjs";
@@ -44,6 +47,44 @@ describe("version order", () => {
   test("rejects what is not a semantic version", () => {
     assert.throws(() => compareVersions("0.49", "0.49.0"), /not a semantic version/);
     assert.throws(() => compareVersions("0.49.0-01", "0.49.0"), /not a semantic version/);
+  });
+});
+
+describe("the feeds only move forward", () => {
+  const feeds = (files) => {
+    const dir = mkdtempSync(path.join(tmpdir(), "1ma-feeds-"));
+    for (const [name, version] of Object.entries(files))
+      writeFileSync(path.join(dir, name), JSON.stringify({ version }));
+    return dir;
+  };
+
+  test("a build may replace feeds that announce it or an older build", () => {
+    const dir = feeds({
+      "desktop-version.json": "0.49.1-1ma.9.1",
+      "server-version.json": "0.49.1-1ma.9.2",
+    });
+    const result = run("forward", "0.49.1-1ma.9.2", dir);
+    assert.equal(result.status, 0, result.stderr);
+  });
+
+  test("refuses when any feed, not only the server's, announces a newer build", () => {
+    // A release that failed halfway can leave the app's feed ahead of the server's.
+    const dir = feeds({
+      "desktop-version.json": "0.49.1-1ma.10.1",
+      "server-version.json": "0.49.1-1ma.9.1",
+    });
+    const result = run("forward", "0.49.1-1ma.9.2", dir);
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /already announces 0\.49\.1-1ma\.10\.1 in desktop-version\.json, newer than 0\.49\.1-1ma\.9\.2/,
+    );
+  });
+
+  test("refuses a feed without a version it can compare", () => {
+    const result = run("forward", "0.49.1-1ma.9.2", feeds({ "desktop-version.json": "latest" }));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /not a semantic version/);
   });
 });
 

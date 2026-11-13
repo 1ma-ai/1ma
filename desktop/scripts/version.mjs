@@ -3,7 +3,8 @@
 // nightly builds: bb 0.49.0 built in run 123, attempt 1, is 0.49.1-1ma.123.1.
 // It sorts above that bb release and every earlier 1ma build, and below bb's
 // next release, so bb's own version checks keep working.
-import { realpathSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const RELEASE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
@@ -67,12 +68,36 @@ export function compareVersions(a, b) {
   return 0;
 }
 
+// Each feed in desktop-latest is replaced separately, so a release that
+// failed halfway can leave one ahead of another: a build is checked against
+// every feed it would replace, not only one of them.
+export function checkFeedsMoveForward(version, folder) {
+  const newer = readdirSync(folder)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => ({
+      name,
+      announced: JSON.parse(readFileSync(path.join(folder, name), "utf8")).version,
+    }))
+    .filter(({ announced }) => compareVersions(String(announced), version) > 0);
+  if (newer.length > 0)
+    throw new Error(
+      newer
+        .map(
+          ({ name, announced }) =>
+            `desktop-latest already announces ${announced} in ${name}, newer than ${version}`,
+        )
+        .join("\n"),
+    );
+  return `${version} is not older than any feed in ${folder}`;
+}
+
 const USAGE =
-  "usage: node desktop/scripts/version.mjs next <bb version> <run id> <run attempt> | compare <version> <version>";
+  "usage: node desktop/scripts/version.mjs next <bb version> <run id> <run attempt> | compare <version> <version> | forward <version> <folder with the announced feeds>";
 
 function main([command, ...args]) {
   if (command === "next" && args.length === 3) return oneMaVersion(...args);
   if (command === "compare" && args.length === 2) return String(compareVersions(...args));
+  if (command === "forward" && args.length === 2) return checkFeedsMoveForward(...args);
   throw new Error(USAGE);
 }
 

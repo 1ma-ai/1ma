@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -226,6 +227,23 @@ describe("importing into 1ma", () => {
     assert.ok(!existsSync(to));
     importIntoOneMa({ ...options, archiveIsCurrent: true }, quiet);
     assert.ok(existsSync(path.join(to, "bb.db")));
+  });
+
+  test("sees a folder inside another one when one path goes through a symbolic link", () => {
+    // On a Mac the temporary folder is /var/..., a link to /private/var/...: a
+    // folder that exists resolves through the link, one not created yet must too.
+    const from = bbFolder();
+    const link = `${from}-link`;
+    symlinkSync(from, link);
+    const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
+    assert.throws(
+      () => importIntoOneMa(importArgs(link, path.join(link, "copy"), cli), quiet),
+      /two separate folders/,
+    );
+    assert.throws(
+      () => importIntoOneMa(importArgs(path.join(link, "copy", "deeper"), link, cli), quiet),
+      /two separate folders/,
+    );
   });
 
   test("refuses folders inside each other and processes still using them", () => {

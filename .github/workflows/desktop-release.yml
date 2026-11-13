@@ -137,11 +137,13 @@ jobs:
             fail "cannot read release $tag: $(cat release-view.err)"
           fi
           # The feeds only move forward: an older run never replaces a newer one.
-          if gh release download desktop-latest --pattern server-version.json --dir announced 2>feed.err; then
-            announced="$(jq -r .version announced/server-version.json)"
-            order="$(node 1ma/desktop/scripts/version.mjs compare "$version" "$announced")"
-            [[ "$order" -ge 0 ]] ||
-              fail "desktop-latest already announces $announced, newer than $version"
+          # Every feed this run replaces is checked, since a release that failed
+          # halfway can leave one feed ahead of another.
+          patterns=()
+          for file in feeds/*; do patterns+=(--pattern "$(basename "$file")"); done
+          if gh release download desktop-latest "${patterns[@]}" --dir announced 2>feed.err; then
+            node 1ma/desktop/scripts/version.mjs forward "$version" announced ||
+              fail "the feeds in desktop-latest only move forward"
           elif grep -q "release not found" feed.err; then
             fail "the desktop-latest release is missing; a maintainer creates it once (desktop/README.md)"
           elif ! grep -qE "no assets (match|to download)" feed.err; then

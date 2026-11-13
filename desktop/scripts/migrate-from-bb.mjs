@@ -218,8 +218,16 @@ function within(child, parent) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+// A folder that does not exist yet resolves through its nearest existing
+// parent, so both sides of a comparison pass the same symbolic links.
 function real(dir) {
-  return existsSync(dir) ? realpathSync(dir) : path.resolve(dir);
+  const missing = [];
+  let existing = path.resolve(dir);
+  while (!existsSync(existing) && path.dirname(existing) !== existing) {
+    missing.unshift(path.basename(existing));
+    existing = path.dirname(existing);
+  }
+  return path.join(realpathSync(existing), ...missing);
 }
 
 function overlaps(a, b) {
