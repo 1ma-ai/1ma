@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Fri, 13 Nov 2026 17:59:38 +0100
+Subject: [PATCH] 1ma: Codex leaves retrying a failed request to the account
+ pool
+
+When Codex runs through the Account Pooler, a failed request is retried by
+three layers at once: the pool tries the same account up to three times and
+then the other accounts, Codex re-sends the request on 5xx and network errors
+(request_max_retries, 4 by default), and Provider Retry repeats the whole
+turn with backoff from a minute. On network timeouts these multiply into
+delays of around twenty minutes. The pool's provider definition now sets
+request_max_retries=0, so the pool alone retries and fails over within a
+turn and Provider Retry stays the visible turn-level layer. Codex's stream
+retries are left as they are: the pool cannot resume a dropped stream.
+---
+ .../provider-codex/src/bridge/app-server-launch.test.ts   | 8 ++++++++
+ plugins/provider-codex/src/bridge/bridge.ts               | 2 ++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/plugins/provider-codex/src/bridge/app-server-launch.test.ts b/plugins/provider-codex/src/bridge/app-server-launch.test.ts
+index 19c3632..385ba1f 100644
+--- a/plugins/provider-codex/src/bridge/app-server-launch.test.ts
++++ b/plugins/provider-codex/src/bridge/app-server-launch.test.ts
+@@ -22,6 +22,14 @@ describe("Codex Account Pool launch", () => {
+     expect(JSON.stringify(launch.args)).not.toContain("secret-machine-token");
+   });
+ 
++  it("leaves retrying a failed request to the pool, which already retries and fails over", () => {
++    vi.stubEnv("CODEX_OPENAI_BASE_URL", "https://bb.example/pool/v1");
++    vi.stubEnv("CODEX_POOL_AUTH_TOKEN", "secret-machine-token");
++    expect(resolveAppServerLaunch().args).toContain(
++      "model_providers.bb-account-pool.request_max_retries=0",
++    );
++  });
++
+   it("leaves Codex's default transport alone when the pool is not routed", () => {
+     const launch = resolveAppServerLaunch({});
+     expect(launch).toEqual({ command: "codex", args: ["app-server"] });
+diff --git a/plugins/provider-codex/src/bridge/bridge.ts b/plugins/provider-codex/src/bridge/bridge.ts
+index ccda32c..7d33dc2 100644
+--- a/plugins/provider-codex/src/bridge/bridge.ts
++++ b/plugins/provider-codex/src/bridge/bridge.ts
+@@ -392,6 +392,8 @@ export function resolveAppServerLaunch(env: NodeJS.ProcessEnv = process.env): {
+       "-c",
+       "model_providers.bb-account-pool.supports_websockets=false",
+       "-c",
++      "model_providers.bb-account-pool.request_max_retries=0",
++      "-c",
+       'model_providers.bb-account-pool.env_http_headers.x-bb-account-pool-token="CODEX_POOL_AUTH_TOKEN"',
+     ],
+   };
