@@ -1,0 +1,34 @@
+{
+  "name": "bb-plugin-1ma-auto-updates",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ставит обновления CLI провайдеров и плагинов, только когда ни один тред 1ma не работает.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "bb plugin build"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.79",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0"
+  },
+  "engines": {
+    "bb": ">=0.48",
+    "bbPluginSdk": ">=0.6.79"
+  },
+  "bb": {
+    "name": "1ma Auto Updates",
+    "description": "Installs provider CLI and plugin updates only while no thread is running.",
+    "branding": {
+      "icon": "RefreshCw"
+    },
+    "server": "./server.ts"
+  }
+}

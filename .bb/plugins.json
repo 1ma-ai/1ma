@@ -18,6 +18,10 @@
     {
       "name": "1ma-server-switcher",
       "source": "./plugins/1ma-server-switcher"
+    },
+    {
+      "name": "1ma-auto-updates",
+      "source": "./plugins/1ma-auto-updates"
     }
   ]
 }

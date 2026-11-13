@@ -92,6 +92,28 @@
           "tagPrefix": "1ma-server-switcher/"
         }
       }
+    },
+    {
+      "id": "1ma-auto-updates",
+      "displayName": "1ma Auto Updates",
+      "description": "Обновляет CLI провайдеров и плагины, только когда треды не работают.",
+      "icon": {
+        "url": "./icons/1ma.svg"
+      },
+      "tags": ["updates", "maintenance"],
+      "author": {
+        "name": "1ma",
+        "github": "1ma-ai",
+        "url": "https://1ma.ai"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/1ma-ai/1ma.git",
+          "subdir": "plugins/1ma-auto-updates",
+          "range": "^0",
+          "tagPrefix": "1ma-auto-updates/"
+        }
+      }
     }
   ]
 }
