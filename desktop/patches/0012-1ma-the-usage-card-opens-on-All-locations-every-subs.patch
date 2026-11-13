@@ -1,0 +1,457 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Fri, 13 Nov 2026 19:11:04 +0100
+Subject: [PATCH] 1ma: the usage card opens on All locations, every
+ subscription in one list
+
+The usage card showed one location at a time: a machine's own provider
+logins, or a shared source such as Account Pooler. A subscription that only
+the pool holds was invisible on the machine view, and the pool view left out
+the machine's other providers, so no single view listed every subscription.
+When there is more than one location, the server now also offers All
+locations: every account from shared sources and connected machines, with an
+account whose provider-issued identity is known listed once (the shared
+source's reading wins, as within a location). The card and the settings page
+open on it; the selection key moves to v2 so a remembered location gives way
+to it once. Picking a machine or a source works as before.
+---
+ plugins/provider-usage/README.md            |   6 +-
+ plugins/provider-usage/app.test.tsx         |   2 +-
+ plugins/provider-usage/app.tsx              |  11 +-
+ plugins/provider-usage/server.test.ts       | 108 ++++++++++++++++++++
+ plugins/provider-usage/server.ts            |  40 +++++++-
+ plugins/provider-usage/settings.tsx         |  20 +++-
+ plugins/provider-usage/usage-feedback.tsx   |   8 +-
+ plugins/provider-usage/usage-schema.test.ts |  30 ++++++
+ plugins/provider-usage/usage-schema.ts      |   3 +
+ 9 files changed, 213 insertions(+), 15 deletions(-)
+
+diff --git a/plugins/provider-usage/README.md b/plugins/provider-usage/README.md
+index 27d0806..dfd00d2 100644
+--- a/plugins/provider-usage/README.md
++++ b/plugins/provider-usage/README.md
+@@ -7,8 +7,10 @@ with pooled accounts stacked under each provider. Each account shows its plan an
+ per usage window, a bar, the percent used, and the time until reset.
+ The card lists account metadata cheaply, then fetches the accounts on the selected
+ tab. Unopened tabs have no quota badge until measured, and a badge shows only while
+-that provider's accounts are off screen. Shared sources such as Account Pooler are selected by default; an explicit
+-machine selection shows that machine’s local usage instead.
++that provider's accounts are off screen. When there is more than one location, the card opens on **All locations**:
++every account from shared sources such as Account Pooler and from connected machines, with an account whose
++provider-issued identity is known listed once (the shared source's reading wins). Picking a machine shows that
++machine’s local usage; picking a shared source shows only its accounts.
+ 
+ An unconfigured shared source remains selectable and shows setup guidance.
+ Failed refreshes retain the last available measurements with a retry notice.
+diff --git a/plugins/provider-usage/app.test.tsx b/plugins/provider-usage/app.test.tsx
+index 4de085c..1fb6a18 100644
+--- a/plugins/provider-usage/app.test.tsx
++++ b/plugins/provider-usage/app.test.tsx
+@@ -297,7 +297,7 @@ describe("provider usage footer disclosure", () => {
+     ).toBeTruthy();
+     expect(slot.getByText("97%")).toBeTruthy();
+     expect(
+-      localStorage.getItem("bb.bb--provider-usage.selected-machine.v1"),
++      localStorage.getItem("bb.bb--provider-usage.selected-machine.v2"),
+     ).toBe("host-m5");
+ 
+     fireEvent.pointerDown(machinePicker, { button: 0 });
+diff --git a/plugins/provider-usage/app.tsx b/plugins/provider-usage/app.tsx
+index b685753..f43386c 100644
+--- a/plugins/provider-usage/app.tsx
++++ b/plugins/provider-usage/app.tsx
+@@ -36,6 +36,7 @@ import {
+   OPTION_INTERACTIVE_CLASS_NAME,
+ } from "@/components/ui/option-display";
+ import {
++  ALL_USAGE_MACHINE_ID,
+   providerUsageTone,
+   selectUsageMachine,
+   usageRpcSuccessSchema,
+@@ -487,7 +488,13 @@ function MachineSelector({
+               className="flex items-center gap-2"
+             >
+               <Icon
+-                name={machine.id.startsWith("source:") ? "Layers" : "Laptop"}
++                name={
++                  machine.id === ALL_USAGE_MACHINE_ID
++                    ? "GridView"
++                    : machine.id.startsWith("source:")
++                      ? "Layers"
++                      : "Laptop"
++                }
+                 className="size-3.5 shrink-0"
+               />
+               <span className="min-w-0 flex-1 truncate">
+@@ -935,7 +942,7 @@ function ProviderUsageStatus(props: ExperimentalSidebarFooterDisclosureProps) {
+       pluginId={pluginId}
+       snapshot={snapshot}
+       threadMachineId={threadMachineId}
+-      machineSelectionStorageKey={`bb.${pluginId}.selected-machine.v1`}
++      machineSelectionStorageKey={`bb.${pluginId}.selected-machine.v2`}
+     />
+   );
+ }
+diff --git a/plugins/provider-usage/server.test.ts b/plugins/provider-usage/server.test.ts
+index 9323ef8..fd8d469 100644
+--- a/plugins/provider-usage/server.test.ts
++++ b/plugins/provider-usage/server.test.ts
+@@ -124,6 +124,7 @@ it("lists cheaply, fetches only the selected source/provider, preserves failed m
+     const listed = await host.harness.behavior.callRpc("getUsage", request);
+     expect(listed).toMatchObject({
+       machines: [
++        { id: "all" },
+         { id: "host" },
+         {
+           id: "source:pool",
+@@ -168,6 +169,7 @@ it("lists cheaply, fetches only the selected source/provider, preserves failed m
+       }),
+     ).toMatchObject({
+       machines: [
++        { id: "all" },
+         { id: "host" },
+         {
+           id: "source:pool",
+@@ -189,6 +191,7 @@ it("lists cheaply, fetches only the selected source/provider, preserves failed m
+       }),
+     ).toMatchObject({
+       machines: [
++        { id: "all" },
+         { id: "host" },
+         {
+           id: "source:pool",
+@@ -355,3 +358,108 @@ it("collapses known account observations per machine, preserves unknown identiti
+     await harness.lifecycle.dispose();
+   }
+ });
++
++it("offers All, which lists shared and machine accounts together and shows a known account once", async () => {
++  const keys: Record<string, string | null> = {
++    plus: "openai:chatgpt:plus",
++    prolite: "openai:chatgpt:prolite",
++    login: "openai:chatgpt:prolite",
++    go: null,
++  };
++  const rpc = vi.fn(async ({ pluginId, method, input }) => {
++    if (method === usageListMethod) {
++      if (pluginId === "pool")
++        return {
++          label: "Account Pooler",
++          resources: ["plus", "prolite"].map((id) => ({
++            id,
++            providerId: "codex",
++            accountKey: keys[id],
++            label: `${id}@example.com`,
++            scope: { kind: "shared" },
++          })),
++        };
++      return {
++        resources: [
++          {
++            id: pluginId === "local" ? "login" : "go",
++            providerId: pluginId === "local" ? "codex" : "opencode",
++            accountKey: pluginId === "local" ? keys.login : keys.go,
++            label: pluginId === "local" ? "Codex" : "OpenCode Go",
++            scope: { kind: "host", hostId: "mac", hostName: "MacBook" },
++          },
++        ],
++      };
++    }
++    return {
++      accountKey: keys[input.resourceId] ?? null,
++      observedAt: 123,
++      usage: {
++        status: "ok",
++        accountEmail: `${input.resourceId}@example.com`,
++        planLabel: null,
++        windows: [],
++      },
++    };
++  });
++  const host = createFakePluginHost({
++    pluginId: "provider-usage",
++    sdk: {
++      system: { config: async () => ({ primaryHostId: null }) },
++      hosts: {
++        list: async () => [
++          makeHostResponse({ id: "mac", name: "MacBook", status: "connected" }),
++        ],
++      },
++      providers: {
++        list: async () => [
++          { id: "codex", displayName: "Codex", logoUrl: "/codex.svg" },
++          { id: "opencode", displayName: "OpenCode", logoUrl: "/oc.svg" },
++        ],
++      },
++      plugins: {
++        experimental_discoverRpc: async () =>
++          ["pool", "local", "acp"].map((pluginId) => ({
++            pluginId,
++            displayName: pluginId,
++            method: usageListMethod,
++          })),
++        callRpc: rpc,
++      },
++    },
++  });
++  plugin(host.bb);
++  try {
++    const snapshot = await host.harness.behavior.callRpc("getUsage", {
++      force: false,
++      machineIds: ["all"],
++      providerIds: ["codex", "opencode"],
++      maxAgeMs: 0,
++    });
++    expect(
++      snapshot.machines.map(
++        (machine: { id: string; providers: { id: string }[] }) => [
++          machine.id,
++          machine.providers.map((provider) => provider.id),
++        ],
++      ),
++    ).toEqual([
++      ["all", ["pool:plus", "pool:prolite", "acp:go"]],
++      ["mac", ["local:login", "acp:go"]],
++      ["source:pool", ["pool:plus", "pool:prolite"]],
++    ]);
++    expect(snapshot.machines[0]).toMatchObject({
++      displayName: "All locations",
++      status: "connected",
++      error: null,
++    });
++    expect(
++      rpc.mock.calls
++        .filter(([args]) => args.method === usageFetchMethod)
++        .map(([args]) => `${args.pluginId}:${args.input.resourceId}`)
++        .sort(),
++    ).toEqual(["acp:go", "local:login", "pool:plus", "pool:prolite"]);
++  } finally {
++    await host.harness.lifecycle.dispose();
++  }
++});
+diff --git a/plugins/provider-usage/server.ts b/plugins/provider-usage/server.ts
+index 3cceda8..ecc7b00 100644
+--- a/plugins/provider-usage/server.ts
++++ b/plugins/provider-usage/server.ts
+@@ -5,6 +5,7 @@ import {
+ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
+ import { z } from "zod/mini";
+ import {
++  ALL_USAGE_MACHINE_ID,
+   usageSnapshotSchema,
+   type ProviderUsage,
+   type UsageMachine,
+@@ -201,7 +202,10 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
+     return promise;
+   };
+   const readUsage = async (request: UsageRequest): Promise<UsageSnapshot> => {
+-    const hostId = request.machineIds?.find((id) => !id.startsWith("source:"));
++    const machineIds = request.machineIds?.includes(ALL_USAGE_MACHINE_ID)
++      ? null
++      : request.machineIds;
++    const hostId = machineIds?.find((id) => !id.startsWith("source:"));
+     const [hosts, sources, providers, config] = await Promise.all([
+       bb.sdk.hosts
+         .list()
+@@ -272,8 +276,7 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
+               : resource.scope.hostId;
+           return (
+             request.providerIds.includes(resource.providerId) &&
+-            (request.machineIds === null ||
+-              request.machineIds.includes(machineId)) &&
++            (machineIds === null || machineIds.includes(machineId)) &&
+             (resource.scope.kind === "shared" ||
+               hosts.some(
+                 (host) =>
+@@ -340,9 +343,12 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
+         candidates.push({ source, resource, machineId });
+       }
+     }
+-    for (const machine of machines) {
++    const fillMachine = (
++      machine: UsageMachine,
++      included: typeof candidates,
++    ): void => {
+       const visible = selectUsageResources(
+-        candidates.filter((candidate) => candidate.machineId === machine.id),
++        included,
+         ({ source, resource }) => ({
+           ...resource,
+           accountKey: measurements.has(keyOf(source.pluginId, resource.id))
+@@ -360,6 +366,30 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
+         if (source.error !== null || failures.has(key))
+           machine.error = "Some usage could not be refreshed.";
+       }
++    };
++    for (const machine of machines)
++      fillMachine(
++        machine,
++        candidates.filter((candidate) => candidate.machineId === machine.id),
++      );
++    if (machines.length > 1) {
++      const connected = new Set(
++        machines
++          .filter((machine) => machine.status === "connected")
++          .map((machine) => machine.id),
++      );
++      const all: UsageMachine = {
++        id: ALL_USAGE_MACHINE_ID,
++        displayName: "All locations",
++        status: "connected",
++        providers: [],
++        error: null,
++      };
++      fillMachine(
++        all,
++        candidates.filter((candidate) => connected.has(candidate.machineId)),
++      );
++      machines.unshift(all);
+     }
+     const providerOrder = new Map(
+       providers.map((provider, index) => [provider.id, index]),
+diff --git a/plugins/provider-usage/settings.tsx b/plugins/provider-usage/settings.tsx
+index 8628266..8c476a3 100644
+--- a/plugins/provider-usage/settings.tsx
++++ b/plugins/provider-usage/settings.tsx
+@@ -21,6 +21,7 @@ import {
+   usageFeedbackMessages,
+ } from "./usage-feedback.js";
+ import {
++  ALL_USAGE_MACHINE_ID,
+   selectUsageMachine,
+   type UsageMachine,
+   type UsageProvider,
+@@ -145,10 +146,16 @@ interface ProviderUsageBlockProps {
+ interface UsageLocation {
+   id: string;
+   name: string;
+-  kind: "host" | "source";
++  kind: "all" | "host" | "source";
+   disabled: boolean;
+ }
+ 
++const LOCATION_ICONS = {
++  all: "GridView",
++  host: "Laptop",
++  source: "Layers",
++} as const;
++
+ function UsageLocationPicker({
+   locations,
+   selectedLocationId,
+@@ -173,7 +180,7 @@ function UsageLocationPicker({
+           aria-label="Usage source"
+         >
+           <Icon
+-            name={selectedLocation?.kind === "source" ? "Layers" : "Laptop"}
++            name={LOCATION_ICONS[selectedLocation?.kind ?? "host"]}
+             className="size-3.5 shrink-0"
+           />
+           <span className="min-w-0 truncate">
+@@ -193,7 +200,7 @@ function UsageLocationPicker({
+               className="flex items-center gap-2"
+             >
+               <Icon
+-                name={location.kind === "source" ? "Layers" : "Laptop"}
++                name={LOCATION_ICONS[location.kind]}
+                 className="size-3.5 shrink-0"
+               />
+               <span className="min-w-0 flex-1 truncate">{location.name}</span>
+@@ -430,7 +437,12 @@ export function UsageSettingsContent({
+                 locations={machines.map((machine) => ({
+                   id: machine.id,
+                   name: machine.displayName,
+-                  kind: machine.id.startsWith("source:") ? "source" : "host",
++                  kind:
++                    machine.id === ALL_USAGE_MACHINE_ID
++                      ? "all"
++                      : machine.id.startsWith("source:")
++                        ? "source"
++                        : "host",
+                   disabled: machine.status !== "connected",
+                 }))}
+                 selectedLocationId={selected?.id ?? null}
+diff --git a/plugins/provider-usage/usage-feedback.tsx b/plugins/provider-usage/usage-feedback.tsx
+index 0b363ab..90c383c 100644
+--- a/plugins/provider-usage/usage-feedback.tsx
++++ b/plugins/provider-usage/usage-feedback.tsx
+@@ -1,6 +1,10 @@
+ import { Icon } from "@/components/ui/icon";
+ import { cn } from "@/lib/utils";
+-import type { UsageMachine, UsageProvider } from "./usage-schema.js";
++import {
++  ALL_USAGE_MACHINE_ID,
++  type UsageMachine,
++  type UsageProvider,
++} from "./usage-schema.js";
+ 
+ export const usageFeedbackMessages = {
+   loading: "Loading usage…",
+@@ -15,6 +19,8 @@ export function hasReportedUsage(providers: readonly UsageProvider[]): boolean {
+ }
+ 
+ export function emptyUsageMessage(machine: UsageMachine): string {
++  if (machine.id === ALL_USAGE_MACHINE_ID)
++    return "No providers or accounts report usage yet.";
+   return machine.id.startsWith("source:")
+     ? "No accounts report usage yet. Configure accounts in the source plugin’s settings."
+     : "No providers report usage limits on this machine.";
+diff --git a/plugins/provider-usage/usage-schema.test.ts b/plugins/provider-usage/usage-schema.test.ts
+index c543f72..7f0f5bb 100644
+--- a/plugins/provider-usage/usage-schema.test.ts
++++ b/plugins/provider-usage/usage-schema.test.ts
+@@ -75,3 +75,33 @@ describe("default usage source", () => {
+     ).toBe(machine);
+   });
+ });
++
++describe("the All location", () => {
++  const machine: UsageMachine = {
++    id: "host-one",
++    displayName: "My machine",
++    status: "connected",
++    providers: [],
++    error: null,
++  };
++  const pool: UsageMachine = {
++    ...machine,
++    id: "source:account-pool",
++    displayName: "Account Pooler",
++  };
++  const all: UsageMachine = {
++    ...machine,
++    id: "all",
++    displayName: "All locations",
++  };
++
++  it("opens on All when the server offers it, while preserving explicit selection", () => {
++    expect(selectUsageMachine([all, machine, pool], null, machine.id)).toBe(
++      all,
++    );
++    expect(selectUsageMachine([all, machine, pool], machine.id, null)).toBe(
++      machine,
++    );
++    expect(selectUsageMachine([all, machine, pool], pool.id, null)).toBe(pool);
++  });
++});
+diff --git a/plugins/provider-usage/usage-schema.ts b/plugins/provider-usage/usage-schema.ts
+index 7cc24d3..1e9ecfd 100644
+--- a/plugins/provider-usage/usage-schema.ts
++++ b/plugins/provider-usage/usage-schema.ts
+@@ -82,6 +82,8 @@ export function providerUsageTone(
+   return usedPercent >= 80 ? "warning" : null;
+ }
+ 
++export const ALL_USAGE_MACHINE_ID = "all";
++
+ export function selectUsageMachine(
+   machines: UsageMachine[],
+   requestedId: string | null,
+@@ -89,6 +91,7 @@ export function selectUsageMachine(
+ ): UsageMachine | null {
+   return (
+     machines.find((machine) => machine.id === requestedId) ??
++    machines.find((machine) => machine.id === ALL_USAGE_MACHINE_ID) ??
+     machines.find(
+       (machine) =>
+         machine.id.startsWith("source:") &&
