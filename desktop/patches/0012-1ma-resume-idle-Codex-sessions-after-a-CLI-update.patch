@@ -1,0 +1,254 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Fri, 13 Nov 2026 13:10:06 +0300
+Subject: [PATCH] 1ma: resume idle Codex sessions after a CLI update
+
+bb keeps one codex app-server process per thread. When Homebrew or npm
+updates Codex, that process keeps running from the old installation; on
+macOS Homebrew deletes the old version's folder, so the next turn's Code Mode
+asks the old process for files that are gone. Before a turn, when no Codex
+turn or compaction is open, the bridge now checks whether the launched
+executable was replaced (device, inode, modification time and size of the file the
+command resolves to) and, if so, restores the same thread in a new process
+with thread/resume, keeping the thread id, history, CODEX_HOME and the
+account pool connection. A running turn is never interrupted and never
+retried. Both ways an update replaces Codex are covered: Homebrew points the
+command at a new versioned file, npm writes a new file at the same path (seen
+on Linux with @openai/codex 0.168.0 -> 0.169.0: same path and size, new
+inode and mtime). A rebuild whose turn carries no env vars keeps the
+session's own, which bb's signature check already treats as unchanged.
+---
+ .../src/bridge/app-server-connection.ts       | 24 +++++
+ .../bridge/bridge.session-signature.test.ts   | 96 ++++++++++++++++++-
+ plugins/provider-codex/src/bridge/bridge.ts   | 18 +++-
+ 3 files changed, 136 insertions(+), 2 deletions(-)
+
+diff --git a/plugins/provider-codex/src/bridge/app-server-connection.ts b/plugins/provider-codex/src/bridge/app-server-connection.ts
+index abe6698..2e524b6 100644
+--- a/plugins/provider-codex/src/bridge/app-server-connection.ts
++++ b/plugins/provider-codex/src/bridge/app-server-connection.ts
+@@ -1,4 +1,6 @@
+ import type { ChildProcess } from "node:child_process";
++import { statSync } from "node:fs";
++import { isAbsolute } from "node:path";
+ import { createInterface, type Interface } from "node:readline";
+ import {
+   experimental_killPortableProcess,
+@@ -54,6 +56,7 @@ interface CodexAppServerRequestArgs<TResult> {
+ export interface CodexAppServerConnection {
+   request<TResult>(args: CodexAppServerRequestArgs<TResult>): Promise<TResult>;
+   kill(): Promise<void>;
++  hasUpdatedExecutable(): boolean;
+   readonly exited: boolean;
+ }
+ 
+@@ -116,6 +119,18 @@ function isClosedChildStdinError(error: Error): boolean {
+   );
+ }
+ 
++function executableIdentity(file: string): string | null {
++  if (process.platform === "win32" || !isAbsolute(file)) return null;
++  try {
++    const stat = statSync(file, { bigint: true, throwIfNoEntry: false });
++    return stat?.isFile()
++      ? `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.size}`
++      : null;
++  } catch {
++    return null;
++  }
++}
++
+ export function createCodexAppServerConnection(
+   options: CreateCodexAppServerConnectionOptions,
+ ): CodexAppServerConnection {
+@@ -129,6 +144,7 @@ export function createCodexAppServerConnection(
+   experimental_recordProviderChildIo(child, {
+     threadId: options.recordThreadId,
+   });
++  const launchedExecutable = executableIdentity(child.spawnfile);
+ 
+   const pending = new Map<number, PendingChildRequest>();
+   const stderrChunks: string[] = [];
+@@ -359,6 +375,14 @@ export function createCodexAppServerConnection(
+       return finalized || stdinFailure !== null;
+     },
+ 
++    hasUpdatedExecutable() {
++      if (launchedExecutable === null) return false;
++      const currentExecutable = executableIdentity(child.spawnfile);
++      return (
++        currentExecutable !== null && currentExecutable !== launchedExecutable
++      );
++    },
++
+     request({ method, params, resultSchema, timeoutMs }) {
+       if (finalized || killStarted) {
+         return Promise.reject(
+diff --git a/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts b/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts
+index 14a88d4..7dc6d94 100644
+--- a/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts
++++ b/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts
+@@ -1,4 +1,11 @@
+-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import {
++  mkdtempSync,
++  readFileSync,
++  renameSync,
++  rmSync,
++  symlinkSync,
++  writeFileSync,
++} from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { afterEach, beforeEach, expect, it, vi } from "vitest";
+@@ -82,6 +89,93 @@ it("keeps the constructed session for a turn whose options carry no envVars", as
+   ).toEqual([]);
+ }, 30_000);
+ 
++const VERSIONED_LINK = "points the command at a new versioned file";
++const SAME_PATH = "writes a new file at the same path";
++
++it.for([VERSIONED_LINK, SAME_PATH])(
++  "resumes the same thread once when an update %s",
++  async (update, { skip }) => {
++    skip(process.platform === "win32", "Uses POSIX executables");
++
++    const command = join(workspaceDir, "codex");
++    const wrapper = `#!/bin/sh\nexec "${process.execPath}" "$@"\n`;
++    const first = join(workspaceDir, "codex-first");
++    writeFileSync(first, wrapper, { mode: 0o700 });
++    if (update === VERSIONED_LINK) symlinkSync(first, command);
++    else renameSync(first, command);
++    vi.stubEnv("BB_CODEX_BRIDGE_APP_SERVER_COMMAND", command);
++    const launchLogPath = join(workspaceDir, "launches.jsonl");
++    writeFileSync(
++      scriptPath,
++      JSON.stringify({ requestLogPath, launchLogPath }),
++    );
++
++    const options = {
++      ...FULL_ACCESS_SESSION_OPTIONS,
++      envVars: {
++        CODEX_HOME: join(workspaceDir, "profile"),
++        CODEX_OPENAI_BASE_URL: "http://127.0.0.1:1",
++        CODEX_POOL_AUTH_TOKEN: "local-test-token",
++      },
++    };
++    harness.sendRequest(1, "thread/start", {
++      threadId: THREAD_ID,
++      cwd: workspaceDir,
++      instructionMode: "append",
++      options,
++    });
++    const started = await harness.waitForResponse(1);
++    const { providerThreadId } = z
++      .object({ providerThreadId: z.string() })
++      .parse(started.result);
++
++    const next = join(workspaceDir, "codex-next");
++    if (update === VERSIONED_LINK) {
++      const second = join(workspaceDir, "codex-second");
++      writeFileSync(second, wrapper, { mode: 0o700 });
++      symlinkSync(second, next);
++      renameSync(next, command);
++      rmSync(first);
++    } else {
++      writeFileSync(next, wrapper, { mode: 0o700 });
++      renameSync(next, command);
++    }
++
++    for (const id of [2, 3]) {
++      harness.sendRequest(id, "turn/start", {
++        threadId: THREAD_ID,
++        providerThreadId,
++        clientRequestId: `creq_updaterxx${id}`,
++        input: [{ type: "text", text: "say hello", mentions: [] }],
++        options: { ...FULL_ACCESS_SESSION_OPTIONS },
++      });
++      expect((await harness.waitForResponse(id)).error).toBeUndefined();
++    }
++
++    const requests = recordedRequests();
++    const resumes = requests.filter(({ method }) => method === "thread/resume");
++    expect(resumes).toHaveLength(1);
++    expect(resumes[0]?.params).toMatchObject({ threadId: providerThreadId });
++    expect(
++      requests.filter(({ method }) => method === "turn/start"),
++    ).toHaveLength(2);
++    expect(
++      readFileSync(launchLogPath, "utf8")
++        .trim()
++        .split("\n")
++        .map((line) => JSON.parse(line)),
++    ).toEqual(
++      Array.from({ length: 2 }, () =>
++        expect.objectContaining({
++          codexHome: options.envVars.CODEX_HOME,
++          poolToken: options.envVars.CODEX_POOL_AUTH_TOKEN,
++        }),
++      ),
++    );
++  },
++  30_000,
++);
++
+ it("rebuilds the session only when a turn changes or removes an env var", async () => {
+   const original = { BB_TEST_SECRET: "original", BB_TEST_REMOVED: "gone" };
+   harness.sendRequest(1, "thread/start", {
+diff --git a/plugins/provider-codex/src/bridge/bridge.ts b/plugins/provider-codex/src/bridge/bridge.ts
+index 81357a3..ccda32c 100644
+--- a/plugins/provider-codex/src/bridge/bridge.ts
++++ b/plugins/provider-codex/src/bridge/bridge.ts
+@@ -477,6 +477,7 @@ interface CodexBridgeSession {
+   construction: CodexSessionConstruction;
+   constructionSignature: string;
+   environmentHash: string;
++  envVars: BridgeExecutionOptions["envVars"];
+   turnPermissionSettings: ReturnType<typeof toCodexPermissionSettings>;
+   openCodexTurnIds: Set<string>;
+   responseOpenedTurns: Map<string, ResponseOpenedTurn>;
+@@ -1254,6 +1255,7 @@ async function constructThreadSession(
+       envHash,
+     ),
+     environmentHash: envHash,
++    envVars: decoded.sessionOptions.envVars,
+     turnPermissionSettings: toCodexPermissionSettings({
+       additionalWorkspaceWriteRoots: decoded.additionalWorkspaceWriteRoots,
+       gitWritableRoots: [],
+@@ -1482,6 +1484,7 @@ function registerResumableSession(session: CodexBridgeSession): void {
+     construction: session.construction,
+     constructionSignature: session.constructionSignature,
+     environmentHash: session.environmentHash,
++    envVars: session.envVars,
+     turnPermissionSettings: session.turnPermissionSettings,
+     openCodexTurnIds: new Set(),
+     responseOpenedTurns: new Map(),
+@@ -1520,7 +1523,10 @@ async function rebuildThreadSession(
+     replacement = await constructThreadSession({
+       threadId: session.bbThreadId,
+       cwd: session.construction.cwd,
+-      options,
++      options:
++        Object.keys(options.envVars ?? {}).length === 0
++          ? { ...options, envVars: session.envVars }
++          : options,
+       instructionMode: session.construction.instructionMode,
+       ...(session.construction.dynamicTools !== undefined
+         ? { dynamicTools: session.construction.dynamicTools }
+@@ -1716,6 +1722,16 @@ async function requireLiveSessionForTurn(
+       params.options,
+       "Execution settings changed; the codex session was rebuilt to apply them.",
+     );
++  } else if (
++    session.openCodexTurnIds.size === 0 &&
++    session.unopenedCompactionDispatches.length === 0 &&
++    session.connection.hasUpdatedExecutable()
++  ) {
++    session = await rebuildThreadSession(
++      session,
++      params.options,
++      "The Codex executable changed; the session was restored with the updated CLI.",
++    );
+   }
+   if (session.connection === null) {
+     throw new Error(`No active codex session for thread "${params.threadId}"`);
