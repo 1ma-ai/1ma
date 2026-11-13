@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Fri, 13 Nov 2026 22:50:12 +0100
+Subject: [PATCH] 1ma: built-in plugins load before installed ones
+
+---
+ .../src/services/plugins/plugin-runtime.ts    |  8 ++-
+ .../services/plugins/plugin-service.test.ts   | 62 +++++++++++++++++++
+ 2 files changed, 68 insertions(+), 2 deletions(-)
+
+diff --git a/apps/server/src/services/plugins/plugin-runtime.ts b/apps/server/src/services/plugins/plugin-runtime.ts
+index e1fadaf..f6428f9 100644
+--- a/apps/server/src/services/plugins/plugin-runtime.ts
++++ b/apps/server/src/services/plugins/plugin-runtime.ts
+@@ -2202,8 +2202,12 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
+   }
+ 
+   async function loadAll(): Promise<void> {
+-    const rows = listInstalledPlugins(deps.db).sort((a, b) =>
+-      a.id.localeCompare(b.id),
++    // Plugins load one at a time. Built-ins (providers among them) come first,
++    // so an installed plugin that is slow to build cannot hold them up.
++    const rows = listInstalledPlugins(deps.db).sort(
++      (a, b) =>
++        Number(b.sourceKind === "builtin") -
++          Number(a.sourceKind === "builtin") || a.id.localeCompare(b.id),
+     );
+     for (const row of rows) {
+       if (loaded.has(row.id)) continue;
+diff --git a/apps/server/test/services/plugins/plugin-service.test.ts b/apps/server/test/services/plugins/plugin-service.test.ts
+index 926f355..5dd296e 100644
+--- a/apps/server/test/services/plugins/plugin-service.test.ts
++++ b/apps/server/test/services/plugins/plugin-service.test.ts
+@@ -168,6 +168,68 @@ describe("plugin service", () => {
+     }
+   });
+ 
++  it("loads built-in plugins before installed ones, so an installed plugin that is slow to build cannot hold up a provider", async () => {
++    const order: string[] = [];
++    (globalThis as Record<string, unknown>).__pluginLoadOrder = order;
++    const recordLoad = (id: string) =>
++      `export default function plugin() { globalThis.__pluginLoadOrder.push(${JSON.stringify(id)}); }`;
++    const builtinRoot = await writePlugin(workDir, {
++      name: "bb-plugin-zz-provider",
++      serverSource: recordLoad("zz-provider"),
++    });
++    const installedRoot = await writePlugin(workDir, {
++      name: "bb-plugin-aa-installed",
++      serverSource: recordLoad("aa-installed"),
++    });
++    upsertInstalledPlugin(db, {
++      id: "aa-installed",
++      source: `path:${installedRoot}`,
++      provenance: { kind: "direct" },
++      sourceIntent: { kind: "path", canonicalPath: installedRoot },
++      exactResolution: { kind: "path" },
++      updateState: {
++        lastCheckAt: null,
++        availableCompatibleVersion: null,
++        newestIncompatibleVersion: null,
++        statusDetail: null,
++      },
++      activeArtifactId: null,
++      rootDir: installedRoot,
++      version: "0.1.0",
++      enabled: true,
++      enabledFollowsDefault: false,
++    });
++    service = createPluginService({
++      aiServices: createAiServiceRegistry(),
++      telemetry: createNoopTelemetryService(),
++      db,
++      hub: {
++        getDaemonSessionIdForHost: () => null,
++        notifyPluginChanged: () => {},
++        onWatchedTargets: () => () => {},
++        notifyPluginSignal: () => 0,
++        notifySystem: () => {},
++      },
++      logger,
++      dataDir: join(workDir, "data"),
++      appVersion: "0.9.0",
++      loadTimeoutMs: 2000,
++      bundledPlugins: [
++        {
++          name: "zz-provider",
++          pluginId: "zz-provider",
++          autoInstall: true,
++          rootDir: builtinRoot,
++          defaultEnabled: true,
++        },
++      ],
++    });
++
++    await service.start();
++
++    expect(order).toEqual(["zz-provider", "aa-installed"]);
++  });
++
+   it.each(["startup", "retry"])(
+     "reports starting while a %s factory is pending",
+     async (mode) => {

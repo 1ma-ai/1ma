@@ -18,13 +18,13 @@ on Linux with @openai/codex 0.168.0 -> 0.169.0: same path and size, new
 inode and mtime). A rebuild whose turn carries no env vars keeps the
 session's own, which bb's signature check already treats as unchanged.
 ---
- .../src/bridge/app-server-connection.ts       | 24 +++++
- .../bridge/bridge.session-signature.test.ts   | 96 ++++++++++++++++++-
- plugins/provider-codex/src/bridge/bridge.ts   | 18 +++-
- 3 files changed, 136 insertions(+), 2 deletions(-)
+ .../src/bridge/app-server-connection.ts       |  23 ++++
+ .../bridge/bridge.session-signature.test.ts   | 107 +++++++++++++++++-
+ plugins/provider-codex/src/bridge/bridge.ts   |  18 ++-
+ 3 files changed, 146 insertions(+), 2 deletions(-)
 
 diff --git a/plugins/provider-codex/src/bridge/app-server-connection.ts b/plugins/provider-codex/src/bridge/app-server-connection.ts
-index abe6698..2e524b6 100644
+index abe6698..6883612 100644
 --- a/plugins/provider-codex/src/bridge/app-server-connection.ts
 +++ b/plugins/provider-codex/src/bridge/app-server-connection.ts
 @@ -1,4 +1,6 @@
@@ -69,23 +69,22 @@ index abe6698..2e524b6 100644
  
    const pending = new Map<number, PendingChildRequest>();
    const stderrChunks: string[] = [];
-@@ -359,6 +375,14 @@ export function createCodexAppServerConnection(
+@@ -359,6 +375,13 @@ export function createCodexAppServerConnection(
        return finalized || stdinFailure !== null;
      },
  
 +    hasUpdatedExecutable() {
 +      if (launchedExecutable === null) return false;
-+      const currentExecutable = executableIdentity(child.spawnfile);
-+      return (
-+        currentExecutable !== null && currentExecutable !== launchedExecutable
-+      );
++      // A file that is gone counts as changed: updates such as Homebrew's
++      // delete the old version the session was started from.
++      return executableIdentity(child.spawnfile) !== launchedExecutable;
 +    },
 +
      request({ method, params, resultSchema, timeoutMs }) {
        if (finalized || killStarted) {
          return Promise.reject(
 diff --git a/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts b/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts
-index 14a88d4..7dc6d94 100644
+index 14a88d4..a05615b 100644
 --- a/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts
 +++ b/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts
 @@ -1,4 +1,11 @@
@@ -101,14 +100,15 @@ index 14a88d4..7dc6d94 100644
  import { tmpdir } from "node:os";
  import { join } from "node:path";
  import { afterEach, beforeEach, expect, it, vi } from "vitest";
-@@ -82,6 +89,93 @@ it("keeps the constructed session for a turn whose options carry no envVars", as
+@@ -82,6 +89,104 @@ it("keeps the constructed session for a turn whose options carry no envVars", as
    ).toEqual([]);
  }, 30_000);
  
 +const VERSIONED_LINK = "points the command at a new versioned file";
 +const SAME_PATH = "writes a new file at the same path";
++const REMOVED = "deletes the file the session started from";
 +
-+it.for([VERSIONED_LINK, SAME_PATH])(
++it.for([VERSIONED_LINK, SAME_PATH, REMOVED])(
 +  "resumes the same thread once when an update %s",
 +  async (update, { skip }) => {
 +    skip(process.platform === "win32", "Uses POSIX executables");
@@ -118,8 +118,11 @@ index 14a88d4..7dc6d94 100644
 +    const first = join(workspaceDir, "codex-first");
 +    writeFileSync(first, wrapper, { mode: 0o700 });
 +    if (update === VERSIONED_LINK) symlinkSync(first, command);
-+    else renameSync(first, command);
-+    vi.stubEnv("BB_CODEX_BRIDGE_APP_SERVER_COMMAND", command);
++    else if (update === SAME_PATH) renameSync(first, command);
++    vi.stubEnv(
++      "BB_CODEX_BRIDGE_APP_SERVER_COMMAND",
++      update === REMOVED ? first : command,
++    );
 +    const launchLogPath = join(workspaceDir, "launches.jsonl");
 +    writeFileSync(
 +      scriptPath,
@@ -152,9 +155,16 @@ index 14a88d4..7dc6d94 100644
 +      symlinkSync(second, next);
 +      renameSync(next, command);
 +      rmSync(first);
-+    } else {
++    } else if (update === SAME_PATH) {
 +      writeFileSync(next, wrapper, { mode: 0o700 });
 +      renameSync(next, command);
++    } else {
++      // The command now resolves to the new version, and the update removed
++      // the file the running session was started from, as Homebrew does with
++      // the old version's folder.
++      writeFileSync(next, wrapper, { mode: 0o700 });
++      vi.stubEnv("BB_CODEX_BRIDGE_APP_SERVER_COMMAND", next);
++      rmSync(first);
 +    }
 +
 +    for (const id of [2, 3]) {
