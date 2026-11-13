@@ -12,11 +12,14 @@ import { strings } from "./strings.js";
 export const SCHEDULE_NAME = "install-updates";
 export const SCHEDULE_CRON = "*/15 * * * *";
 
+const ONE_MA_REPOSITORY = "https://github.com/1ma-ai/1ma";
+
 const threadSchema = z.object({
   status: z.string(),
   activity: z
     .object({
       activeBackgroundAgentCount: z.number().optional(),
+      activeBackgroundCommandCount: z.number().optional(),
       activeWorkflowCount: z.number().optional(),
     })
     .nullish(),
@@ -31,6 +34,7 @@ const pluginListSchema = z.object({
   plugins: z.array(
     z.object({
       id: z.string(),
+      source: z.string(),
       updateState: z.object({ outcome: z.string() }).nullish(),
     }),
   ),
@@ -64,10 +68,24 @@ function threadStates(entries: readonly unknown[]): ThreadState[] | null {
     states.push({
       status: parsed.data.status,
       backgroundAgents: parsed.data.activity?.activeBackgroundAgentCount ?? 0,
+      backgroundCommands: parsed.data.activity?.activeBackgroundCommandCount ?? 0,
       workflows: parsed.data.activity?.activeWorkflowCount ?? 0,
     });
   }
   return states;
+}
+
+function comesFrom1ma(source: string): boolean {
+  const spec = source.startsWith("git:") ? source.slice("git:".length) : source;
+  if (!spec.startsWith("https://")) return false;
+  const at = spec.lastIndexOf("@");
+  const url = at > "https://".length ? spec.slice(0, at) : spec;
+  return (
+    url
+      .replace(/\.git$/u, "")
+      .replace(/\/$/u, "")
+      .toLowerCase() === ONE_MA_REPOSITORY
+  );
 }
 
 async function findWork(bb: BbPluginApi, choices: UpdateChoices): Promise<UpdateWork> {
@@ -86,12 +104,17 @@ async function findWork(bb: BbPluginApi, choices: UpdateChoices): Promise<Update
         .map(([providerId]) => ({ hostId: host.id, hostName: host.name, providerId }));
     }),
   );
-  const plugins = choices.plugins
-    ? pluginListSchema
-        .parse(await bb.sdk.plugins.list())
-        .plugins.filter((entry) => entry.updateState?.outcome === "update-available")
-        .map((entry) => entry.id)
-    : [];
+  const plugins =
+    choices.plugins || choices.otherPlugins
+      ? pluginListSchema
+          .parse(await bb.sdk.plugins.list())
+          .plugins.filter(
+            (entry) =>
+              entry.updateState?.outcome === "update-available" &&
+              (comesFrom1ma(entry.source) ? choices.plugins : choices.otherPlugins),
+          )
+          .map((entry) => entry.id)
+      : [];
   return { providers: perHost.flat(), plugins };
 }
 
@@ -109,6 +132,12 @@ export default function plugin(bb: BbPluginApi): void {
       description: strings.pluginsDescription,
       default: true,
     },
+    otherPlugins: {
+      type: "boolean",
+      label: strings.otherPluginsLabel,
+      description: strings.otherPluginsDescription,
+      default: false,
+    },
   });
   const disposed = new AbortController();
   bb.onDispose(() => disposed.abort());
@@ -121,7 +150,7 @@ export default function plugin(bb: BbPluginApi): void {
       choices: () => settings.get(),
       threads: async () => {
         try {
-          return threadStates(await bb.sdk.threads.list({ includeHidden: true, archived: false }));
+          return threadStates(await bb.sdk.threads.list({ includeHidden: true }));
         } catch (error) {
           bb.log.warn(
             `could not list threads: ${error instanceof Error ? error.message : String(error)}`,
@@ -160,9 +189,9 @@ export default function plugin(bb: BbPluginApi): void {
   bb.experimental_hooks.on("message.dispatch", () => updates.decideDispatch());
   bb.background.schedule(SCHEDULE_NAME, SCHEDULE_CRON, async () => {
     const outcome = await updates.run();
-    if (outcome.kind === "updated")
+    if (outcome.kind === "attempted")
       bb.log.info(
-        `installed: ${outcome.installed.join(", ") || "nothing"}; failed: ${outcome.failed.join(", ") || "nothing"}`,
+        `installed: ${outcome.installed.join(", ") || "nothing"}; failed: ${outcome.failed.join(", ") || "nothing"}; postponed because work started: ${outcome.postponed.join(", ") || "nothing"}`,
       );
     else bb.log.debug(`no updates installed: ${outcome.kind}`);
   });

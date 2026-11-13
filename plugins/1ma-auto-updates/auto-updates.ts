@@ -1,11 +1,11 @@
 export const QUIET_MS = 15 * 60_000;
 export const SETTLE_MS = 5_000;
 export const HELD_RETRY_MS = 30_000;
-export const MAX_HOLD_MS = 10 * 60_000;
 
 export interface ThreadState {
   status: string;
   backgroundAgents: number;
+  backgroundCommands: number;
   workflows: number;
 }
 
@@ -23,6 +23,7 @@ export interface UpdateWork {
 export interface UpdateChoices {
   providers: boolean;
   plugins: boolean;
+  otherPlugins: boolean;
 }
 
 export interface AutoUpdatesDeps {
@@ -44,11 +45,21 @@ export type PassOutcome =
   | { kind: "recent-activity" }
   | { kind: "busy" }
   | { kind: "nothing-to-update" }
-  | { kind: "updated"; installed: string[]; failed: string[] };
+  | { kind: "attempted"; installed: string[]; failed: string[]; postponed: string[] };
 
 export type DispatchDecision =
   | { action: "proceed" }
   | { action: "wait"; reason: string; sendAt: number };
+
+interface Step {
+  label: string;
+  run(): Promise<boolean>;
+}
+
+interface Progress {
+  installed: string[];
+  failed: string[];
+}
 
 export function threadsAreBusy(threads: ThreadState[] | null): boolean {
   return (
@@ -58,66 +69,78 @@ export function threadsAreBusy(threads: ThreadState[] | null): boolean {
         thread.status === "starting" ||
         thread.status === "active" ||
         thread.backgroundAgents > 0 ||
+        thread.backgroundCommands > 0 ||
         thread.workflows > 0,
     )
   );
 }
 
-export function createAutoUpdates(deps: AutoUpdatesDeps, holdReason: string) {
+export function createAutoUpdates(deps: AutoUpdatesDeps, holdReason: (update: string) => string) {
   let lastActivityAt = deps.now();
-  let holdingSince: number | null = null;
+  let installing: string | null = null;
   let current: Promise<PassOutcome> | null = null;
 
-  async function attempt(label: string, run: () => Promise<boolean>) {
+  async function busy(): Promise<boolean> {
+    return threadsAreBusy(await deps.threads());
+  }
+
+  async function attempt(step: Step): Promise<boolean> {
     try {
-      if (await run()) return true;
-      deps.warn(`${label}: the update did not complete`);
+      if (await step.run()) return true;
+      deps.warn(`${step.label}: the update did not complete`);
     } catch (error) {
-      deps.warn(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+      deps.warn(`${step.label}: ${error instanceof Error ? error.message : String(error)}`);
     }
     return false;
   }
 
-  async function pass(): Promise<PassOutcome> {
-    const choices = await deps.choices();
-    if (!choices.providers && !choices.plugins) return { kind: "off" };
-    if (deps.now() - lastActivityAt < QUIET_MS) return { kind: "recent-activity" };
-    if (threadsAreBusy(await deps.threads())) return { kind: "busy" };
-    const work = await deps.findWork(choices);
-    if (work.providers.length === 0 && work.plugins.length === 0)
-      return { kind: "nothing-to-update" };
-
-    holdingSince = deps.now();
+  async function install(step: Step): Promise<"installed" | "failed" | "busy"> {
+    installing = step.label;
     try {
       await deps.sleep(SETTLE_MS);
-      if (threadsAreBusy(await deps.threads())) return { kind: "busy" };
-      const steps = [
-        ...work.providers.map((target) => ({
-          label: `${target.providerId} on ${target.hostName}`,
-          run: () => deps.installProvider(target),
-        })),
-        ...[
-          ...work.plugins.filter((id) => id !== deps.selfId),
-          ...work.plugins.filter((id) => id === deps.selfId),
-        ].map((pluginId) => ({
-          label: `plugin ${pluginId}`,
-          run: () => deps.updatePlugin(pluginId),
-        })),
-      ];
-      const installed: string[] = [];
-      const failed: string[] = [];
-      await steps.reduce<Promise<void>>(
-        (previous, step) =>
-          previous.then(async () => {
-            ((await attempt(step.label, step.run)) ? installed : failed).push(step.label);
-          }),
-        Promise.resolve(),
-      );
-      return { kind: "updated", installed, failed };
+      if (await busy()) return "busy";
+      return (await attempt(step)) ? "installed" : "failed";
     } finally {
-      holdingSince = null;
+      installing = null;
       deps.releaseHeld();
     }
+  }
+
+  async function installEach(steps: Step[], progress: Progress): Promise<PassOutcome> {
+    const [step, ...rest] = steps;
+    if (step === undefined) return { kind: "attempted", ...progress, postponed: [] };
+    const result = await install(step);
+    if (result === "busy")
+      return { kind: "attempted", ...progress, postponed: steps.map((each) => each.label) };
+    return installEach(
+      rest,
+      result === "installed"
+        ? { installed: [...progress.installed, step.label], failed: progress.failed }
+        : { installed: progress.installed, failed: [...progress.failed, step.label] },
+    );
+  }
+
+  async function pass(): Promise<PassOutcome> {
+    const choices = await deps.choices();
+    if (!choices.providers && !choices.plugins && !choices.otherPlugins) return { kind: "off" };
+    if (deps.now() - lastActivityAt < QUIET_MS) return { kind: "recent-activity" };
+    if (await busy()) return { kind: "busy" };
+    const work = await deps.findWork(choices);
+    const steps: Step[] = [
+      ...work.providers.map((target) => ({
+        label: `${target.providerId} on ${target.hostName}`,
+        run: () => deps.installProvider(target),
+      })),
+      ...[
+        ...work.plugins.filter((id) => id !== deps.selfId),
+        ...work.plugins.filter((id) => id === deps.selfId),
+      ].map((pluginId) => ({
+        label: `plugin ${pluginId}`,
+        run: () => deps.updatePlugin(pluginId),
+      })),
+    ];
+    if (steps.length === 0) return { kind: "nothing-to-update" };
+    return installEach(steps, { installed: [], failed: [] });
   }
 
   return {
@@ -125,13 +148,13 @@ export function createAutoUpdates(deps: AutoUpdatesDeps, holdReason: string) {
       lastActivityAt = deps.now();
     },
     decideDispatch(): DispatchDecision {
-      return holdingSince !== null && deps.now() - holdingSince < MAX_HOLD_MS
-        ? {
+      return installing === null
+        ? { action: "proceed" }
+        : {
             action: "wait",
-            reason: holdReason,
+            reason: holdReason(installing),
             sendAt: deps.now() + HELD_RETRY_MS,
-          }
-        : { action: "proceed" };
+          };
     },
     run(): Promise<PassOutcome> {
       if (current !== null) return Promise.resolve({ kind: "in-progress" });

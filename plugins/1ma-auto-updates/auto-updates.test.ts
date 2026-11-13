@@ -1,14 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createAutoUpdates,
-  MAX_HOLD_MS,
   QUIET_MS,
   type AutoUpdatesDeps,
   type ThreadState,
   type UpdateWork,
 } from "./auto-updates.js";
 
-const idle: ThreadState = { status: "idle", backgroundAgents: 0, workflows: 0 };
+const idle: ThreadState = {
+  status: "idle",
+  backgroundAgents: 0,
+  backgroundCommands: 0,
+  workflows: 0,
+};
 
 const work: UpdateWork = {
   providers: [
@@ -17,6 +21,13 @@ const work: UpdateWork = {
   ],
   plugins: ["1ma-auto-updates", "pool-usage"],
 };
+
+const everyUpdate = [
+  "codex on MacBook",
+  "claude-code on MacBook",
+  "plugin pool-usage",
+  "plugin 1ma-auto-updates",
+];
 
 function deferred() {
   let resolve!: () => void;
@@ -37,7 +48,7 @@ function setup(overrides: Partial<AutoUpdatesDeps> = {}) {
       calls.push("settle");
       decisions.push(updates.decideDispatch().action);
     },
-    choices: async () => ({ providers: true, plugins: true }),
+    choices: async () => ({ providers: true, plugins: true, otherPlugins: false }),
     threads: async () => [idle],
     findWork: async () => work,
     installProvider: async ({ providerId }) => {
@@ -47,13 +58,14 @@ function setup(overrides: Partial<AutoUpdatesDeps> = {}) {
     },
     updatePlugin: async (pluginId) => {
       calls.push(`plugin ${pluginId}`);
+      decisions.push(updates.decideDispatch().action);
       return true;
     },
     releaseHeld: () => calls.push("release"),
     warn: vi.fn(),
     ...overrides,
   };
-  const updates = createAutoUpdates(deps, "held for updates");
+  const updates = createAutoUpdates(deps, (update) => `held for ${update}`);
   return {
     deps,
     updates,
@@ -66,7 +78,7 @@ function setup(overrides: Partial<AutoUpdatesDeps> = {}) {
 }
 
 describe("installing updates while 1ma is quiet", () => {
-  it("waits for fifteen quiet minutes, then holds new messages while it installs", async () => {
+  it("waits for fifteen quiet minutes, then installs one update at a time and holds new messages during each", async () => {
     const { updates, calls, decisions, advance } = setup();
 
     advance(QUIET_MS - 1);
@@ -75,48 +87,51 @@ describe("installing updates while 1ma is quiet", () => {
 
     advance(1);
     expect(await updates.run()).toEqual({
-      kind: "updated",
-      installed: [
-        "codex on MacBook",
-        "claude-code on MacBook",
-        "plugin pool-usage",
-        "plugin 1ma-auto-updates",
-      ],
+      kind: "attempted",
+      installed: everyUpdate,
       failed: [],
+      postponed: [],
     });
     expect(calls).toEqual([
       "settle",
       "provider codex",
+      "release",
+      "settle",
       "provider claude-code",
+      "release",
+      "settle",
       "plugin pool-usage",
+      "release",
+      "settle",
       "plugin 1ma-auto-updates",
       "release",
     ]);
-    expect(decisions).toEqual(["wait", "wait", "wait"]);
+    expect(new Set(decisions)).toEqual(new Set(["wait"]));
     expect(updates.decideDispatch()).toEqual({ action: "proceed" });
   });
 
-  it("tells core to try a held message again soon, so it never waits on this plugin alone", async () => {
+  it("names the update a held message waits for and asks core to try it again soon", async () => {
     let held: unknown = null;
     const { updates, advance } = setup({
       sleep: async () => {
-        held = updates.decideDispatch();
+        held ??= updates.decideDispatch();
       },
     });
     advance(QUIET_MS);
     await updates.run();
     expect(held).toEqual({
       action: "wait",
-      reason: "held for updates",
+      reason: "held for codex on MacBook",
       sendAt: 1_000_000 + QUIET_MS + 30_000,
     });
   });
 
   it.each([
-    ["a turn is running", { status: "active", backgroundAgents: 0, workflows: 0 }],
-    ["a turn is starting", { status: "starting", backgroundAgents: 0, workflows: 0 }],
-    ["a background agent works", { status: "idle", backgroundAgents: 1, workflows: 0 }],
-    ["a workflow runs", { status: "idle", backgroundAgents: 0, workflows: 1 }],
+    ["a turn is running", { ...idle, status: "active" }],
+    ["a turn is starting", { ...idle, status: "starting" }],
+    ["a background agent works", { ...idle, backgroundAgents: 1 }],
+    ["a background command runs", { ...idle, backgroundCommands: 1 }],
+    ["a workflow runs", { ...idle, workflows: 1 }],
   ])("stays away while %s", async (_case, thread) => {
     const findWork = vi.fn(async () => work);
     const { updates, calls, advance } = setup({
@@ -140,12 +155,34 @@ describe("installing updates while 1ma is quiet", () => {
     const threads = vi
       .fn<AutoUpdatesDeps["threads"]>()
       .mockResolvedValueOnce([idle])
-      .mockResolvedValueOnce([{ ...idle, status: "active" }]);
+      .mockResolvedValue([{ ...idle, status: "active" }]);
     const { updates, calls, advance } = setup({ threads });
     advance(QUIET_MS);
-    expect(await updates.run()).toEqual({ kind: "busy" });
+    expect(await updates.run()).toEqual({
+      kind: "attempted",
+      installed: [],
+      failed: [],
+      postponed: everyUpdate,
+    });
     expect(calls).toEqual(["settle", "release"]);
     expect(updates.decideDispatch()).toEqual({ action: "proceed" });
+  });
+
+  it("checks again before every update and leaves the rest for later once work starts", async () => {
+    const threads = vi
+      .fn<AutoUpdatesDeps["threads"]>()
+      .mockResolvedValueOnce([idle])
+      .mockResolvedValueOnce([idle])
+      .mockResolvedValue([{ ...idle, backgroundCommands: 1 }]);
+    const { updates, calls, advance } = setup({ threads });
+    advance(QUIET_MS);
+    expect(await updates.run()).toEqual({
+      kind: "attempted",
+      installed: ["codex on MacBook"],
+      failed: [],
+      postponed: ["claude-code on MacBook", "plugin pool-usage", "plugin 1ma-auto-updates"],
+    });
+    expect(calls).toEqual(["settle", "provider codex", "release", "settle", "release"]);
   });
 
   it("restarts the quiet period whenever a thread runs, finishes or fails", async () => {
@@ -167,40 +204,39 @@ describe("installing updates while 1ma is quiet", () => {
     });
     advance(QUIET_MS);
     expect(await updates.run()).toEqual({
-      kind: "updated",
+      kind: "attempted",
       installed: ["claude-code on MacBook", "plugin 1ma-auto-updates"],
       failed: ["codex on MacBook", "plugin pool-usage"],
+      postponed: [],
     });
     expect(deps.warn).toHaveBeenCalledWith("codex on MacBook: brew failed");
     expect(deps.warn).toHaveBeenCalledWith("plugin pool-usage: the update did not complete");
   });
 
-  it("does nothing when both kinds of updates are turned off, and asks only for the kinds turned on", async () => {
+  it("does nothing when every kind of update is turned off, and asks only for the kinds turned on", async () => {
     const off = setup({
-      choices: async () => ({ providers: false, plugins: false }),
+      choices: async () => ({ providers: false, plugins: false, otherPlugins: false }),
     });
     off.advance(QUIET_MS);
     expect(await off.updates.run()).toEqual({ kind: "off" });
 
     const findWork = vi.fn(async () => ({ providers: [], plugins: [] }));
     const providersOnly = setup({
-      choices: async () => ({ providers: true, plugins: false }),
+      choices: async () => ({ providers: true, plugins: false, otherPlugins: false }),
       findWork,
     });
     providersOnly.advance(QUIET_MS);
-    expect(await providersOnly.updates.run()).toEqual({
-      kind: "nothing-to-update",
-    });
-    expect(findWork).toHaveBeenCalledWith({ providers: true, plugins: false });
+    expect(await providersOnly.updates.run()).toEqual({ kind: "nothing-to-update" });
+    expect(findWork).toHaveBeenCalledWith({ providers: true, plugins: false, otherPlugins: false });
     expect(providersOnly.calls).toEqual([]);
   });
 
-  it("stops holding messages after ten minutes, even while an install still runs", async () => {
+  it("keeps holding messages for as long as an install runs, however long that takes", async () => {
     const install = deferred();
     let decisionLate: unknown = null;
     const state = setup({
       installProvider: async () => {
-        state.advance(MAX_HOLD_MS);
+        state.advance(60 * 60_000);
         decisionLate = state.updates.decideDispatch();
         await install.promise;
         return true;
@@ -209,9 +245,10 @@ describe("installing updates while 1ma is quiet", () => {
     state.advance(QUIET_MS);
     const pass = state.updates.run();
     await vi.waitFor(() => expect(decisionLate).not.toBeNull());
-    expect(decisionLate).toEqual({ action: "proceed" });
+    expect(decisionLate).toMatchObject({ action: "wait" });
     install.resolve();
-    expect((await pass).kind).toBe("updated");
+    expect((await pass).kind).toBe("attempted");
+    expect(state.updates.decideDispatch()).toEqual({ action: "proceed" });
   });
 
   it("runs one pass at a time", async () => {
@@ -222,6 +259,6 @@ describe("installing updates while 1ma is quiet", () => {
     await vi.waitFor(() => expect(updates.decideDispatch().action).toBe("wait"));
     expect(await updates.run()).toEqual({ kind: "in-progress" });
     settle.resolve();
-    expect((await first).kind).toBe("updated");
+    expect((await first).kind).toBe("attempted");
   });
 });
