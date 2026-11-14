@@ -26,6 +26,8 @@ const threadSchema = z.object({
   parentThreadId: z.string().nullable(),
   originPluginId: z.string().nullable(),
   updatedAt: z.number(),
+  queuedWork: z.string(),
+  hasPendingInteraction: z.boolean(),
 });
 
 const environmentSchema = z.object({
@@ -40,6 +42,12 @@ const metadataListSchema = z.object({
 
 const spawnedSchema = z.object({ id: z.string().regex(/^thr_/) });
 const queuedSchema = z.array(z.object({ id: z.string() }));
+const queuedWaitsSchema = z.array(
+  z.object({
+    payload: z.object({ kind: z.string() }),
+    waitingOn: z.object({ kind: z.string(), pluginId: z.string().optional() }).nullable(),
+  }),
+);
 const okSchema = z.unknown();
 
 const interactionsSchema = z.array(z.object({ id: z.string(), status: z.string() }));
@@ -246,6 +254,25 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
         ),
       );
       await getJson(`/threads/${id}/stop`, okSchema, signal, {});
+    },
+    async queuedWaits(threadId, signal) {
+      const rows = await getJson(
+        `/threads/${encodeURIComponent(threadId)}/queued-messages`,
+        queuedWaitsSchema,
+        signal,
+      );
+      return rows.map((row) => ({
+        retry: row.payload.kind === "retry",
+        waitingOn:
+          row.waitingOn === null
+            ? null
+            : {
+                kind: row.waitingOn.kind,
+                ...(row.waitingOn.pluginId === undefined
+                  ? {}
+                  : { pluginId: row.waitingOn.pluginId }),
+              },
+      }));
     },
     async taskOutcome(threadId, signal) {
       const id = encodeURIComponent(threadId);

@@ -262,6 +262,15 @@ export class Store {
     }));
   }
 
+  setWaitingReason(serverId: ServerId, threadId: string, reason: string | null, now: number): void {
+    this.#db
+      .prepare(
+        `UPDATE works SET waiting_reason = ?, version = version + 1, updated_at = ?
+         WHERE server_id = ? AND thread_id = ? AND waiting_reason IS NOT ?`,
+      )
+      .run(reason, now, serverId, threadId, reason);
+  }
+
   threadStatus(serverId: ServerId, threadId: string): WorkState | null {
     const row = this.#db
       .prepare(`SELECT state FROM works WHERE server_id = ? AND thread_id = ?`)

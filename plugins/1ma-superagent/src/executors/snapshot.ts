@@ -51,6 +51,8 @@ export interface ThreadFields {
   readonly parentThreadId: string | null;
   readonly originPluginId: string | null;
   readonly updatedAt: number;
+  readonly queuedWork: string;
+  readonly hasPendingInteraction: boolean;
 }
 
 export function toThreadSummary(thread: ThreadFields): ThreadSummary {
@@ -65,6 +67,8 @@ export function toThreadSummary(thread: ThreadFields): ThreadSummary {
     parentThreadId: thread.parentThreadId,
     originPluginId: thread.originPluginId,
     updatedAt: thread.updatedAt,
+    queuedWork: thread.queuedWork,
+    hasPendingInteraction: thread.hasPendingInteraction,
   };
 }
 

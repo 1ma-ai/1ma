@@ -20,6 +20,8 @@ export interface ThreadSummary {
   readonly parentThreadId: string | null;
   readonly originPluginId: string | null;
   readonly updatedAt: number;
+  readonly queuedWork: string;
+  readonly hasPendingInteraction: boolean;
 }
 
 export interface EnvironmentSummary {
@@ -54,6 +56,32 @@ export interface Executor {
   findSpawned(signal: AbortSignal): Promise<ThreadMetadataRow[]>;
   clearQueueAndStop(threadId: string, signal: AbortSignal): Promise<void>;
   taskOutcome(threadId: string, signal: AbortSignal): Promise<TaskOutcome | null>;
+  queuedWaits(threadId: string, signal: AbortSignal): Promise<QueuedWait[]>;
+}
+
+export interface QueuedWait {
+  readonly retry: boolean;
+  readonly waitingOn: { readonly kind: string; readonly pluginId?: string } | null;
+}
+
+export type WaitingReason = "owner" | "limit" | "machine";
+
+export function waitingReasonOf(
+  thread: { hasPendingInteraction: boolean },
+  waits: readonly QueuedWait[],
+): WaitingReason | null {
+  if (thread.hasPendingInteraction) return "owner";
+  if (waits.some((wait) => wait.retry)) return "limit";
+  if (
+    waits.some(
+      (wait) =>
+        wait.waitingOn?.kind === "host-offline" ||
+        (wait.waitingOn?.kind === "plugin" && wait.waitingOn.pluginId === "concurrency-limit"),
+    )
+  ) {
+    return "machine";
+  }
+  return null;
 }
 
 export type TaskOutcomeKind = "done" | "question" | "failed" | "stopped";

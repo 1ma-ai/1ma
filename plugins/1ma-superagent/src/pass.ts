@@ -1,10 +1,17 @@
 import type { GitHubReader } from "./github/reader.js";
-import type { Completeness, Executor, ServerId } from "./observation.js";
+import {
+  type Completeness,
+  type Executor,
+  type QueuedWait,
+  type ServerId,
+  type ThreadSummary,
+  waitingReasonOf,
+} from "./observation.js";
 import type { PassScope } from "./pass-runner.js";
 import { runPrPass } from "./pr-pass.js";
 import type { PrStore } from "./pr-store.js";
 import type { RepoPolicy } from "./repos.js";
-import type { Store } from "./store.js";
+import { type Store, isOwnerChat } from "./store.js";
 
 export interface GitHubPassState {
   readonly at: number;
@@ -28,6 +35,35 @@ export interface PassDeps {
   readonly signal: AbortSignal;
 }
 
+async function recordWaitingReasons(
+  deps: PassDeps,
+  executor: Executor,
+  threads: readonly ThreadSummary[],
+  now: number,
+): Promise<void> {
+  const mainBot = deps.mainBotThreadId();
+  await Promise.all(
+    threads
+      .filter((thread) => isOwnerChat(thread, mainBot))
+      .map(async (thread) => {
+        let waits: QueuedWait[] = [];
+        if (thread.queuedWork === "waiting") {
+          try {
+            waits = await executor.queuedWaits(thread.threadId, deps.signal);
+          } catch {
+            return;
+          }
+        }
+        deps.store.setWaitingReason(
+          executor.serverId,
+          thread.threadId,
+          waitingReasonOf(thread, waits),
+          now,
+        );
+      }),
+  );
+}
+
 export async function runPass(deps: PassDeps, scope: PassScope): Promise<void> {
   const all = deps.executors();
   const executors = all.filter(
@@ -47,6 +83,13 @@ export async function runPass(deps: PassDeps, scope: PassScope): Promise<void> {
     if (result.completeness === "failed") continue;
     deps.store.applySnapshot(executor.serverId, result.items, result, deps.mainBotThreadId());
   }
+  await Promise.all(
+    results
+      .filter(({ result }) => result.completeness !== "failed")
+      .map(({ executor, result }) =>
+        recordWaitingReasons(deps, executor, result.items.threads, result.observedAt),
+      ),
+  );
   if (!scope.full) return;
   const now = deps.now();
   const byServer = new Map(all.map((executor) => [executor.serverId, executor]));

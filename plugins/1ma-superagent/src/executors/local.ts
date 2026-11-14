@@ -117,6 +117,19 @@ export function createLocalExecutor(
       );
       await sdk.threads.stop({ threadId });
     },
+    async queuedWaits(threadId, signal) {
+      const rows = await sdk.threads.queuedMessages.list({ threadId, signal });
+      return rows.map((row) => ({
+        retry: row.payload.kind === "retry",
+        waitingOn:
+          row.waitingOn === null
+            ? null
+            : {
+                kind: row.waitingOn.kind,
+                ...("pluginId" in row.waitingOn ? { pluginId: row.waitingOn.pluginId } : {}),
+              },
+      }));
+    },
     async taskOutcome(threadId, signal) {
       const question = (await sdk.threads.interactions.list({ threadId, signal })).find(
         (interaction) => interaction.status === "pending",

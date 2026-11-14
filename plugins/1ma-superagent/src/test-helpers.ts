@@ -19,6 +19,8 @@ export function threadSummary(
     parentThreadId: null,
     originPluginId: null,
     updatedAt: 1_000,
+    queuedWork: "none",
+    hasPendingInteraction: false,
     ...overrides,
   };
 }
@@ -56,6 +58,7 @@ export function fakeExecutor(
     findSpawned: async () => [],
     clearQueueAndStop: unused("clearQueueAndStop"),
     taskOutcome: async () => null,
+    queuedWaits: async () => [],
     ...overrides,
   };
 }

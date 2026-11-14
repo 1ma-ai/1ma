@@ -23,6 +23,8 @@ function apiThread(id: string, overrides: Record<string, unknown> = {}) {
     originPluginId: null,
     updatedAt: 5,
     runtime: { displayStatus: "idle" },
+    queuedWork: "none",
+    hasPendingInteraction: false,
     ...overrides,
   };
 }
