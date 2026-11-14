@@ -20,7 +20,7 @@ Before the first takeover the database is copied to
  2 files changed, 219 insertions(+), 1 deletion(-)
 
 diff --git a/apps/server/src/services/plugins/plugin-registration.ts b/apps/server/src/services/plugins/plugin-registration.ts
-index 8fa9e84..ac790ae 100644
+index 8fa9e84..f296bbb 100644
 --- a/apps/server/src/services/plugins/plugin-registration.ts
 +++ b/apps/server/src/services/plugins/plugin-registration.ts
 @@ -4,7 +4,8 @@ import {
@@ -67,15 +67,15 @@ index 8fa9e84..ac790ae 100644
 +    name: string,
 +    builtinVersion: string,
 +  ): Promise<string | null> {
-+    const intent = existing.sourceIntent;
-+    if (intent.kind === "git") {
++    if (existing.sourceKind === "git") {
 +      if (
-+        normalizedRepository(intent.url) !== ONE_MA_REPOSITORY ||
-+        intent.subdirectory !== `plugins/${name}`
++        existing.sourceGitUrl === null ||
++        normalizedRepository(existing.sourceGitUrl) !== ONE_MA_REPOSITORY ||
++        existing.sourceGitSubdirectory !== `plugins/${name}`
 +      ) {
 +        return `it is installed from ${existing.source}, not from 1ma's repository`;
 +      }
-+    } else if (intent.kind === "path") {
++    } else if (existing.sourceKind === "path") {
 +      let repository: unknown = null;
 +      try {
 +        repository = JSON.parse(
