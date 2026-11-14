@@ -1,4 +1,10 @@
-import type { ObservationResult, ServerSnapshot, ThreadSummary } from "./observation.js";
+import type {
+  Executor,
+  ObservationResult,
+  ServerId,
+  ServerSnapshot,
+  ThreadSummary,
+} from "./observation.js";
 
 export function threadSummary(
   overrides: Partial<ThreadSummary> & { threadId: string },
@@ -30,5 +36,25 @@ export function snapshot(
       environments: [{ environmentId: "env_app", projectId: "proj_app", branch: "main" }],
       projects: [{ projectId: "proj_app", gitRemoteUrl: "https://github.com/example/app.git" }],
     },
+  };
+}
+
+export function fakeExecutor(
+  serverId: ServerId,
+  overrides: Partial<Omit<Executor, "serverId">> = {},
+): Executor {
+  const unused = (name: string) => async () => {
+    throw new Error(`fake ${serverId} executor: ${name} not stubbed`);
+  };
+  return {
+    serverId,
+    snapshot: unused("snapshot"),
+    readMetadata: async () => [],
+    threadModel: async () => null,
+    projectRemote: unused("projectRemote"),
+    spawn: unused("spawn"),
+    findSpawned: async () => [],
+    clearQueueAndStop: unused("clearQueueAndStop"),
+    ...overrides,
   };
 }

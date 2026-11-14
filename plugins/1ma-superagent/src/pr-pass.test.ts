@@ -7,7 +7,7 @@ import { PrStore } from "./pr-store.js";
 import { repoPolicy } from "./repos.js";
 import { MIGRATIONS } from "./schema.js";
 import { Store } from "./store.js";
-import { threadSummary } from "./test-helpers.js";
+import { fakeExecutor, threadSummary } from "./test-helpers.js";
 
 const REMOTE = "https://github.com/example/app.git";
 const policy = repoPolicy(
@@ -76,20 +76,17 @@ function setup(options: {
       };
     },
   };
-  const executor = (serverId: ServerId): Executor => ({
-    serverId,
-    snapshot: async () => {
-      throw new Error("not used");
-    },
-    async readMetadata(threadIds): Promise<ThreadMetadataRow[]> {
-      return threadIds
-        .filter((threadId) => options.metadata?.[threadId] !== undefined)
-        .map((threadId) => ({ threadId, metadata: options.metadata?.[threadId] }));
-    },
-    async threadModel(threadId) {
-      return options.models?.[threadId] ?? null;
-    },
-  });
+  const executor = (serverId: ServerId): Executor =>
+    fakeExecutor(serverId, {
+      async readMetadata(threadIds): Promise<ThreadMetadataRow[]> {
+        return threadIds
+          .filter((threadId) => options.metadata?.[threadId] !== undefined)
+          .map((threadId) => ({ threadId, metadata: options.metadata?.[threadId] }));
+      },
+      async threadModel(threadId) {
+        return options.models?.[threadId] ?? null;
+      },
+    });
   const run = (now: number, observed: Partial<Record<ServerId, Completeness>> = {}) =>
     runPrPass({
       store,

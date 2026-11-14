@@ -109,13 +109,21 @@ export function workStateOf(status: string): WorkState {
   return "idle";
 }
 
+export const SELF_PLUGIN_ID = "1ma-superagent";
+
+export function workSourceOf(
+  thread: ThreadSummary,
+  mainBotThreadId: string | null,
+): "owner-chat" | "bot-request" | null {
+  if (thread.hidden || thread.parentThreadId !== null || thread.threadId === mainBotThreadId)
+    return null;
+  if (thread.originPluginId === null) return "owner-chat";
+  if (thread.originPluginId === SELF_PLUGIN_ID) return "bot-request";
+  return null;
+}
+
 export function isOwnerChat(thread: ThreadSummary, mainBotThreadId: string | null): boolean {
-  return (
-    !thread.hidden &&
-    thread.parentThreadId === null &&
-    thread.originPluginId === null &&
-    thread.threadId !== mainBotThreadId
-  );
+  return workSourceOf(thread, mainBotThreadId) !== null;
 }
 
 export class Store {
@@ -176,7 +184,7 @@ export class Store {
     const insertWork = this.#db.prepare(
       `INSERT INTO works (id, version, source_kind, source_ref, server_id, thread_id, state,
          waiting_reason, created_at, updated_at)
-       VALUES (@id, 1, 'owner-chat', @sourceRef, @server, @thread, @state, NULL, @now, @now)`,
+       VALUES (@id, 1, @sourceKind, @sourceRef, @server, @thread, @state, NULL, @now, @now)`,
     );
     const updateWorkState = this.#db.prepare(
       `UPDATE works SET state = @state, version = version + 1, updated_at = @now
@@ -208,6 +216,7 @@ export class Store {
         if (selectWork.get(serverId, thread.threadId) === undefined) {
           insertWork.run({
             id: `work_${serverId}_${thread.threadId}`,
+            sourceKind: workSourceOf(thread, mainBotThreadId),
             sourceRef: JSON.stringify({ serverId, threadId: thread.threadId }),
             server: serverId,
             thread: thread.threadId,

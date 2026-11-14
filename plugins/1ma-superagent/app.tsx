@@ -42,6 +42,11 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
           <dd>{card.recommendation}</dd>
         </div>
       </dl>
+      {card.quote === undefined ? null : (
+        <blockquote className="max-h-64 overflow-auto whitespace-pre-wrap rounded-md border px-3 py-2 text-xs">
+          {card.quote}
+        </blockquote>
+      )}
       <div className="flex flex-wrap gap-2">
         {card.options.map((option) => (
           <button

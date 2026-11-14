@@ -9,7 +9,21 @@ import { createRemoteHttpExecutor } from "./src/executors/remote-http.js";
 import type { Executor } from "./src/observation.js";
 import { type GitHubPassState, runPass } from "./src/pass.js";
 import { FULL_SCOPE, PassRunner, threadScope } from "./src/pass-runner.js";
+import { randomUUID } from "node:crypto";
+import {
+  AMBIGUOUS_KIND,
+  NOTICE_KIND,
+  START_KIND,
+  UNKNOWN_KIND,
+  ambiguousKind,
+  noticeKind,
+  runActions,
+  startKind,
+  unknownKind,
+} from "./src/action-runner.js";
+import { ActionStore } from "./src/actions.js";
 import { QuestionDispatcher } from "./src/dispatcher.js";
+import { START_TOOL, registerStartTool } from "./src/start-tool.js";
 import { UNLINKED_KIND, askAboutUnlinked, unlinkedKind } from "./src/kinds/unlinked-pr.js";
 import { PrStore } from "./src/pr-store.js";
 import { type QuestionKind, QuestionStore } from "./src/questions.js";
@@ -73,7 +87,15 @@ export function createPlugin(options: SuperagentOptions = {}) {
     const gh = (options.gh ?? hostGh)(bb);
     const github: GitHubReader = createGitHubReader(gh);
     const questions = new QuestionStore(db);
-    const kinds = new Map<string, QuestionKind>([[UNLINKED_KIND, unlinkedKind(prStore)]]);
+    const actions = new ActionStore(db);
+    const claimant = `gen_${randomUUID()}`;
+    const kinds = new Map<string, QuestionKind>([
+      [UNLINKED_KIND, unlinkedKind(prStore)],
+      [START_KIND, startKind(actions)],
+      [UNKNOWN_KIND, unknownKind(actions)],
+      [AMBIGUOUS_KIND, ambiguousKind()],
+      [NOTICE_KIND, noticeKind()],
+    ]);
     const handlers = workRpcHandlers(
       store,
       prStore,
@@ -104,8 +126,18 @@ export function createPlugin(options: SuperagentOptions = {}) {
             policy,
             mainBotThreadId: () => config.mainBotThreadId,
             recordGitHub: (state) => bb.storage.kv.set(GITHUB_STATE_KEY, state),
-            afterFullPass: (now) => {
+            afterFullPass: async (now, executors, observed) => {
               askAboutUnlinked(prStore, questions, policy(), now);
+              await runActions({
+                actions,
+                questions,
+                executors,
+                observed,
+                claimant,
+                now: Date.now,
+                signal: lifecycle.signal,
+                warn: (message) => bb.log.warn(message),
+              });
               dispatcher.dispatch();
             },
             now: Date.now,
@@ -153,15 +185,36 @@ export function createPlugin(options: SuperagentOptions = {}) {
     registerClaimTool(bb, policy, (threadId) => {
       if (isControl()) void runner.request(threadScope("mac", threadId));
     });
+    const botAllowed = async (threadId: string) =>
+      isControl() && (await isMainBot(bb, threadId, config.mainBotThreadId));
     registerBotReadTools(
       bb,
       {
         list: () => handlers["work.v1.list"]({ limit: 200 }),
         waiting: async () => handlers["work.v1.waiting"](),
         pullRequests: () => handlers["work.v1.pullRequests"]({}),
+        botTasks: () =>
+          actions.recent(20).map((action) => ({
+            id: action.id,
+            server: action.serverId,
+            state: action.state,
+            chat: action.threadId === null ? null : `${action.serverId}:${action.threadId}`,
+            updatedAt: action.updatedAt,
+          })),
       },
-      async (threadId) => isControl() && (await isMainBot(bb, threadId, config.mainBotThreadId)),
+      botAllowed,
     );
+    registerStartTool({
+      bb,
+      actions,
+      questions,
+      executor: (serverId) =>
+        executorsFor(config, bb).find((candidate) => candidate.serverId === serverId) ?? null,
+      policy,
+      allowed: botAllowed,
+      afterProposal: () => dispatcher.dispatch(),
+      now: Date.now,
+    });
     bb.agents.configure((context) => {
       const claim = claimSelection(policy(), context.project.gitRemoteUrl);
       const bot =
@@ -170,7 +223,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
           { threadId: context.thread.id, originPluginId: context.origin.pluginId },
           config.mainBotThreadId,
         );
-      const tools = [...claim.tools, ...(bot ? READ_TOOLS : [])];
+      const tools = [...claim.tools, ...(bot ? [...READ_TOOLS, START_TOOL] : [])];
       const instructions = [claim.instructions, bot ? strings.botInstruction : undefined].filter(
         (value): value is string => value !== undefined,
       );

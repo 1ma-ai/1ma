@@ -53,4 +53,38 @@ export const strings = {
   cardRecommendation: "Рекомендация",
   cardBroken: "Карточку не удалось показать.",
   cardDismiss: "Закрыть",
+  startChatDescription:
+    "Propose to start a chat for the owner's task on the mac or linux 1ma server. Pass the owner's words verbatim as prompt. Nothing starts until the owner answers the card that appears in this chat; this call returns at once.",
+  startChatPending: "Proposing a chat",
+  startChatCompleted: "Proposed a chat",
+  startTitle: (server: string) => `Запустить чат на ${server}?`,
+  startObserved: (server: string, project: string, model: string) =>
+    `Бот предлагает новый чат на сервере ${server}, проект ${project}, модель ${model}. Поручение ниже, дословно.`,
+  startAffected: "Пока ничего: чат не создан.",
+  startRecommendation: "Запустить, если поручение и модель верны.",
+  startYes: (server: string) => `Запустить один чат на ${server}`,
+  startNo: "Не запускать",
+  unknownTitle: "Не уверен, создан ли чат",
+  unknownObserved: (server: string, minutes: number) =>
+    `Запрос на создание чата на ${server} ушёл ${minutes} мин назад, ответа не было, и чат с меткой этой попытки не найден.`,
+  unknownAffected: "Возможно, чат уже создан и работает; повторного запроса не было.",
+  unknownRecommendation: "Рекомендую подождать: первый запрос ещё может примениться.",
+  unknownWait: "Подождать 30 минут и проверить снова",
+  unknownRetry: "Запустить заново — первый запрос ещё может примениться, тогда будет два чата",
+  ambiguousTitle: "Найдено два чата одной попытки",
+  ambiguousObserved: (server: string, chats: string) =>
+    `На ${server} у попытки два и больше чатов: ${chats}. Ни один не привязан.`,
+  ambiguousAffected: "Оба чата могут работать над одним поручением.",
+  ambiguousRecommendation: "Посмотрите чаты и остановьте лишний вручную.",
+  acknowledge: "Понятно",
+  lateTitle: "Отменённый чат всё-таки создан",
+  lateObserved: (chat: string) =>
+    `Чат отменённой попытки появился позже: ${chat}. Его очередь сообщений удалена, чат остановлен.`,
+  lateAffected: "Чат успел начать работу до остановки.",
+  lateRecommendation: "Если он что-то изменил, посмотрите его и при необходимости откатите.",
+  serverNotConfigured:
+    "The linux server is not configured on this superagent; nothing was proposed.",
+  projectExcluded: "That project is excluded from the superagent; nothing was proposed.",
+  projectUnknown: (detail: string) =>
+    `That project could not be read on the server (${detail}); nothing was proposed.`,
 } as const;

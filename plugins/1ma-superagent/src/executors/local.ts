@@ -9,6 +9,7 @@ import type {
 } from "../observation.js";
 import { type PagingLimits, DEFAULT_LIMITS, collectOnce, collectPages } from "./paging.js";
 import { METADATA_BATCH, chunks, combineSnapshot, toThreadSummary } from "./snapshot.js";
+import { PLUGIN_ID } from "./remote-http.js";
 
 export function createLocalExecutor(
   sdk: PluginBbSdk,
@@ -69,6 +70,51 @@ export function createLocalExecutor(
         ),
       );
       return rows.flat().map((row) => ({ threadId: row.threadId, metadata: row.metadata }));
+    },
+    async projectRemote(projectId, signal) {
+      return (await sdk.projects.get({ projectId, signal })).gitRemoteUrl;
+    },
+    async spawn(request, signal) {
+      const thread = await sdk.threads.spawn({
+        projectId: request.projectId,
+        providerId: request.providerId,
+        model: request.model,
+        title: request.title,
+        prompt: request.prompt,
+        environment: { type: "project-default" },
+        pluginMetadata: { spawn: { ...request.label } },
+      });
+      void signal;
+      return { threadId: thread.id };
+    },
+    async findSpawned(signal) {
+      const listed = await collectPages(
+        async (offset, limit, pageSignal) =>
+          sdk.threads.list({
+            originPluginId: PLUGIN_ID,
+            includeHidden: true,
+            limit,
+            offset,
+            signal: pageSignal,
+          }),
+        limits,
+        signal,
+      );
+      if (listed.completeness !== "complete")
+        throw new Error(`spawned chats: ${listed.error ?? listed.completeness}`);
+      return this.readMetadata(
+        listed.items.map((thread) => thread.id),
+        signal,
+      );
+    },
+    async clearQueueAndStop(threadId, signal) {
+      const queued = await sdk.threads.queuedMessages.list({ threadId, signal });
+      await Promise.all(
+        queued.map((message) =>
+          sdk.threads.queuedMessages.delete({ threadId, queuedMessageId: message.id }),
+        ),
+      );
+      await sdk.threads.stop({ threadId });
     },
     async threadModel(threadId, signal) {
       const options = await sdk.threads.defaultExecutionOptions({

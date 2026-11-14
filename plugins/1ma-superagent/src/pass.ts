@@ -19,7 +19,11 @@ export interface PassDeps {
   readonly policy: () => RepoPolicy;
   readonly mainBotThreadId: () => string | null;
   readonly recordGitHub: (state: GitHubPassState) => Promise<void>;
-  readonly afterFullPass: (now: number) => void;
+  readonly afterFullPass: (
+    now: number,
+    executors: ReadonlyMap<ServerId, Executor>,
+    observed: ReadonlyMap<ServerId, Completeness>,
+  ) => Promise<void>;
   readonly now: () => number;
   readonly signal: AbortSignal;
 }
@@ -45,16 +49,17 @@ export async function runPass(deps: PassDeps, scope: PassScope): Promise<void> {
   }
   if (!scope.full) return;
   const now = deps.now();
+  const byServer = new Map(all.map((executor) => [executor.serverId, executor]));
   const { problems } = await runPrPass({
     store: deps.store,
     prStore: deps.prStore,
     github: deps.github(),
     policy: deps.policy(),
-    executors: new Map(all.map((executor) => [executor.serverId, executor])),
+    executors: byServer,
     observed,
     now,
     signal: deps.signal,
   });
   await deps.recordGitHub({ at: now, problems: problems.slice(0, 20) });
-  deps.afterFullPass(now);
+  await deps.afterFullPass(now, byServer, observed);
 }

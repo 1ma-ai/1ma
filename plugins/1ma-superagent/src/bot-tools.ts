@@ -26,6 +26,13 @@ export interface BotReadSource {
     questions: Array<{ kind: string; title: string; state: string }>;
   }>;
   pullRequests(): Promise<{ pullRequests: PullRequestDto[] }>;
+  botTasks(): Array<{
+    id: string;
+    server: string;
+    state: string;
+    chat: string | null;
+    updatedAt: number;
+  }>;
 }
 
 function iso(value: number | null): string | null {
@@ -110,6 +117,7 @@ export function registerBotReadTools(
           title: question.title,
           state: question.state,
         })),
+        botTasks: source.botTasks().map((task) => ({ ...task, updatedAt: iso(task.updatedAt) })),
         unlinkedPullRequests: pulls.pullRequests
           .filter((pr) => pr.link.threadId === null && pr.state === "open")
           .map(botPullRequest),

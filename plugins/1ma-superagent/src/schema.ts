@@ -86,4 +86,21 @@ export const MIGRATIONS: string[] = [
   )`,
   `CREATE UNIQUE INDEX questions_live_key ON questions (key) WHERE state IN ('queued', 'open')`,
   `ALTER TABLE pr_links ADD COLUMN unlinked_since INTEGER`,
+  `CREATE TABLE actions (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    params TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    claimed_by TEXT,
+    sent_at INTEGER,
+    thread_id TEXT,
+    result TEXT,
+    remind_at INTEGER,
+    replaced_by TEXT,
+    bot_thread_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`,
 ];

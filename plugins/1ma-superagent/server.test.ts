@@ -1,23 +1,16 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it } from "vitest";
 import type { Executor, ServerId } from "./src/observation.js";
-import { snapshot, threadSummary } from "./src/test-helpers.js";
+import { fakeExecutor as makeExecutor, snapshot, threadSummary } from "./src/test-helpers.js";
 import { PASS_SCHEDULE_NAME, STARTUP_SERVICE_NAME, createPlugin } from "./server.js";
 
 function fakeExecutor(serverId: ServerId, threads: string[], calls: ServerId[]): Executor {
-  return {
-    serverId,
+  return makeExecutor(serverId, {
     async snapshot() {
       calls.push(serverId);
       return snapshot(threads.map((threadId) => threadSummary({ threadId })));
     },
-    async readMetadata() {
-      return [];
-    },
-    async threadModel() {
-      return null;
-    },
-  };
+  });
 }
 
 async function setup(settings: Record<string, string | boolean> = {}) {

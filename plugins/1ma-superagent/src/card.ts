@@ -14,6 +14,7 @@ export const cardSchema = z
     observed: z.string().max(600),
     affected: z.string().max(300),
     recommendation: z.string().max(300),
+    quote: z.string().max(4000).optional(),
     options: z.array(optionSchema).min(1).max(3),
   })
   .strict();

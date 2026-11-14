@@ -6,14 +6,13 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createPlugin, PASS_SCHEDULE_NAME } from "../server.js";
 import type { Executor } from "./observation.js";
-import { snapshot, threadSummary } from "./test-helpers.js";
+import { fakeExecutor, snapshot, threadSummary } from "./test-helpers.js";
 import { DETAIL_TOOL, OVERVIEW_TOOL } from "./bot-tools.js";
 
 const BOT = "thr_bot";
 
 function executor(): Executor {
-  return {
-    serverId: "mac",
+  return fakeExecutor("mac", {
     async snapshot() {
       return snapshot([
         threadSummary({
@@ -22,13 +21,7 @@ function executor(): Executor {
         }),
       ]);
     },
-    async readMetadata() {
-      return [];
-    },
-    async threadModel() {
-      return null;
-    },
-  };
+  });
 }
 
 async function setup(options: { forThread?: (input: { threadId: string }) => unknown } = {}) {
@@ -62,14 +55,14 @@ describe("main bot tools", () => {
     const pinned = await harness.behavior.resolveAgentConfiguration(
       makePluginAgentConfigurationContext({ thread: { id: BOT } }),
     );
-    expect(names(pinned.tools)).toEqual([OVERVIEW_TOOL, DETAIL_TOOL]);
+    expect(names(pinned.tools)).toEqual([OVERVIEW_TOOL, DETAIL_TOOL, "sa_start_chat"]);
     const fromBots = await harness.behavior.resolveAgentConfiguration(
       makePluginAgentConfigurationContext({
         thread: { id: "thr_other" },
         origin: { kind: null, pluginId: "1ma-bots" },
       }),
     );
-    expect(names(fromBots.tools)).toEqual([OVERVIEW_TOOL, DETAIL_TOOL]);
+    expect(names(fromBots.tools)).toEqual([OVERVIEW_TOOL, DETAIL_TOOL, "sa_start_chat"]);
     const ordinary = await harness.behavior.resolveAgentConfiguration(
       makePluginAgentConfigurationContext({ thread: { id: "thr_other" } }),
     );

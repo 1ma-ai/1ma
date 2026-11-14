@@ -49,4 +49,24 @@ export interface Executor {
   snapshot(signal: AbortSignal): Promise<ObservationResult<ServerSnapshot>>;
   readMetadata(threadIds: readonly string[], signal: AbortSignal): Promise<ThreadMetadataRow[]>;
   threadModel(threadId: string, signal: AbortSignal): Promise<string | null>;
+  projectRemote(projectId: string, signal: AbortSignal): Promise<string | null>;
+  spawn(request: SpawnRequest, signal: AbortSignal): Promise<{ threadId: string }>;
+  findSpawned(signal: AbortSignal): Promise<ThreadMetadataRow[]>;
+  clearQueueAndStop(threadId: string, signal: AbortSignal): Promise<void>;
+}
+
+export interface SpawnRequest {
+  readonly projectId: string;
+  readonly providerId: string;
+  readonly model: string;
+  readonly prompt: string;
+  readonly title: string;
+  readonly label: { readonly actionId: string; readonly attempt: number };
+}
+
+export class DefiniteSpawnFailure extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DefiniteSpawnFailure";
+  }
 }

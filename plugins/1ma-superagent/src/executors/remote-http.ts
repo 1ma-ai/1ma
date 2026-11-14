@@ -1,12 +1,13 @@
 import { z } from "zod";
-import type {
-  EnvironmentSummary,
-  Executor,
-  ObservationResult,
-  ProjectSummary,
-  ServerId,
-  ServerSnapshot,
-  ThreadSummary,
+import {
+  DefiniteSpawnFailure,
+  type EnvironmentSummary,
+  type Executor,
+  type ObservationResult,
+  type ProjectSummary,
+  type ServerId,
+  type ServerSnapshot,
+  type ThreadSummary,
 } from "../observation.js";
 import { type PagingLimits, DEFAULT_LIMITS, collectOnce, collectPages } from "./paging.js";
 import { METADATA_BATCH, chunks, combineSnapshot, toThreadSummary } from "./snapshot.js";
@@ -35,6 +36,10 @@ const metadataListSchema = z.object({
   threads: z.array(z.object({ threadId: z.string(), metadata: z.unknown() })),
 });
 
+const spawnedSchema = z.object({ id: z.string().regex(/^thr_/) });
+const queuedSchema = z.array(z.object({ id: z.string() }));
+const okSchema = z.unknown();
+
 const executionOptionsSchema = z.object({ model: z.string() }).nullable();
 
 const projectSchema = z.object({
@@ -56,7 +61,7 @@ export class RemoteHttpError extends Error {
 
 export type Fetch = (
   input: string,
-  init: { signal: AbortSignal; headers: Record<string, string> },
+  init: { signal: AbortSignal; headers: Record<string, string>; method: string; body?: string },
 ) => Promise<Response>;
 
 export interface RemoteHttpOptions {
@@ -78,15 +83,17 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
     schema: z.ZodType<T>,
     signal: AbortSignal,
     body?: unknown,
+    methodOverride?: string,
   ): Promise<T> {
-    const method = body === undefined ? "GET" : "POST";
+    const method = methodOverride ?? (body === undefined ? "GET" : "POST");
     const response = await fetchImpl(`${base}/api/v1${path}`, {
       signal,
       headers:
         body === undefined
           ? { accept: "application/json" }
           : { accept: "application/json", "content-type": "application/json" },
-      ...(body === undefined ? {} : { method, body: JSON.stringify(body) }),
+      method,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (!response.ok) {
       throw new RemoteHttpError(`${method} ${path} answered ${response.status}`, response.status);
@@ -162,6 +169,75 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
         ),
       );
       return rows.flat();
+    },
+    async projectRemote(projectId, signal) {
+      const project = await getJson(
+        `/projects/${encodeURIComponent(projectId)}`,
+        projectSchema,
+        signal,
+      );
+      return project.gitRemoteUrl;
+    },
+    async spawn(request, signal) {
+      try {
+        const thread = await getJson("/threads", spawnedSchema, signal, {
+          projectId: request.projectId,
+          providerId: request.providerId,
+          model: request.model,
+          title: request.title,
+          origin: "plugin",
+          originPluginId: PLUGIN_ID,
+          pluginMetadata: { spawn: { ...request.label } },
+          environment: { type: "project-default" },
+          input: [{ type: "text", text: request.prompt }],
+        });
+        return { threadId: thread.id };
+      } catch (error) {
+        if (
+          error instanceof RemoteHttpError &&
+          error.status !== null &&
+          error.status >= 400 &&
+          error.status < 500 &&
+          error.status !== 408
+        ) {
+          throw new DefiniteSpawnFailure(error.message);
+        }
+        throw error;
+      }
+    },
+    async findSpawned(signal) {
+      const listed = await collectPages(
+        async (offset, limit, pageSignal) =>
+          getJson(
+            `/threads?originPluginId=${PLUGIN_ID}&includeHidden=true&limit=${limit}&offset=${offset}`,
+            z.array(threadSchema),
+            pageSignal,
+          ),
+        limits,
+        signal,
+      );
+      if (listed.completeness !== "complete")
+        throw new Error(`spawned chats: ${listed.error ?? listed.completeness}`);
+      return this.readMetadata(
+        listed.items.map((thread) => thread.id),
+        signal,
+      );
+    },
+    async clearQueueAndStop(threadId, signal) {
+      const id = encodeURIComponent(threadId);
+      const queued = await getJson(`/threads/${id}/queued-messages`, queuedSchema, signal);
+      await Promise.all(
+        queued.map((message) =>
+          getJson(
+            `/threads/${id}/queued-messages/${encodeURIComponent(message.id)}`,
+            okSchema,
+            signal,
+            undefined,
+            "DELETE",
+          ),
+        ),
+      );
+      await getJson(`/threads/${id}/stop`, okSchema, signal, {});
     },
     async threadModel(threadId, signal) {
       const execution = await getJson(
