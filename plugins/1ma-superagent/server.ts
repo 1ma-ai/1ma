@@ -1,4 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { isMainBot, mayBeMainBot } from "./src/bot.js";
+import { READ_TOOLS, registerBotReadTools } from "./src/bot-tools.js";
 import { claimSelection, registerClaimTool } from "./src/claim-tool.js";
 import { createLocalExecutor } from "./src/executors/local.js";
 import { type GhApi, type GitHubReader, createGitHubReader } from "./src/github/reader.js";
@@ -12,6 +14,7 @@ import { repoPolicy } from "./src/repos.js";
 import { MIGRATIONS } from "./src/schema.js";
 import { type Config, defineSettings, reposProblem, toConfig } from "./src/settings.js";
 import { Store } from "./src/store.js";
+import { strings } from "./strings.js";
 import { workRpcContract, workRpcHandlers } from "./src/work-rpc.js";
 
 export const PASS_SCHEDULE_NAME = "pass";
@@ -66,15 +69,12 @@ export function createPlugin(options: SuperagentOptions = {}) {
     const policy = () => repoPolicy(config.repos, config.excludedRepos);
     const gh = (options.gh ?? hostGh)(bb);
     const github: GitHubReader = createGitHubReader(gh);
-    bb.rpc.register(
-      workRpcContract,
-      workRpcHandlers(
-        store,
-        prStore,
-        async () =>
-          ((await bb.storage.kv.get(GITHUB_STATE_KEY)) as GitHubPassState | undefined) ?? null,
-      ),
+    const handlers = workRpcHandlers(
+      store,
+      prStore,
+      async () => (await bb.storage.kv.get<GitHubPassState>(GITHUB_STATE_KEY)) ?? null,
     );
+    bb.rpc.register(workRpcContract, handlers);
 
     const lifecycle = new AbortController();
     const executorsFor = options.executors ?? defaultExecutors;
@@ -134,12 +134,31 @@ export function createPlugin(options: SuperagentOptions = {}) {
     registerClaimTool(bb, policy, (threadId) => {
       if (isControl()) void runner.request(threadScope("mac", threadId));
     });
+    registerBotReadTools(
+      bb,
+      {
+        list: () => handlers["work.v1.list"]({ limit: 200 }),
+        waiting: async () => handlers["work.v1.waiting"](),
+        pullRequests: () => handlers["work.v1.pullRequests"]({}),
+      },
+      async (threadId) => isControl() && (await isMainBot(bb, threadId, config.mainBotThreadId)),
+    );
     bb.agents.configure((context) => {
       const claim = claimSelection(policy(), context.project.gitRemoteUrl);
+      const bot =
+        isControl() &&
+        mayBeMainBot(
+          { threadId: context.thread.id, originPluginId: context.origin.pluginId },
+          config.mainBotThreadId,
+        );
+      const tools = [...claim.tools, ...(bot ? READ_TOOLS : [])];
+      const instructions = [claim.instructions, bot ? strings.botInstruction : undefined].filter(
+        (value): value is string => value !== undefined,
+      );
       return {
-        tools: claim.tools,
+        tools,
         skills: [],
-        ...(claim.instructions === undefined ? {} : { instructions: claim.instructions }),
+        ...(instructions.length === 0 ? {} : { instructions: instructions.join("\n") }),
       };
     });
   };
