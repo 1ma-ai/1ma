@@ -116,6 +116,8 @@ jobs:
         run: pnpm install --frozen-lockfile --prefer-offline
       - name: Put the 1ma plugins in as built-in plugins (patch 0014)
         run: node "$GITHUB_WORKSPACE/desktop/scripts/embed-plugins.mjs" "$PWD"
+      - name: Typecheck the server and the plugins the 1ma patches touch, as bb's CI does
+        run: pnpm exec turbo run typecheck --filter=@bb/server --filter=./plugins/* --output-logs=errors-only
       - name: Build the server package and smoke-test its tarball, as bb does before publishing
         run: pnpm exec turbo run smoke:tarball --filter=bb-app --force --output-logs=new-only
       - name: Pack the server package
