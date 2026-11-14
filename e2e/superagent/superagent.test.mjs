@@ -19,6 +19,8 @@ async function spawnPendingChat(server, projectId, title) {
     projectId,
     "--provider",
     "claude-code",
+    "--model",
+    "claude-haiku-5-5",
     "--prompt",
     "e2e placeholder, never sent",
     "--send-at",
