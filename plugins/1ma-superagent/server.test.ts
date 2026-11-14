@@ -11,6 +11,12 @@ function fakeExecutor(serverId: ServerId, threads: string[], calls: ServerId[]):
       calls.push(serverId);
       return snapshot(threads.map((threadId) => threadSummary({ threadId })));
     },
+    async readMetadata() {
+      return [];
+    },
+    async threadModel() {
+      return null;
+    },
   };
 }
 

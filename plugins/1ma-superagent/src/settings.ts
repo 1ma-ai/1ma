@@ -1,6 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { strings } from "../strings.js";
+import { type ConnectedRepo, parseExcludedSetting, parseReposSetting } from "./repos.js";
 
 export const ROLES = ["control", "executor"] as const;
 export type Role = (typeof ROLES)[number];
@@ -47,6 +48,24 @@ export function defineSettings(bb: BbPluginApi) {
       experimental_schema: threadIdSchema,
       default: "",
     },
+    repos: {
+      type: "string",
+      label: strings.reposLabel,
+      description: strings.reposDescription,
+      experimental_multiline: true,
+      experimental_schema: z.string().superRefine((value, ctx) => {
+        const parsed = parseReposSetting(value);
+        if (typeof parsed === "string")
+          ctx.addIssue({ code: "custom", message: strings.invalidRepos(parsed) });
+      }),
+      default: "[]",
+    },
+    excludedRepos: {
+      type: "string",
+      label: strings.excludedReposLabel,
+      description: strings.excludedReposDescription,
+      default: "",
+    },
     passEnabled: {
       type: "boolean",
       label: strings.passEnabledLabel,
@@ -56,10 +75,17 @@ export function defineSettings(bb: BbPluginApi) {
   });
 }
 
+export function reposProblem(raw: string): string | null {
+  const parsed = parseReposSetting(raw);
+  return typeof parsed === "string" ? parsed : null;
+}
+
 export interface Config {
   role: Role;
   linuxServerUrl: string | null;
   mainBotThreadId: string | null;
+  repos: readonly ConnectedRepo[];
+  excludedRepos: readonly string[];
   passEnabled: boolean;
 }
 
@@ -67,13 +93,18 @@ export function toConfig(values: {
   role: string;
   linuxServerUrl: string;
   mainBotThreadId: string;
+  repos: string;
+  excludedRepos: string;
   passEnabled: boolean;
 }): Config {
+  const repos = parseReposSetting(values.repos);
   const role: Role = values.role === "control" ? "control" : "executor";
   return {
     role,
     linuxServerUrl: values.linuxServerUrl === "" ? null : values.linuxServerUrl.replace(/\/$/, ""),
     mainBotThreadId: values.mainBotThreadId === "" ? null : values.mainBotThreadId,
+    repos: typeof repos === "string" ? [] : repos,
+    excludedRepos: parseExcludedSetting(values.excludedRepos),
     passEnabled: values.passEnabled,
   };
 }

@@ -1,11 +1,16 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { claimSelection, registerClaimTool } from "./src/claim-tool.js";
 import { createLocalExecutor } from "./src/executors/local.js";
+import { type GhApi, type GitHubReader, createGitHubReader } from "./src/github/reader.js";
+import { hostContract } from "./src/host-contract.js";
 import { createRemoteHttpExecutor } from "./src/executors/remote-http.js";
 import type { Executor } from "./src/observation.js";
-import { runPass } from "./src/pass.js";
+import { type GitHubPassState, runPass } from "./src/pass.js";
 import { FULL_SCOPE, PassRunner, threadScope } from "./src/pass-runner.js";
+import { PrStore } from "./src/pr-store.js";
+import { repoPolicy } from "./src/repos.js";
 import { MIGRATIONS } from "./src/schema.js";
-import { type Config, defineSettings, toConfig } from "./src/settings.js";
+import { type Config, defineSettings, reposProblem, toConfig } from "./src/settings.js";
 import { Store } from "./src/store.js";
 import { workRpcContract, workRpcHandlers } from "./src/work-rpc.js";
 
@@ -13,8 +18,24 @@ export const PASS_SCHEDULE_NAME = "pass";
 export const PASS_SCHEDULE_CRON = "* * * * *";
 export const STARTUP_SERVICE_NAME = "startup-pass";
 
+export const GITHUB_STATE_KEY = "github-pass";
+
 export interface SuperagentOptions {
   readonly executors?: (config: Config, bb: BbPluginApi) => readonly Executor[];
+  readonly gh?: (bb: BbPluginApi) => GhApi;
+}
+
+export function hostGh(bb: BbPluginApi): GhApi {
+  const host = bb.hosts.experimental_client({ contract: hostContract });
+  let hostId: string | null = null;
+  return async (path, signal) => {
+    if (hostId === null) {
+      hostId = (await bb.sdk.system.config({ signal })).primaryHostId;
+      if (hostId === null)
+        return { status: "error", message: "this server has no primary machine to run gh on" };
+    }
+    return host.call("ghApi", { path }, { hostId, signal });
+  };
 }
 
 export function defaultExecutors(config: Config, bb: BbPluginApi): readonly Executor[] {
@@ -26,15 +47,34 @@ export function defaultExecutors(config: Config, bb: BbPluginApi): readonly Exec
 export function createPlugin(options: SuperagentOptions = {}) {
   return async function plugin(bb: BbPluginApi): Promise<void> {
     const settings = defineSettings(bb);
-    let config = toConfig(await settings.get());
+    const initial = await settings.get();
+    let config = toConfig(initial);
+    const warnRepos = (raw: string) => {
+      const problem = reposProblem(raw);
+      if (problem !== null) bb.log.warn(`watched repositories setting ignored: ${problem}`);
+    };
+    warnRepos(initial.repos);
     settings.onChange((next) => {
       config = toConfig(next);
+      warnRepos(next.repos);
     });
 
     const db = bb.storage.database();
     bb.storage.migrate(db, MIGRATIONS);
     const store = new Store(db);
-    bb.rpc.register(workRpcContract, workRpcHandlers(store));
+    const prStore = new PrStore(db);
+    const policy = () => repoPolicy(config.repos, config.excludedRepos);
+    const gh = (options.gh ?? hostGh)(bb);
+    const github: GitHubReader = createGitHubReader(gh);
+    bb.rpc.register(
+      workRpcContract,
+      workRpcHandlers(
+        store,
+        prStore,
+        async () =>
+          ((await bb.storage.kv.get(GITHUB_STATE_KEY)) as GitHubPassState | undefined) ?? null,
+      ),
+    );
 
     const lifecycle = new AbortController();
     const executorsFor = options.executors ?? defaultExecutors;
@@ -43,8 +83,13 @@ export function createPlugin(options: SuperagentOptions = {}) {
         runPass(
           {
             store,
+            prStore,
             executors: () => executorsFor(config, bb),
+            github: () => github,
+            policy,
             mainBotThreadId: () => config.mainBotThreadId,
+            recordGitHub: (state) => bb.storage.kv.set(GITHUB_STATE_KEY, state),
+            now: Date.now,
             signal: lifecycle.signal,
           },
           scope,
@@ -85,6 +130,18 @@ export function createPlugin(options: SuperagentOptions = {}) {
     bb.events.on("thread.unarchived", onLocalThread);
     bb.events.on("thread.deleted", onLocalThread);
     bb.events.on("interaction.pending", onLocalThread);
+
+    registerClaimTool(bb, policy, (threadId) => {
+      if (isControl()) void runner.request(threadScope("mac", threadId));
+    });
+    bb.agents.configure((context) => {
+      const claim = claimSelection(policy(), context.project.gitRemoteUrl);
+      return {
+        tools: claim.tools,
+        skills: [],
+        ...(claim.instructions === undefined ? {} : { instructions: claim.instructions }),
+      };
+    });
   };
 }
 

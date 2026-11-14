@@ -9,7 +9,7 @@ import type {
   ThreadSummary,
 } from "../observation.js";
 import { type PagingLimits, DEFAULT_LIMITS, collectOnce, collectPages } from "./paging.js";
-import { combineSnapshot, toThreadSummary } from "./snapshot.js";
+import { METADATA_BATCH, chunks, combineSnapshot, toThreadSummary } from "./snapshot.js";
 
 const threadSchema = z.object({
   id: z.string().regex(/^thr_/),
@@ -31,10 +31,18 @@ const environmentSchema = z.object({
   branchName: z.string().nullable(),
 });
 
+const metadataListSchema = z.object({
+  threads: z.array(z.object({ threadId: z.string(), metadata: z.unknown() })),
+});
+
+const executionOptionsSchema = z.object({ model: z.string() }).nullable();
+
 const projectSchema = z.object({
   id: z.string(),
   gitRemoteUrl: z.string().nullable(),
 });
+
+export const PLUGIN_ID = "1ma-superagent";
 
 export class RemoteHttpError extends Error {
   readonly status: number | null;
@@ -65,19 +73,29 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
   const now = options.now ?? Date.now;
   const base = options.baseUrl.replace(/\/$/, "");
 
-  async function getJson<T>(path: string, schema: z.ZodType<T>, signal: AbortSignal): Promise<T> {
+  async function getJson<T>(
+    path: string,
+    schema: z.ZodType<T>,
+    signal: AbortSignal,
+    body?: unknown,
+  ): Promise<T> {
+    const method = body === undefined ? "GET" : "POST";
     const response = await fetchImpl(`${base}/api/v1${path}`, {
       signal,
-      headers: { accept: "application/json" },
+      headers:
+        body === undefined
+          ? { accept: "application/json" }
+          : { accept: "application/json", "content-type": "application/json" },
+      ...(body === undefined ? {} : { method, body: JSON.stringify(body) }),
     });
     if (!response.ok) {
-      throw new RemoteHttpError(`GET ${path} answered ${response.status}`, response.status);
+      throw new RemoteHttpError(`${method} ${path} answered ${response.status}`, response.status);
     }
     const parsed = schema.safeParse(await response.json());
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
       throw new RemoteHttpError(
-        `GET ${path} returned an unexpected shape at ${issue?.path.join(".") ?? "?"}: ${issue?.message ?? ""}`,
+        `${method} ${path} returned an unexpected shape at ${issue?.path.join(".") ?? "?"}: ${issue?.message ?? ""}`,
         response.status,
       );
     }
@@ -128,6 +146,30 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
         ),
       ]);
       return combineSnapshot(observedAt, threads, environments, projects);
+    },
+    async readMetadata(threadIds, signal) {
+      const rows = await Promise.all(
+        chunks(threadIds, METADATA_BATCH).map(
+          async (batch) =>
+            (
+              await getJson(
+                "/threads/plugin-metadata",
+                metadataListSchema,
+                AbortSignal.any([signal, AbortSignal.timeout(limits.pageTimeoutMs)]),
+                { pluginId: PLUGIN_ID, threadIds: batch },
+              )
+            ).threads,
+        ),
+      );
+      return rows.flat();
+    },
+    async threadModel(threadId, signal) {
+      const execution = await getJson(
+        `/threads/${encodeURIComponent(threadId)}/default-execution-options`,
+        executionOptionsSchema,
+        AbortSignal.any([signal, AbortSignal.timeout(limits.pageTimeoutMs)]),
+      );
+      return execution?.model ?? null;
     },
   };
 }

@@ -19,7 +19,8 @@ function cleanEnv(extra) {
 }
 
 export class Server {
-  constructor({ name, port, daemonPort, root, packageDir }) {
+  constructor({ name, port, daemonPort, root, packageDir, env = {} }) {
+    this.extraEnv = env;
     this.name = name;
     this.port = port;
     this.daemonPort = daemonPort;
@@ -58,7 +59,7 @@ export class Server {
         "--no-in-app-updates",
         "--bundled",
       ],
-      { env: cleanEnv({ HOME: this.home }), stdio: ["ignore", "pipe", "pipe"] },
+      { env: cleanEnv({ HOME: this.home, ...this.extraEnv }), stdio: ["ignore", "pipe", "pipe"] },
     );
     this.process.stdout.pipe(log);
     this.process.stderr.pipe(log);
@@ -161,7 +162,7 @@ export class Server {
     return host.id;
   }
 
-  async createProject(name, root) {
+  async createProject(name, root, remoteUrl = null) {
     mkdirSync(root, { recursive: true });
     const git = (...args) => {
       const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
@@ -180,6 +181,7 @@ export class Server {
       "-m",
       "init",
     );
+    if (remoteUrl !== null) git("remote", "add", "origin", remoteUrl);
     const project = this.bbJson([
       "project",
       "create",

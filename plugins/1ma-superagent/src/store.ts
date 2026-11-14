@@ -12,6 +12,14 @@ export interface ServerRow {
   lastError: string | null;
 }
 
+export interface SeenThread {
+  threadId: string;
+  projectId: string;
+  branch: string | null;
+  remoteUrl: string | null;
+  providerId: string;
+}
+
 export interface WorkRow {
   id: string;
   version: number;
@@ -220,6 +228,29 @@ export class Store {
       }
     });
     apply();
+  }
+
+  threadsSeen(serverId: ServerId): SeenThread[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT t.thread_id, t.project_id, t.branch, t.repo, t.provider_id FROM threads_seen t
+         JOIN works w ON w.server_id = t.server_id AND w.thread_id = t.thread_id
+         WHERE t.server_id = ? AND w.state <> 'closed'`,
+      )
+      .all(serverId) as Array<{
+      thread_id: string;
+      project_id: string;
+      branch: string | null;
+      repo: string | null;
+      provider_id: string;
+    }>;
+    return rows.map((row) => ({
+      threadId: row.thread_id,
+      projectId: row.project_id,
+      branch: row.branch,
+      remoteUrl: row.repo,
+      providerId: row.provider_id,
+    }));
   }
 
   servers(): ServerRow[] {

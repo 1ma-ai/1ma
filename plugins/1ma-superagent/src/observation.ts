@@ -39,7 +39,14 @@ export interface ServerSnapshot {
   readonly projects: readonly ProjectSummary[];
 }
 
+export interface ThreadMetadataRow {
+  readonly threadId: string;
+  readonly metadata: unknown;
+}
+
 export interface Executor {
   readonly serverId: ServerId;
   snapshot(signal: AbortSignal): Promise<ObservationResult<ServerSnapshot>>;
+  readMetadata(threadIds: readonly string[], signal: AbortSignal): Promise<ThreadMetadataRow[]>;
+  threadModel(threadId: string, signal: AbortSignal): Promise<string | null>;
 }

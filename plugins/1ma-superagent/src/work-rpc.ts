@@ -1,5 +1,7 @@
 import { defineRpcContract, experimental_PluginRpcRefusal } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import type { GitHubPassState } from "./pass.js";
+import type { PrLinkRow, PrStore } from "./pr-store.js";
 import type { ServerRow, Store, WorkRow } from "./store.js";
 
 const MAX_PAGE = 200;
@@ -12,6 +14,32 @@ const serverSchema = z.object({
   completeness: z.enum(["complete", "partial", "failed"]),
   lastError: z.string().nullable(),
 });
+
+const pullRequestSchema = z.object({
+  repo: z.string(),
+  number: z.number().int(),
+  state: z.enum(["open", "closed", "merged"]),
+  headRef: z.string(),
+  headSha: z.string(),
+  author: z.string().nullable(),
+  link: z.object({
+    kind: z.enum(["claim", "manual"]).nullable(),
+    serverId: z.enum(["mac", "linux"]).nullable(),
+    threadId: z.string().nullable(),
+    problem: z.string().nullable(),
+    branchHint: z.array(z.string()),
+  }),
+  provenance: z.object({
+    known: z.boolean(),
+    complete: z.boolean(),
+    models: z.array(z.object({ providerId: z.string(), model: z.string() })),
+  }),
+  observedAt: z.number(),
+});
+
+export type PullRequestDto = z.infer<typeof pullRequestSchema>;
+
+const githubSchema = z.object({ at: z.number(), problems: z.array(z.string()) }).nullable();
 
 const workSchema = z.object({
   id: z.string(),
@@ -30,6 +58,7 @@ const workSchema = z.object({
   repo: z.string().nullable(),
   createdAt: z.number(),
   updatedAt: z.number(),
+  pullRequests: z.array(pullRequestSchema),
 });
 
 export type WorkDto = z.infer<typeof workSchema>;
@@ -46,8 +75,13 @@ export const workRpcContract = defineRpcContract({
     output: z.object({
       works: z.array(workSchema),
       servers: z.array(serverSchema),
+      github: githubSchema,
       nextOffset: z.number().int().nullable(),
     }),
+  },
+  "work.v1.pullRequests": {
+    input: z.object({ unlinkedOnly: z.boolean().optional() }).strict(),
+    output: z.object({ pullRequests: z.array(pullRequestSchema), github: githubSchema }),
   },
   "work.v1.get": {
     input: z.object({ workId: z.string().min(1) }).strict(),
@@ -59,7 +93,32 @@ export const workRpcContract = defineRpcContract({
   },
 });
 
-export function toWorkDto(row: WorkRow): WorkDto {
+export function toPullRequestDto(link: PrLinkRow, prStore: PrStore): PullRequestDto {
+  const models = link.linkKind === "claim" ? prStore.provenance(link.repo, link.number) : [];
+  return {
+    repo: link.repo,
+    number: link.number,
+    state: link.prState,
+    headRef: link.headRef,
+    headSha: link.headSha,
+    author: link.author,
+    link: {
+      kind: link.linkKind,
+      serverId: link.deliveryServerId,
+      threadId: link.deliveryThreadId,
+      problem: link.claimProblem,
+      branchHint: link.branchHint === null ? [] : link.branchHint.split(","),
+    },
+    provenance: {
+      known: link.linkKind === "claim" && models.length > 0,
+      complete: link.linkKind === "claim" && models.length > 0 && !link.provenanceGap,
+      models: models.map((row) => ({ providerId: row.providerId, model: row.model })),
+    },
+    observedAt: link.observedAt,
+  };
+}
+
+export function toWorkDto(row: WorkRow, prStore: PrStore): WorkDto {
   return {
     id: row.id,
     version: row.version,
@@ -73,6 +132,9 @@ export function toWorkDto(row: WorkRow): WorkDto {
     repo: row.repo,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    pullRequests: prStore
+      .forThread(row.serverId, row.threadId)
+      .map((link) => toPullRequestDto(link, prStore)),
   };
 }
 
@@ -80,9 +142,18 @@ function serverDto(row: ServerRow): z.infer<typeof serverSchema> {
   return { ...row };
 }
 
-export function workRpcHandlers(store: Store) {
+export function workRpcHandlers(
+  store: Store,
+  prStore: PrStore,
+  github: () => Promise<GitHubPassState | null>,
+) {
+  const toDto = (row: WorkRow) => toWorkDto(row, prStore);
+  const githubDto = async () => {
+    const state = await github();
+    return state === null ? null : { at: state.at, problems: [...state.problems] };
+  };
   return {
-    "work.v1.list"(input: { limit?: number; offset?: number; includeClosed?: boolean }) {
+    async "work.v1.list"(input: { limit?: number; offset?: number; includeClosed?: boolean }) {
       const limit = input.limit ?? 50;
       const offset = input.offset ?? 0;
       const rows = store.listWorks({
@@ -91,8 +162,9 @@ export function workRpcHandlers(store: Store) {
         includeClosed: input.includeClosed ?? false,
       });
       return {
-        works: rows.slice(0, limit).map(toWorkDto),
+        works: rows.slice(0, limit).map(toDto),
         servers: store.servers().map(serverDto),
+        github: await githubDto(),
         nextOffset: rows.length > limit ? offset + limit : null,
       };
     },
@@ -105,10 +177,19 @@ export function workRpcHandlers(store: Store) {
         });
       }
       const server = store.servers().find((candidate) => candidate.id === row.serverId) ?? null;
-      return { work: toWorkDto(row), server: server === null ? null : serverDto(server) };
+      return { work: toDto(row), server: server === null ? null : serverDto(server) };
     },
     "work.v1.waiting"() {
-      return { works: store.waitingWorks().map(toWorkDto) };
+      return { works: store.waitingWorks().map(toDto) };
+    },
+    async "work.v1.pullRequests"(input: { unlinkedOnly?: boolean }) {
+      const links = prStore
+        .all()
+        .filter((link) => !(input.unlinkedOnly ?? false) || link.deliveryThreadId === null);
+      return {
+        pullRequests: links.map((link) => toPullRequestDto(link, prStore)),
+        github: await githubDto(),
+      };
     },
   };
 }

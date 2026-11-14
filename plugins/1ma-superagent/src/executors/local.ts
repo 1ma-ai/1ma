@@ -8,7 +8,7 @@ import type {
   ThreadSummary,
 } from "../observation.js";
 import { type PagingLimits, DEFAULT_LIMITS, collectOnce, collectPages } from "./paging.js";
-import { combineSnapshot, toThreadSummary } from "./snapshot.js";
+import { METADATA_BATCH, chunks, combineSnapshot, toThreadSummary } from "./snapshot.js";
 
 export function createLocalExecutor(
   sdk: PluginBbSdk,
@@ -55,6 +55,27 @@ export function createLocalExecutor(
         ),
       ]);
       return combineSnapshot(observedAt, threads, environments, projects);
+    },
+    async readMetadata(threadIds, signal) {
+      const rows = await Promise.all(
+        chunks(threadIds, METADATA_BATCH).map(
+          async (batch) =>
+            (
+              await sdk.threads.experimental_listPluginMetadata({
+                threadIds: [...batch],
+                signal: AbortSignal.any([signal, AbortSignal.timeout(limits.pageTimeoutMs)]),
+              })
+            ).threads,
+        ),
+      );
+      return rows.flat().map((row) => ({ threadId: row.threadId, metadata: row.metadata }));
+    },
+    async threadModel(threadId, signal) {
+      const options = await sdk.threads.defaultExecutionOptions({
+        threadId,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(limits.pageTimeoutMs)]),
+      });
+      return options?.model ?? null;
     },
   };
 }
