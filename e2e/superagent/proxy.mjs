@@ -1,5 +1,19 @@
 import { createServer, request } from "node:http";
 
+const HOP_BY_HOP = new Set([
+  "connection",
+  "keep-alive",
+  "transfer-encoding",
+  "content-length",
+  "upgrade",
+]);
+
+function passHeaders(headers) {
+  return Object.fromEntries(
+    Object.entries(headers).filter(([name]) => !HOP_BY_HOP.has(name.toLowerCase())),
+  );
+}
+
 export class FaultProxy {
   constructor(target) {
     this.target = new URL(target);
@@ -90,9 +104,7 @@ export class FaultProxy {
               () => null,
             );
             if (upstream === null || res.destroyed) return;
-            res.writeHead(upstream.status, {
-              "content-type": upstream.headers["content-type"] ?? "application/json",
-            });
+            res.writeHead(upstream.status, passHeaders(upstream.headers));
             res.end(upstream.body);
           }, mode.delayMs);
           return;
@@ -100,9 +112,7 @@ export class FaultProxy {
       }
       try {
         const upstream = await this.#forward(req.method, req.url, req.headers, body);
-        res.writeHead(upstream.status, {
-          "content-type": upstream.headers["content-type"] ?? "application/json",
-        });
+        res.writeHead(upstream.status, passHeaders(upstream.headers));
         res.end(upstream.body);
       } catch {
         res.writeHead(502);

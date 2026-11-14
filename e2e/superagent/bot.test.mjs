@@ -231,6 +231,12 @@ describe("1ma-superagent bot actions with a model turn", () => {
         }
       }
     }
+    try {
+      const list = await control.rpc(PLUGIN, "work.v1.list", {});
+      lines.push("== work.v1.list servers", JSON.stringify(list.servers, null, 1));
+    } catch (error) {
+      lines.push(`== work.v1.list failed: ${error.message}`);
+    }
     for (const method of ["work.v1.actions", "work.v1.waiting"]) {
       try {
         lines.push(
