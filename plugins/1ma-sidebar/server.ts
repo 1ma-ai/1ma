@@ -6,6 +6,7 @@ import {
   type BbPluginApi,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { register1maSidebar } from "./1ma/server.js";
 import {
   defaultPreferences,
   describePreference,
@@ -194,9 +195,11 @@ const JSON_OPTION = {
 
 export default async function threadListPlugin(bb: BbPluginApi) {
   const store = createPreferenceStore(bb);
+  const oneMa = register1maSidebar(bb, store);
 
   bb.rpc.register(threadListRpcContract, {
     async listPreferences() {
+      await oneMa.copyBuiltInPreferences();
       return { preferences: await store.readAll() };
     },
     async setPreference({ key, value, origin }) {

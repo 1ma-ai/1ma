@@ -1,6 +1,7 @@
 import { createContext, useContext, useMemo } from "react";
 import { useAtomValue } from "jotai";
 import { sidebarThreadLifecyclesAtom } from "../preferences/atoms.js";
+import { useWithoutBotThreads } from "../../1ma/use-bots.js";
 import {
   experimental_useSidebarThreads,
   type PluginSidebarProject,
@@ -193,9 +194,11 @@ export function useSidebarProjectName(
 
 export function useSidebarData() {
   const lifecycles = useAtomValue(sidebarThreadLifecyclesAtom);
-  const state = experimental_useSidebarThreads({
-    experimental_lifecycles: lifecycles,
-  });
+  const state = useWithoutBotThreads(
+    experimental_useSidebarThreads({
+      experimental_lifecycles: lifecycles,
+    }),
+  );
   return useMemo(
     () => ({ ...getSidebarData(state), archived: state.experimental_archived }),
     [state],

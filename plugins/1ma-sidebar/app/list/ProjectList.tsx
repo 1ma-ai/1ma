@@ -86,6 +86,7 @@ import {
   SortableProjectRow,
   type ProjectListRowModel,
 } from "./ProjectListProjects.js";
+import { BotsBlock } from "../../1ma/BotsBlock.js";
 import {
   PinnedThreadTree,
   type PinnedThreadTreeProps,
@@ -1710,6 +1711,10 @@ function ProjectListComponent({
     >
       <ProjectListShell>
         <SidebarDraftPresenceSync />
+        <BotsBlock
+          selectedThreadId={selectedThreadId}
+          onProjectSelect={onProjectSelect}
+        />
         <ActiveSidebarModeSections
           mode={organizationMode}
           renderMachine={() => (

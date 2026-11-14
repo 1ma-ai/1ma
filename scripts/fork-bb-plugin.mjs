@@ -81,9 +81,11 @@ for (const item of items) {
   }
 }
 const [registryManifest, appManifest, sdkManifest] = await Promise.all(
-  ["packages/plugin-registry/package.json", "apps/app/package.json", "packages/plugin-sdk/package.json"].map(
-    (path) => readJson(join(bb, path)),
-  ),
+  [
+    "packages/plugin-registry/package.json",
+    "apps/app/package.json",
+    "packages/plugin-sdk/package.json",
+  ].map((path) => readJson(join(bb, path))),
 );
 const packages = fork.registryPackages(items, {
   shimmedPackages: new Set(SHIMMED_TYPE_PACKAGES),
@@ -105,7 +107,10 @@ for (const entry of await readdir(join(bb, "packages"), { withFileTypes: true })
   const path = join(bb, "packages", entry.name, "package.json");
   if (!entry.isDirectory() || !existsSync(path)) continue;
   const { name, bin } = await readJson(path);
-  workspaceBins.set(name, typeof bin === "string" ? [name.split("/").pop()] : Object.keys(bin ?? {}));
+  workspaceBins.set(
+    name,
+    typeof bin === "string" ? [name.split("/").pop()] : Object.keys(bin ?? {}),
+  );
 }
 const forked = fork.forkPluginPackageJson(manifest, {
   sdkSpecifier: sdkManifest.version,

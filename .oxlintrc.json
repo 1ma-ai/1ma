@@ -1,11 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": [
-    "typescript",
-    "react",
-    "import",
-    "unicorn"
-  ],
+  "plugins": ["typescript", "react", "import", "unicorn"],
   "categories": {
     "correctness": "error",
     "suspicious": "warn",

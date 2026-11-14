@@ -29,6 +29,8 @@
     "app/**/*.ts",
     "app/**/*.tsx",
     "shared/**/*.ts",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "1ma/**/*.ts",
+    "1ma/**/*.tsx"
   ]
 }
