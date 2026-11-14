@@ -203,6 +203,34 @@ describe("1ma-superagent bot actions with a model turn", () => {
   });
 
   after(async () => {
+    const lines = [];
+    for (const server of [control, executor]) {
+      for (const args of [
+        ["plugin", "logs", PLUGIN],
+        ["plugin", "list"],
+      ]) {
+        try {
+          lines.push(`== ${server.name}: bb ${args.join(" ")}`, server.bb(args));
+        } catch (error) {
+          lines.push(`== ${server.name}: bb ${args.join(" ")} failed: ${error.message}`);
+        }
+      }
+    }
+    for (const method of ["work.v1.actions", "work.v1.waiting"]) {
+      try {
+        lines.push(
+          `== ${method}`,
+          JSON.stringify(
+            await control.rpc(PLUGIN, method, method === "work.v1.waiting" ? null : {}),
+            null,
+            1,
+          ),
+        );
+      } catch (error) {
+        lines.push(`== ${method} failed: ${error.message}`);
+      }
+    }
+    writeFileSync(path.join(root, "diagnostics.log"), lines.join("\n"));
     await Promise.all([control.stop(), executor.stop()]);
     await proxy.close();
   });
@@ -219,6 +247,14 @@ describe("1ma-superagent bot actions with a model turn", () => {
     );
     const proposal = await newestAction(known);
     assert.equal(proposal.state, "proposed");
+    const toolResult = stubRecords()
+      .filter((entry) => entry.kind === "tool")
+      .at(-1);
+    assert.match(
+      toolResult?.output ?? "",
+      /^Proposed as act_/,
+      "the bot gets the tool's own answer in the same turn",
+    );
     const card = await waitCard("start card", (data) => data.title === "Запустить чат на linux?");
     await new Promise((resolve) => setTimeout(resolve, 70_000));
     assert.deepEqual(await spawnedOnExecutor(), [], "no chat before the owner answers");
