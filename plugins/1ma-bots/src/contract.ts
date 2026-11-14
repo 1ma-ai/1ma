@@ -56,6 +56,7 @@ export const botSummarySchema = z.object({
   avatar: z.string(),
   capabilities: z.array(z.string()),
   hidden: z.boolean(),
+  reach: z.array(z.string()).nullable(),
   threads: z.array(botThreadSchema),
 });
 export type BotSummary = z.infer<typeof botSummarySchema>;
@@ -68,6 +69,21 @@ export const botDetailSchema = botSummarySchema.extend({
   revision: z.number().int(),
 });
 export type BotDetail = z.infer<typeof botDetailSchema>;
+
+export const actorSchema = z.object({
+  kind: z.enum(["owner", "agent", "plugin", "system"]),
+  id: z.string().nullable(),
+});
+export type Actor = z.infer<typeof actorSchema>;
+
+export const botEventSchema = z.object({
+  id: z.number().int(),
+  at: z.number(),
+  kind: z.string(),
+  actor: actorSchema,
+  detail: z.record(z.string(), z.unknown()),
+});
+export type BotEvent = z.infer<typeof botEventSchema>;
 
 const botId = z.object({ botId: z.string() });
 const threadId = z.object({ threadId: z.string() });
@@ -92,6 +108,7 @@ export const updateBotInput = z.object({
   instructions: instructions.optional(),
   memory: z.string().max(MEMORY_MAX).optional(),
   hidden: z.boolean().optional(),
+  reach: z.array(z.string()).max(200).nullable().optional(),
   clearDefaults: z.literal(true).optional(),
 });
 export type UpdateBotInput = z.infer<typeof updateBotInput>;
@@ -133,4 +150,8 @@ export const botsRpc = {
   },
   "bots.v1.startThread": { input: startThreadInput, output: threadId },
   "bots.v1.continueInBot": { input: threadId, output: threadId },
+  "bots.v1.events": {
+    input: z.object({ botId: z.string(), limit: z.number().int().min(1).max(200).optional() }),
+    output: z.object({ events: z.array(botEventSchema) }),
+  },
 } as const satisfies Record<string, PluginRpcMethodContract>;

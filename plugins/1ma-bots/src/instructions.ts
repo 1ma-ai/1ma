@@ -10,7 +10,10 @@ export function botInstructions(bot: BotDetail, others: readonly BotSummary[]): 
     agentText.memoryTitle(bot.memory.length),
     bot.memory.trim() === "" ? agentText.emptyMemory : bot.memory.trim(),
   ];
-  const peers = others.filter((other) => other.id !== bot.id && !other.hidden);
+  const peers = others.filter(
+    (other) =>
+      other.id !== bot.id && !other.hidden && (bot.reach === null || bot.reach.includes(other.id)),
+  );
   if (peers.length > 0) {
     parts.push(
       agentText.othersTitle,

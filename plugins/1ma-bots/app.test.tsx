@@ -20,6 +20,7 @@ function bot(id: string, name: string, threads: BotSummary["threads"]): BotSumma
     avatar: avatarDataUrl(appearance),
     capabilities: [],
     hidden: false,
+    reach: null,
     threads,
   };
 }

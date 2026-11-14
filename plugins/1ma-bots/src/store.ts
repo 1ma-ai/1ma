@@ -6,6 +6,8 @@ import {
   type Appearance,
   type BotDetail,
   type BotSummary,
+  type Actor,
+  type BotEvent,
   type BotThread,
   type ChatDefaults,
   type CreateBotInput,
@@ -26,6 +28,7 @@ export const MIGRATIONS = [
     capabilities TEXT NOT NULL DEFAULT '[]',
     defaults TEXT,
     hidden INTEGER NOT NULL DEFAULT 0,
+    reach TEXT,
     position REAL NOT NULL,
     revision INTEGER NOT NULL DEFAULT 1,
     legacy_id TEXT UNIQUE,
@@ -60,6 +63,16 @@ export const MIGRATIONS = [
     sent_at INTEGER NOT NULL
   );
   CREATE INDEX letters_by_sender ON letters(from_bot, sent_at);
+  CREATE TABLE bot_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    bot_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    actor_kind TEXT NOT NULL,
+    actor_id TEXT,
+    detail TEXT NOT NULL DEFAULT '{}'
+  );
+  CREATE INDEX bot_events_by_bot ON bot_events(bot_id, id);
   CREATE TABLE pending_starts (
     token TEXT PRIMARY KEY,
     bot_id TEXT NOT NULL,
@@ -77,6 +90,7 @@ interface BotRow {
   capabilities: string;
   defaults: string | null;
   hidden: number;
+  reach: string | null;
   position: number;
   revision: number;
 }
@@ -92,7 +106,6 @@ interface ThreadRow {
 export function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
-
 
 function toThread(row: ThreadRow): BotThread {
   return {
@@ -143,6 +156,7 @@ export class BotStore {
       avatar: avatarDataUrl(appearance),
       capabilities: JSON.parse(row.capabilities) as string[],
       hidden: row.hidden === 1,
+      reach: row.reach === null ? null : (JSON.parse(row.reach) as string[]),
       threads: this.threadsOf(row.id),
     };
   }
@@ -177,7 +191,9 @@ export class BotStore {
   create(input: CreateBotInput, appearance: Appearance = randomAppearance()): BotDetail {
     const id = `bot_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
     const now = this.now();
-    const last = this.db.prepare<[], { p: number | null }>("SELECT MAX(position) AS p FROM bots").get();
+    const last = this.db
+      .prepare<[], { p: number | null }>("SELECT MAX(position) AS p FROM bots")
+      .get();
     this.db
       .prepare(
         `INSERT INTO bots (id, name, role, appearance, instructions, capabilities, position, created_at, updated_at)
@@ -217,12 +233,18 @@ export class BotStore {
         instructions: input.instructions ?? row.instructions,
         memory: input.memory ?? row.memory,
         hidden: input.hidden === undefined ? row.hidden : Number(input.hidden),
+        reach:
+          input.reach === undefined
+            ? row.reach
+            : input.reach === null
+              ? null
+              : JSON.stringify([...new Set(input.reach)].filter((id) => id !== row.id)),
         defaults: input.clearDefaults ? null : row.defaults,
       };
       this.db
         .prepare(
           `UPDATE bots SET name = ?, role = ?, appearance = ?, capabilities = ?, instructions = ?,
-             memory = ?, hidden = ?, defaults = ?, revision = revision + 1, updated_at = ?
+             memory = ?, hidden = ?, reach = ?, defaults = ?, revision = revision + 1, updated_at = ?
            WHERE id = ?`,
         )
         .run(
@@ -233,6 +255,7 @@ export class BotStore {
           next.instructions,
           next.memory,
           next.hidden,
+          next.reach,
           next.defaults,
           this.now(),
           row.id,
@@ -245,12 +268,13 @@ export class BotStore {
     return this.db.transaction(() => {
       const row = this.requireRow(botId);
       if (sha256(row.memory) !== expectedSha256) {
-        throw new BotsError("conflict", "Memory changed since it was read; read it again and merge");
+        throw new BotsError(
+          "conflict",
+          "Memory changed since it was read; read it again and merge",
+        );
       }
       this.db
-        .prepare(
-          "UPDATE bots SET memory = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
-        )
+        .prepare("UPDATE bots SET memory = ?, revision = revision + 1, updated_at = ? WHERE id = ?")
         .run(content, this.now(), botId);
       return this.get(botId);
     })();
@@ -362,6 +386,56 @@ export class BotStore {
       seen.add(row.bot_id);
       return { threadId: row.thread_id, botId: row.bot_id, isFirst };
     });
+  }
+
+  canReach(fromBotId: string, toBotId: string): boolean {
+    const reach = this.requireRow(fromBotId).reach;
+    return reach === null || (JSON.parse(reach) as string[]).includes(toBotId);
+  }
+
+  record(event: {
+    botId: string;
+    kind: string;
+    actor: Actor;
+    detail?: Record<string, unknown>;
+  }): void {
+    this.db
+      .prepare(
+        "INSERT INTO bot_events (at, bot_id, kind, actor_kind, actor_id, detail) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        this.now(),
+        event.botId,
+        event.kind,
+        event.actor.kind,
+        event.actor.id,
+        JSON.stringify(event.detail ?? {}),
+      );
+  }
+
+  events(botId: string, limit: number): BotEvent[] {
+    return this.db
+      .prepare<
+        [string, number],
+        {
+          id: number;
+          at: number;
+          kind: string;
+          actor_kind: Actor["kind"];
+          actor_id: string | null;
+          detail: string;
+        }
+      >(
+        "SELECT id, at, kind, actor_kind, actor_id, detail FROM bot_events WHERE bot_id = ? ORDER BY id DESC LIMIT ?",
+      )
+      .all(botId, limit)
+      .map((row) => ({
+        id: row.id,
+        at: row.at,
+        kind: row.kind,
+        actor: { kind: row.actor_kind, id: row.actor_id },
+        detail: JSON.parse(row.detail) as Record<string, unknown>,
+      }));
   }
 
   addPendingStart(botId: string): string {

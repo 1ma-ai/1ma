@@ -13,5 +13,13 @@
     "import/no-cycle": "error",
     "react/react-in-jsx-scope": "off"
   },
-  "ignorePatterns": ["**/dist/**", "**/node_modules/**", "legacy/**", "refs/**"]
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/node_modules/**",
+    "legacy/**",
+    "refs/**",
+    "plugins/1ma-bots/components/ui/**",
+    "plugins/1ma-bots/lib/**",
+    "plugins/1ma-bots/hooks/**"
+  ]
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   experimental_NewThreadComposer as NewThreadComposer,
   experimental_useRpcMutation as useRpcMutation,
@@ -7,7 +7,10 @@ import {
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
 import { Button } from "@/components/ui/button";
-import { ConfirmDeleteDialog, ConfirmDeleteDialogContent } from "@/components/ui/confirm-delete-dialog";
+import {
+  ConfirmDeleteDialog,
+  ConfirmDeleteDialogContent,
+} from "@/components/ui/confirm-delete-dialog";
 import { EmptyStatePanel } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -34,7 +37,9 @@ export function parseRoute(subPath: string): Route {
 }
 
 function BotAvatar({ appearance, size = 32 }: { appearance: Appearance; size?: number }) {
-  return <img src={avatarDataUrl(appearance)} width={size} height={size} alt="" className="shrink-0" />;
+  return (
+    <img src={avatarDataUrl(appearance)} width={size} height={size} alt="" className="shrink-0" />
+  );
 }
 
 function BotList({ bots }: { bots: readonly BotSummary[] }) {
@@ -86,6 +91,7 @@ interface Draft {
   memory: string;
   appearance: Appearance;
   hidden: boolean;
+  reach: string[] | null;
 }
 
 export function parseCapabilities(text: string): string[] {
@@ -108,6 +114,7 @@ function draftOf(bot: BotDetail | null): Draft {
     memory: bot?.memory ?? "",
     appearance: bot?.appearance ?? randomAppearance(),
     hidden: bot?.hidden ?? false,
+    reach: bot?.reach ?? null,
   };
 }
 
@@ -136,7 +143,6 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(bot));
   const [error, setError] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
-  useEffect(() => setDraft(draftOf(bot)), [bot?.id, bot?.revision]);
   const create = useRpcMutation({ contract: botsRpc, method: "bots.v1.create" });
   const update = useRpcMutation({ contract: botsRpc, method: "bots.v1.update" });
   const remove = useRpcMutation({ contract: botsRpc, method: "bots.v1.remove" });
@@ -164,6 +170,7 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
           ...fields,
           memory: draft.memory,
           hidden: draft.hidden,
+          reach: draft.reach,
         });
       }
     } catch (caught) {
@@ -182,7 +189,12 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
     >
       <div className="flex items-center gap-3">
         <BotAvatar appearance={draft.appearance} size={48} />
-        <Button type="button" variant="outline" size="sm" onClick={() => set("appearance", randomAppearance())}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => set("appearance", randomAppearance())}
+        >
           {strings.randomAppearance}
         </Button>
         {bot ? (
@@ -198,19 +210,38 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
         ) : null}
       </div>
       <Field id="bot-name" label={strings.fields.name}>
-        <Input id="bot-name" value={draft.name} required maxLength={80} onChange={(event) => set("name", event.target.value)} />
+        <Input
+          id="bot-name"
+          value={draft.name}
+          required
+          maxLength={80}
+          onChange={(event) => set("name", event.target.value)}
+        />
       </Field>
       <Field id="bot-role" label={strings.fields.role} hint={strings.fields.roleHint}>
-        <Input id="bot-role" value={draft.role} maxLength={160} onChange={(event) => set("role", event.target.value)} />
+        <Input
+          id="bot-role"
+          value={draft.role}
+          maxLength={160}
+          onChange={(event) => set("role", event.target.value)}
+        />
       </Field>
-      <Field id="bot-capabilities" label={strings.fields.capabilities} hint={strings.fields.capabilitiesHint}>
+      <Field
+        id="bot-capabilities"
+        label={strings.fields.capabilities}
+        hint={strings.fields.capabilitiesHint}
+      >
         <Input
           id="bot-capabilities"
           value={draft.capabilities}
           onChange={(event) => set("capabilities", event.target.value)}
         />
       </Field>
-      <Field id="bot-instructions" label={strings.fields.instructions} hint={strings.fields.instructionsHint}>
+      <Field
+        id="bot-instructions"
+        label={strings.fields.instructions}
+        hint={strings.fields.instructionsHint}
+      >
         <Textarea
           id="bot-instructions"
           rows={8}
@@ -220,7 +251,11 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
       </Field>
       {bot ? (
         <>
-          <Field id="bot-memory" label={`${strings.fields.memory} (${draft.memory.length}/${MEMORY_MAX})`} hint={strings.fields.memoryHint}>
+          <Field
+            id="bot-memory"
+            label={`${strings.fields.memory} (${draft.memory.length}/${MEMORY_MAX})`}
+            hint={strings.fields.memoryHint}
+          >
             <Textarea
               id="bot-memory"
               rows={6}
@@ -230,10 +265,14 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
             />
           </Field>
           <Field id="bot-defaults" label={strings.fields.defaults}>
-            <div id="bot-defaults" className="flex items-center gap-2 text-sm text-muted-foreground">
+            <div
+              id="bot-defaults"
+              className="flex items-center gap-2 text-sm text-muted-foreground"
+            >
               {bot.defaults
                 ? strings.fields.defaultsSaved(
-                    [bot.defaults.providerId, bot.defaults.model].filter(Boolean).join(" · ") || "—",
+                    [bot.defaults.providerId, bot.defaults.model].filter(Boolean).join(" · ") ||
+                      "—",
                   )
                 : strings.fields.defaultsNone}
               {bot.defaults ? (
@@ -242,7 +281,11 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
                   variant="link"
                   size="sm"
                   onClick={() =>
-                    void update.mutate({ botId: bot.id, expectedRevision: bot.revision, clearDefaults: true })
+                    void update.mutate({
+                      botId: bot.id,
+                      expectedRevision: bot.revision,
+                      clearDefaults: true,
+                    })
                   }
                 >
                   {strings.fields.defaultsReset}
@@ -250,8 +293,17 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
               ) : null}
             </div>
           </Field>
+          <ReachField
+            botId={bot.id}
+            reach={draft.reach}
+            onChange={(reach) => set("reach", reach)}
+          />
           <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={draft.hidden} onChange={(event) => set("hidden", event.target.checked)} />
+            <input
+              type="checkbox"
+              checked={draft.hidden}
+              onChange={(event) => set("hidden", event.target.checked)}
+            />
             {strings.hide}
           </label>
         </>
@@ -276,6 +328,7 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
           </Button>
         ) : null}
       </div>
+      {bot ? <Activity botId={bot.id} /> : null}
       {bot ? (
         <ConfirmDeleteDialog open={confirmRemove} onOpenChange={setConfirmRemove}>
           <ConfirmDeleteDialogContent
@@ -291,6 +344,81 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
         </ConfirmDeleteDialog>
       ) : null}
     </form>
+  );
+}
+
+function ReachField({
+  botId,
+  reach,
+  onChange,
+}: {
+  botId: string;
+  reach: string[] | null;
+  onChange: (reach: string[] | null) => void;
+}) {
+  const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
+  const others = (list.data?.bots ?? []).filter((other) => other.id !== botId);
+  if (others.length === 0) return null;
+  return (
+    <fieldset className="flex flex-col gap-1.5">
+      <legend className="mb-1.5 text-sm font-medium">{strings.reach.title}</legend>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={reach === null}
+          onChange={(event) =>
+            onChange(event.target.checked ? null : others.map((other) => other.id))
+          }
+        />
+        {strings.reach.all}
+      </label>
+      {reach === null
+        ? null
+        : others.map((other) => (
+            <label key={other.id} className="ml-5 flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={reach.includes(other.id)}
+                onChange={(event) =>
+                  onChange(
+                    event.target.checked
+                      ? [...reach, other.id]
+                      : reach.filter((id) => id !== other.id),
+                  )
+                }
+              />
+              <img src={other.avatar} width={16} height={16} alt="" />
+              {other.name}
+            </label>
+          ))}
+      <p className="text-xs text-muted-foreground">{strings.reach.hint}</p>
+    </fieldset>
+  );
+}
+
+function Activity({ botId }: { botId: string }) {
+  const query = useRpcQuery({
+    contract: botsRpc,
+    method: "bots.v1.events",
+    input: { botId, limit: 20 },
+  });
+  const events = query.data?.events ?? [];
+  return (
+    <section className="flex flex-col gap-1.5">
+      <h2 className="text-sm font-medium">{strings.activity.title}</h2>
+      {events.length === 0 ? (
+        <p className="text-xs text-muted-foreground">{strings.activity.empty}</p>
+      ) : (
+        <ul className="flex flex-col gap-0.5 text-xs text-muted-foreground">
+          {events.map((event) => (
+            <li key={event.id}>
+              {new Date(event.at).toLocaleString()} · {event.kind} ·{" "}
+              {strings.activity.actor(event.actor.kind, event.actor.id)}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -326,7 +454,11 @@ function BotRoute({ botId, chat }: { botId: string; chat: boolean }) {
   const query = useRpcQuery({ contract: botsRpc, method: "bots.v1.get", input: { botId } });
   if (query.error) return <p className="text-sm text-muted-foreground">{strings.unavailable}</p>;
   if (!query.data) return <p className="text-sm text-muted-foreground">{strings.loading}</p>;
-  return chat ? <BotChat bot={query.data} /> : <BotEditor bot={query.data} />;
+  return chat ? (
+    <BotChat bot={query.data} />
+  ) : (
+    <BotEditor key={`${query.data.id}:${query.data.revision}`} bot={query.data} />
+  );
 }
 
 export function BotsPanel({ subPath }: PluginNavPanelProps) {

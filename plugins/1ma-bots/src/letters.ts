@@ -41,6 +41,12 @@ export function routeLetter(
     }
     const toBotId = resolveBot(store, args.to);
     if (toBotId === fromBotId) throw new BotsError("invalid", "A bot does not write to itself");
+    if (!store.canReach(fromBotId, toBotId)) {
+      throw new BotsError(
+        "forbidden",
+        "This bot may not write to that bot. The owner chooses whom a bot may write to on its page.",
+      );
+    }
     let toThreadId: string;
     if (args.toThreadId) {
       if (store.botOfThread(args.toThreadId) !== toBotId) {
