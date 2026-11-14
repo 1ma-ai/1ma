@@ -8,8 +8,8 @@
 // production dependencies come from 1ma's lockfile (pnpm deploy), bb's own
 // `prepare-bundled` builds it with this tree's toolchain and SDK, and the
 // files its package.json lists (assets, themes) are added to the runtime.
-// The result is plugins/<name>/.bundled-runtime, which packages/bundled-plugins
-// copies like any other built-in.
+// The result is .1ma-plugins/<name>/.bundled-runtime, outside plugins/ (which
+// holds only bb's own plugin sources); packages/bundled-plugins copies it.
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
@@ -96,12 +96,8 @@ export function embedPlugin({ tree, name, log = () => {} }) {
       throw new Error(`${name} lists "${entry}" in files, but it is not there`);
     cpSync(from, path.join(runtime, entry), { recursive: true });
   }
-  const target = path.join(tree, "plugins", name, ".bundled-runtime");
-  rmSync(path.dirname(target), { recursive: true, force: true });
-  mkdirSync(path.dirname(target), { recursive: true });
-  cpSync(runtime, target, { recursive: true });
   log(`embedded ${name}@${manifest.version}`);
-  return target;
+  return runtime;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

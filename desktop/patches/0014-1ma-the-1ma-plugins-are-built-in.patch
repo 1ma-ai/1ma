@@ -5,21 +5,23 @@ Subject: [PATCH] 1ma: the 1ma plugins are built in
 
 1ma Brand, Theme, Server Switcher and Auto Updates ship inside the app and
 update with it. They are a separate list, ONE_MA_PLUGINS: they live in the
-1ma repository, not in this workspace, and the 1ma build puts each prepared
-runtime at plugins/<name>/.bundled-runtime. SHIPPED_PLUGINS joins them to
-bb's bundled plugins only where plugins are packaged, installed, shadow-
-checked and ordered, so bb's catalog and its checks of its own bundled
-plugins stay as they are.
+1ma repository, not in this workspace, and the 1ma build stages each
+prepared runtime at .1ma-plugins/<name>/.bundled-runtime, outside plugins/.
+SHIPPED_PLUGINS and listShippedPluginRegistrations join them to bb's bundled
+plugins only where plugins are packaged, installed, shadow-checked and
+ordered; bb's catalog, telemetry and checks of its own bundled plugins keep
+using bb's list.
 ---
- .../src/services/plugins/builtin-registry.ts  | 27 ++++++++++++++++++-
+ .../src/services/plugins/builtin-registry.ts  | 33 +++++++++++++++++++
  .../services/plugins/plugin-registration.ts   |  4 +--
  .../src/services/plugins/plugin-runtime.ts    |  4 +--
- .../services/plugins/builtin-registry.test.ts | 20 ++++++++++++++
- packages/bundled-plugins/build.ts             |  4 +--
- 5 files changed, 52 insertions(+), 7 deletions(-)
+ .../src/services/plugins/plugin-service.ts    |  4 +--
+ .../services/plugins/builtin-registry.test.ts | 24 ++++++++++++++
+ packages/bundled-plugins/build.ts             | 12 +++++--
+ 6 files changed, 72 insertions(+), 9 deletions(-)
 
 diff --git a/apps/server/src/services/plugins/builtin-registry.ts b/apps/server/src/services/plugins/builtin-registry.ts
-index ab47686..3a9076d 100644
+index ab47686..9822203 100644
 --- a/apps/server/src/services/plugins/builtin-registry.ts
 +++ b/apps/server/src/services/plugins/builtin-registry.ts
 @@ -291,6 +291,31 @@ export const BUNDLED_PLUGINS: readonly BundledPluginDefinition[] = [
@@ -54,15 +56,18 @@ index ab47686..3a9076d 100644
  export interface RetiredBundledPlugin {
    pluginId: string;
    successorPluginId: string;
-@@ -359,7 +384,7 @@ export function resolveBuiltinPluginRootPath(name: string): string {
- }
- 
- export function listBundledPluginRegistrations(): BundledPluginRegistration[] {
--  return BUNDLED_PLUGINS.map((plugin) => ({
-+  return SHIPPED_PLUGINS.map((plugin) => ({
-     ...plugin,
+@@ -364,3 +389,11 @@ export function listBundledPluginRegistrations(): BundledPluginRegistration[] {
      rootDir: resolveBuiltinPluginRootPath(plugin.name),
    }));
+ }
++
++/** Every plugin the server installs and loads as built in: bb's and 1ma's. */
++export function listShippedPluginRegistrations(): BundledPluginRegistration[] {
++  return SHIPPED_PLUGINS.map((plugin) => ({
++    ...plugin,
++    rootDir: resolveBuiltinPluginRootPath(plugin.name),
++  }));
++}
 diff --git a/apps/server/src/services/plugins/plugin-registration.ts b/apps/server/src/services/plugins/plugin-registration.ts
 index 4066ed3..8fa9e84 100644
 --- a/apps/server/src/services/plugins/plugin-registration.ts
@@ -107,20 +112,43 @@ index f6428f9..5c71456 100644
      return {
        bundledIndex: bundledIndex === -1 ? null : bundledIndex,
        installedAt: row.installedAt,
+diff --git a/apps/server/src/services/plugins/plugin-service.ts b/apps/server/src/services/plugins/plugin-service.ts
+index 19d343a..8fefebf 100644
+--- a/apps/server/src/services/plugins/plugin-service.ts
++++ b/apps/server/src/services/plugins/plugin-service.ts
+@@ -129,7 +129,7 @@ import {
+ import { readPluginManifest, type PluginManifest } from "./manifest.js";
+ import {
+   RETIRED_BUNDLED_PLUGINS,
+-  listBundledPluginRegistrations,
++  listShippedPluginRegistrations,
+ } from "./builtin-registry.js";
+ import {
+   type BbPluginApi,
+@@ -629,7 +629,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
+     }
+   }
+   const bundledPlugins =
+-    deps.bundledPlugins ?? listBundledPluginRegistrations();
++    deps.bundledPlugins ?? listShippedPluginRegistrations();
+   const retiredBundledPlugins =
+     deps.retiredBundledPlugins ?? RETIRED_BUNDLED_PLUGINS;
+   function isOrphanedBuiltinRow(row: InstalledPluginRow): boolean {
 diff --git a/apps/server/test/services/plugins/builtin-registry.test.ts b/apps/server/test/services/plugins/builtin-registry.test.ts
-index 8fed705..53f3178 100644
+index 8fed705..0599b3e 100644
 --- a/apps/server/test/services/plugins/builtin-registry.test.ts
 +++ b/apps/server/test/services/plugins/builtin-registry.test.ts
-@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
+@@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
  import {
    BUILTIN_PLUGIN_ID_PREFIX,
    BUNDLED_PLUGINS,
 +  ONE_MA_PLUGINS,
 +  listBundledPluginRegistrations,
++  listShippedPluginRegistrations,
    resolveBuiltinPluginRootPathForModuleDir,
  } from "../../../src/services/plugins/builtin-registry.js";
  import { resolveBundledMarketplaceDirectory } from "../../../src/services/plugin-catalog/bundled-marketplace.js";
-@@ -61,6 +63,24 @@ describe("bundled plugin ids", () => {
+@@ -61,6 +64,27 @@ describe("bundled plugin ids", () => {
    });
  });
  
@@ -136,8 +164,11 @@ index 8fed705..53f3178 100644
 +      expect(plugin).toMatchObject({ name: plugin.pluginId, autoInstall: true, defaultEnabled: true });
 +    }
 +    expect(
-+      listBundledPluginRegistrations().map((plugin) => plugin.pluginId),
++      listShippedPluginRegistrations().map((plugin) => plugin.pluginId),
 +    ).toEqual([...BUNDLED_PLUGINS, ...ONE_MA_PLUGINS].map((plugin) => plugin.pluginId));
++    expect(
++      listBundledPluginRegistrations().map((plugin) => plugin.pluginId),
++    ).toEqual(BUNDLED_PLUGINS.map((plugin) => plugin.pluginId));
 +    expect(BUNDLED_PLUGINS.some((plugin) => plugin.pluginId.startsWith("1ma-"))).toBe(false);
 +  });
 +});
@@ -146,23 +177,32 @@ index 8fed705..53f3178 100644
    let root: string;
  
 diff --git a/packages/bundled-plugins/build.ts b/packages/bundled-plugins/build.ts
-index e88b6c3..d8d6190 100644
+index e88b6c3..bf4c359 100644
 --- a/packages/bundled-plugins/build.ts
 +++ b/packages/bundled-plugins/build.ts
-@@ -1,6 +1,6 @@
+@@ -1,6 +1,9 @@
  import { cp, mkdir, rm } from "node:fs/promises";
  import { resolve } from "node:path";
 -import { BUNDLED_PLUGINS } from "../../apps/server/src/services/plugins/builtin-registry.js";
-+import { SHIPPED_PLUGINS } from "../../apps/server/src/services/plugins/builtin-registry.js";
++import {
++  ONE_MA_PLUGINS,
++  SHIPPED_PLUGINS,
++} from "../../apps/server/src/services/plugins/builtin-registry.js";
  import {
    BUNDLED_MARKETPLACE_FILENAME,
    BUNDLED_MARKETPLACE_GENERATED_DIRECTORY,
-@@ -19,7 +19,7 @@ await cp(
+@@ -19,9 +22,12 @@ await cp(
    ),
    resolve(output, BUNDLED_MARKETPLACE_FILENAME),
  );
 -for (const { name } of BUNDLED_PLUGINS) {
++// The 1ma build stages 1ma's plugins outside plugins/, which holds only this
++// workspace's plugin sources.
++const oneMa = new Set(ONE_MA_PLUGINS.map((plugin) => plugin.name));
 +for (const { name } of SHIPPED_PLUGINS) {
    await cp(
-     resolve(root, "plugins", name, ".bundled-runtime"),
+-    resolve(root, "plugins", name, ".bundled-runtime"),
++    resolve(root, oneMa.has(name) ? ".1ma-plugins" : "plugins", name, ".bundled-runtime"),
      resolve(output, name),
+     { recursive: true },
+   );

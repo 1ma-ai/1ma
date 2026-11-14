@@ -81,7 +81,8 @@ ungoogled-chromium и сборки Linux-дистрибутивов: видно 
     Они живут в репозитории 1ma, а не в рабочей области bb:
     `scripts/embed-plugins.mjs` после установки зависимостей bb собирает
     каждый штатным `prepare-bundled` этого дерева и кладёт в
-    `plugins/<имя>/.bundled-runtime` вместе с файлами из поля `files`
+    `.1ma-plugins/<имя>/.bundled-runtime` (вне `plugins/`, где только
+    исходники bb) вместе с файлами из поля `files`
     (значки бренда, CSS темы); список — `embedded-plugins.json`, он
     сверяется со списком правки. Переход с установленных копий — отдельная
     правка (описание в `docs/plan/2026-11-14-builtin-1ma-plugins.md`).
