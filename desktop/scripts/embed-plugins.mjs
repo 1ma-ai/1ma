@@ -116,5 +116,22 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       `desktop/embedded-plugins.json lists ${EMBEDDED.join(", ")}, patch 0014 registers ${registered.join(", ")}`,
     );
   }
+  // The generated sources bb's builder needs, as bb's own prepare:bundled
+  // gets them through its "topo" dependency.
+  run(
+    "corepack",
+    [
+      "pnpm",
+      "exec",
+      "turbo",
+      "run",
+      "topo",
+      "--filter=@bb/plugin-build",
+      "--output-logs=errors-only",
+    ],
+    {
+      cwd: path.resolve(tree),
+    },
+  );
   for (const name of EMBEDDED) embedPlugin({ tree: path.resolve(tree), name, log: console.log });
 }
