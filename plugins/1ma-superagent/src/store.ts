@@ -262,6 +262,13 @@ export class Store {
     }));
   }
 
+  threadStatus(serverId: ServerId, threadId: string): WorkState | null {
+    const row = this.#db
+      .prepare(`SELECT state FROM works WHERE server_id = ? AND thread_id = ?`)
+      .get(serverId, threadId) as { state: string } | undefined;
+    return row === undefined ? null : toWorkState(row.state);
+  }
+
   servers(): ServerRow[] {
     const rows = this.#db.prepare(`SELECT * FROM servers ORDER BY id`).all() as RawServer[];
     return rows.map((raw) => ({

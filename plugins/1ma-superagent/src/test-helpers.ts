@@ -55,6 +55,7 @@ export function fakeExecutor(
     spawn: unused("spawn"),
     findSpawned: async () => [],
     clearQueueAndStop: unused("clearQueueAndStop"),
+    taskOutcome: async () => null,
     ...overrides,
   };
 }

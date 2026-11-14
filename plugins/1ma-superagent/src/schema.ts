@@ -103,4 +103,11 @@ export const MIGRATIONS: string[] = [
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE reports (
+    key TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    question_id TEXT,
+    created_at INTEGER NOT NULL
+  )`,
 ];

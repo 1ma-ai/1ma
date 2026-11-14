@@ -53,6 +53,24 @@ export interface Executor {
   spawn(request: SpawnRequest, signal: AbortSignal): Promise<{ threadId: string }>;
   findSpawned(signal: AbortSignal): Promise<ThreadMetadataRow[]>;
   clearQueueAndStop(threadId: string, signal: AbortSignal): Promise<void>;
+  taskOutcome(threadId: string, signal: AbortSignal): Promise<TaskOutcome | null>;
+}
+
+export type TaskOutcomeKind = "done" | "question" | "failed" | "stopped";
+
+export interface TaskOutcome {
+  readonly kind: TaskOutcomeKind;
+  readonly key: string;
+  readonly text: string | null;
+}
+
+export const RESULT_TEXT_LIMIT = 600;
+
+export function outcomeFromTurn(status: unknown): TaskOutcomeKind | null {
+  if (status === "completed") return "done";
+  if (status === "failed") return "failed";
+  if (status === "interrupted") return "stopped";
+  return null;
 }
 
 export interface SpawnRequest {

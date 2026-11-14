@@ -7,6 +7,7 @@ import type {
   ServerSnapshot,
   ThreadSummary,
 } from "../observation.js";
+import { RESULT_TEXT_LIMIT, outcomeFromTurn } from "../observation.js";
 import { type PagingLimits, DEFAULT_LIMITS, collectOnce, collectPages } from "./paging.js";
 import { METADATA_BATCH, chunks, combineSnapshot, toThreadSummary } from "./snapshot.js";
 import { PLUGIN_ID } from "./remote-http.js";
@@ -115,6 +116,29 @@ export function createLocalExecutor(
         ),
       );
       await sdk.threads.stop({ threadId });
+    },
+    async taskOutcome(threadId, signal) {
+      const question = (await sdk.threads.interactions.list({ threadId, signal })).find(
+        (interaction) => interaction.status === "pending",
+      );
+      if (question !== undefined) return { kind: "question", key: question.id, text: null };
+      const [turn] = await sdk.threads.events.list({
+        threadId,
+        types: ["turn/completed"],
+        order: "desc",
+        limit: "1",
+        signal,
+      });
+      if (turn === undefined || turn.type !== "turn/completed") return null;
+      const kind = outcomeFromTurn(turn.data.status);
+      if (kind === null) return null;
+      const output =
+        kind === "done" ? (await sdk.threads.output({ threadId, signal })).output : null;
+      return {
+        kind,
+        key: turn.id,
+        text: output === null ? null : output.slice(0, RESULT_TEXT_LIMIT),
+      };
     },
     async threadModel(threadId, signal) {
       const options = await sdk.threads.defaultExecutionOptions({

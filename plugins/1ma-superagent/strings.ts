@@ -87,4 +87,12 @@ export const strings = {
   projectExcluded: "That project is excluded from the superagent; nothing was proposed.",
   projectUnknown: (detail: string) =>
     `That project could not be read on the server (${detail}); nothing was proposed.`,
+  resultTitle: (kind: string, chat: string) =>
+    `${{ done: "Задача готова", question: "Исполнитель задал вопрос", failed: "Задача упала", stopped: "Задача остановлена" }[kind] ?? "Итог задачи"}: ${chat}`,
+  resultObserved: (kind: string, chat: string) =>
+    kind === "question"
+      ? `Исполнитель в ${chat} ждёт вашего ответа в своём чате.`
+      : `Чат ${chat} закончил ход. Ниже его последнее сообщение, обрезанное до 600 символов, как есть.`,
+  resultAffected: "Изменения, если они были, — в чате исполнителя и его PR.",
+  resultRecommendation: (chat: string) => `Откройте ${chat}, чтобы ответить или продолжить.`,
 } as const;

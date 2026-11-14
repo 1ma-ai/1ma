@@ -23,6 +23,7 @@ import {
 } from "./src/action-runner.js";
 import { ActionStore } from "./src/actions.js";
 import { QuestionDispatcher } from "./src/dispatcher.js";
+import { RESULT_KIND, runReports } from "./src/reports.js";
 import { START_TOOL, registerStartTool } from "./src/start-tool.js";
 import { UNLINKED_KIND, askAboutUnlinked, unlinkedKind } from "./src/kinds/unlinked-pr.js";
 import { PrStore } from "./src/pr-store.js";
@@ -95,6 +96,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
       [UNKNOWN_KIND, unknownKind(actions)],
       [AMBIGUOUS_KIND, ambiguousKind()],
       [NOTICE_KIND, noticeKind()],
+      [RESULT_KIND, noticeKind()],
     ]);
     const handlers = workRpcHandlers(
       store,
@@ -135,6 +137,17 @@ export function createPlugin(options: SuperagentOptions = {}) {
                 observed,
                 claimant,
                 now: Date.now,
+                signal: lifecycle.signal,
+                warn: (message) => bb.log.warn(message),
+              });
+              await runReports({
+                db,
+                store,
+                actions,
+                questions,
+                executors,
+                observed,
+                now: Date.now(),
                 signal: lifecycle.signal,
                 warn: (message) => bb.log.warn(message),
               });

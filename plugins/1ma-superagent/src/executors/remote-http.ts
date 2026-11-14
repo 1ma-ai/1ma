@@ -8,6 +8,8 @@ import {
   type ServerId,
   type ServerSnapshot,
   type ThreadSummary,
+  RESULT_TEXT_LIMIT,
+  outcomeFromTurn,
 } from "../observation.js";
 import { type PagingLimits, DEFAULT_LIMITS, collectOnce, collectPages } from "./paging.js";
 import { METADATA_BATCH, chunks, combineSnapshot, toThreadSummary } from "./snapshot.js";
@@ -39,6 +41,12 @@ const metadataListSchema = z.object({
 const spawnedSchema = z.object({ id: z.string().regex(/^thr_/) });
 const queuedSchema = z.array(z.object({ id: z.string() }));
 const okSchema = z.unknown();
+
+const interactionsSchema = z.array(z.object({ id: z.string(), status: z.string() }));
+const turnEventsSchema = z.array(
+  z.object({ id: z.string(), data: z.object({ status: z.unknown() }) }),
+);
+const outputSchema = z.object({ output: z.string().nullable() });
 
 const executionOptionsSchema = z.object({ model: z.string() }).nullable();
 
@@ -238,6 +246,30 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
         ),
       );
       await getJson(`/threads/${id}/stop`, okSchema, signal, {});
+    },
+    async taskOutcome(threadId, signal) {
+      const id = encodeURIComponent(threadId);
+      const question = (
+        await getJson(`/threads/${id}/interactions`, interactionsSchema, signal)
+      ).find((interaction) => interaction.status === "pending");
+      if (question !== undefined) return { kind: "question", key: question.id, text: null };
+      const [turn] = await getJson(
+        `/threads/${id}/events?types=turn/completed&order=desc&limit=1`,
+        turnEventsSchema,
+        signal,
+      );
+      if (turn === undefined) return null;
+      const kind = outcomeFromTurn(turn.data.status);
+      if (kind === null) return null;
+      const output =
+        kind === "done"
+          ? (await getJson(`/threads/${id}/output`, outputSchema, signal)).output
+          : null;
+      return {
+        kind,
+        key: turn.id,
+        text: output === null ? null : output.slice(0, RESULT_TEXT_LIMIT),
+      };
     },
     async threadModel(threadId, signal) {
       const execution = await getJson(

@@ -133,3 +133,42 @@ describe("remote-http executor", () => {
     expect(result.error).toContain("environments: GET /environments?limit=2&offset=0 answered 500");
   });
 });
+
+describe("remote-http task outcome", () => {
+  it("cuts the executor's last message to 600 characters and keys it by the finished turn", async () => {
+    const server = fakeServer({
+      "/api/v1/threads/thr_t/interactions": json([]),
+      "/api/v1/threads/thr_t/events?types=turn/completed&order=desc&limit=1": json([
+        { id: "evt_9", data: { status: "completed" } },
+      ]),
+      "/api/v1/threads/thr_t/output": json({ output: "x".repeat(2_000) }),
+    });
+    const executor = createRemoteHttpExecutor({
+      serverId: "linux",
+      baseUrl: "http://linux.test",
+      fetch: server.fetch,
+      limits,
+    });
+    const outcome = await executor.taskOutcome("thr_t", new AbortController().signal);
+    expect(outcome?.kind).toBe("done");
+    expect(outcome?.key).toBe("evt_9");
+    expect(outcome?.text).toHaveLength(600);
+  });
+
+  it("reports a pending question before the last turn", async () => {
+    const server = fakeServer({
+      "/api/v1/threads/thr_t/interactions": json([{ id: "int_1", status: "pending" }]),
+    });
+    const executor = createRemoteHttpExecutor({
+      serverId: "linux",
+      baseUrl: "http://linux.test",
+      fetch: server.fetch,
+      limits,
+    });
+    expect(await executor.taskOutcome("thr_t", new AbortController().signal)).toEqual({
+      kind: "question",
+      key: "int_1",
+      text: null,
+    });
+  });
+});
