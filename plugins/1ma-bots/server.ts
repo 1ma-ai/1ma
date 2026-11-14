@@ -2,11 +2,12 @@ import {
   cliCommand,
   defineCli,
   type BbPluginApi,
+  type ExperimentalPluginRpcHandlerContext,
   type PluginAgentConfigurationContext,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { agentText, strings } from "./strings.js";
-import { botsRpc, chatDefaultsSchema, type ChatDefaults } from "./src/contract.js";
+import { botsRpc, chatDefaultsSchema, type Actor, type ChatDefaults } from "./src/contract.js";
 import { BotsError } from "./src/errors.js";
 import { botInstructions } from "./src/instructions.js";
 import { clearChain, routeLetter } from "./src/letters.js";
@@ -39,17 +40,24 @@ const SPAWN_FIELDS = [
 ] as const;
 const TOOLS = ["bot_read", "bot_memory_update", "bot_update_identity", "bot_message"] as const;
 
-const positiveCount = (fallback: number) =>
-  z
-    .number()
-    .int()
-    .min(1)
-    .max(1000)
-    .catch(fallback);
+const positiveCount = (fallback: number) => z.number().int().min(1).max(1000).catch(fallback);
 
 function startToken(metadata: PluginAgentConfigurationContext["pluginMetadata"]): string | null {
   const value = metadata[START_TOKEN];
   return typeof value === "string" ? value : null;
+}
+
+function actorOf(ctx: ExperimentalPluginRpcHandlerContext): Actor {
+  const caller = ctx.experimental_caller;
+  return caller.kind === "plugin"
+    ? { kind: "plugin", id: caller.pluginId }
+    : { kind: "owner", id: null };
+}
+
+function changedFields(input: Record<string, unknown>): string[] {
+  return Object.keys(input).filter(
+    (key) => key !== "botId" && key !== "expectedRevision" && input[key] !== undefined,
+  );
 }
 
 function defaultsFrom(request: Record<string, unknown>): ChatDefaults {
@@ -89,7 +97,10 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
 
   const changed = () => bb.rpc.experimental_invalidateAll();
 
-  const botOf = (threadId: string, metadata?: PluginAgentConfigurationContext["pluginMetadata"]) => {
+  const botOf = (
+    threadId: string,
+    metadata?: PluginAgentConfigurationContext["pluginMetadata"],
+  ) => {
     const bound = store.botOfThread(threadId);
     if (bound !== null) return bound;
     const token = metadata ? startToken(metadata) : null;
@@ -156,10 +167,17 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
           checkMemorySize(change.content);
           next = change.content;
         }
-        const expected = change.action === "overwrite" ? change.expectedSha256 : current.memorySha256;
-        return next === current.memory && change.action !== "overwrite"
-          ? current
-          : store.writeMemory(botId, next, expected);
+        const expected =
+          change.action === "overwrite" ? change.expectedSha256 : current.memorySha256;
+        if (next === current.memory && change.action !== "overwrite") return current;
+        const written = store.writeMemory(botId, next, expected);
+        store.record({
+          botId,
+          kind: "memory.changed",
+          actor: { kind: "agent", id: ctx.threadId },
+          detail: { action: change.action, characters: written.memory.length },
+        });
+        return written;
       });
       changed();
       return JSON.stringify({ sha256: sha256(bot.memory), characters: bot.memory.length });
@@ -176,7 +194,17 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       instructions: z.string().max(INSTRUCTIONS_MAX).optional(),
     }),
     execute: (input, ctx) => {
-      const bot = store.update({ botId: requireBot(ctx.threadId), ...input });
+      const botId = requireBot(ctx.threadId);
+      const bot = store.transaction(() => {
+        const updated = store.update({ botId, ...input });
+        store.record({
+          botId,
+          kind: "bot.updated",
+          actor: { kind: "agent", id: ctx.threadId },
+          detail: { fields: changedFields(input) },
+        });
+        return updated;
+      });
       changed();
       return JSON.stringify({ revision: bot.revision });
     },
@@ -196,11 +224,40 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         chainLetters: positiveCount(CHAIN_LETTERS_DEFAULT).parse(values.chainLetters),
         hourlyLetters: positiveCount(HOURLY_LETTERS_DEFAULT).parse(values.hourlyLetters),
       };
-      const route = routeLetter(
-        store,
-        { fromThreadId: ctx.threadId, to: input.to, toThreadId: input.threadId, now: now() },
-        limits,
-      );
+      const agent = { kind: "agent" as const, id: ctx.threadId };
+      let route: ReturnType<typeof routeLetter>;
+      try {
+        route = routeLetter(
+          store,
+          { fromThreadId: ctx.threadId, to: input.to, toThreadId: input.threadId, now: now() },
+          limits,
+        );
+      } catch (error) {
+        const fromBotId = store.botOfThread(ctx.threadId);
+        if (fromBotId !== null) {
+          store.record({
+            botId: fromBotId,
+            kind: "letter.refused",
+            actor: agent,
+            detail: {
+              to: input.to,
+              reason: error instanceof Error ? error.message : String(error),
+            },
+          });
+        }
+        throw error;
+      }
+      store.record({
+        botId: route.fromBotId,
+        kind: "letter.sent",
+        actor: agent,
+        detail: {
+          toBotId: route.toBotId,
+          toThreadId: route.toThreadId,
+          chainId: route.chainId,
+          number: route.letterNumber,
+        },
+      });
       changed();
       const from = store.get(route.fromBotId);
       const to = store.get(route.toBotId);
@@ -244,7 +301,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   });
 
   bb.background.schedule(AUTO_COMPLETE_SCHEDULE, "17 * * * *", async () => {
-    const hours = z.number().min(0).catch(0).parse((await settings.get()).autoCompleteHours);
+    const hours = z
+      .number()
+      .min(0)
+      .catch(0)
+      .parse((await settings.get()).autoCompleteHours);
     if (hours <= 0) return;
     const cutoff = now() - hours * HOUR_MS;
     for (const candidate of store.idleCandidates()) {
@@ -278,19 +339,35 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       return { botId, capabilities: store.get(botId).capabilities };
     },
     "bots.v1.get": ({ botId }) => store.get(botId),
-    "bots.v1.create": (input) => {
-      const bot = store.create(input);
+    "bots.v1.create": (input, ctx) => {
+      const bot = store.transaction(() => {
+        const created = store.create(input);
+        store.record({ botId: created.id, kind: "bot.created", actor: actorOf(ctx) });
+        return created;
+      });
       changed();
       return bot;
     },
-    "bots.v1.update": (input) => {
+    "bots.v1.update": (input, ctx) => {
       if (input.memory !== undefined) checkMemorySize(input.memory);
-      const bot = store.update(input);
+      const bot = store.transaction(() => {
+        const updated = store.update(input);
+        store.record({
+          botId: input.botId,
+          kind: "bot.updated",
+          actor: actorOf(ctx),
+          detail: { fields: changedFields(input) },
+        });
+        return updated;
+      });
       changed();
       return bot;
     },
-    "bots.v1.remove": ({ botId }) => {
-      store.remove(botId);
+    "bots.v1.remove": ({ botId }, ctx) => {
+      store.transaction(() => {
+        store.remove(botId);
+        store.record({ botId, kind: "bot.removed", actor: actorOf(ctx) });
+      });
       changed();
       return { ok: true as const };
     },
@@ -299,9 +376,18 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       changed();
       return { ok: true as const };
     },
-    "bots.v1.assign": ({ threadId, botId, place }) => {
+    "bots.v1.assign": ({ threadId, botId, place }, ctx) => {
+      const previous = store.botOfThread(threadId);
       if (botId === null) {
         store.unbind(threadId);
+        if (previous !== null) {
+          store.record({
+            botId: previous,
+            kind: "thread.unassigned",
+            actor: actorOf(ctx),
+            detail: { threadId },
+          });
+        }
         changed();
         return { botId: null, startedFromBot: false };
       }
@@ -310,6 +396,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         startedFromBot: current?.startedFromBot ?? false,
         place: place ?? "last",
       });
+      store.record({ botId, kind: "thread.assigned", actor: actorOf(ctx), detail: { threadId } });
       changed();
       return { botId, startedFromBot: current?.startedFromBot ?? false };
     },
@@ -338,6 +425,10 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       );
       store.saveDefaults(botId, defaultsFrom(request));
       return result;
+    },
+    "bots.v1.events": ({ botId, limit }) => {
+      store.get(botId);
+      return { events: store.events(botId, limit ?? 50) };
     },
     "bots.v1.continueInBot": async ({ threadId }) => {
       const botId = store.botOfThread(threadId);

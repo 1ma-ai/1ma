@@ -36,6 +36,21 @@ export const strings = {
     defaultsSaved: (summary: string) => `Start like the last one: ${summary}.`,
     defaultsReset: "Reset",
   },
+  reach: {
+    title: "Can write to",
+    all: "All bots",
+    hint: "Bots this bot may send letters to. New bots are included while All bots is on.",
+  },
+  activity: {
+    title: "Activity",
+    empty: "Nothing yet.",
+    actor: (kind: string, id: string | null) =>
+      kind === "owner"
+        ? "you"
+        : kind === "agent"
+          ? `conversation ${id}`
+          : `${kind} ${id ?? ""}`.trim(),
+  },
   conflict: "The bot changed elsewhere. Reload it and apply your edit again.",
   firstPrompt: (name: string) =>
     `You are ${name}, a new bot. Ask me what your job is, then save your instructions and the key facts.`,
