@@ -14,13 +14,14 @@ than the built-in is kept. Every other copy stays and the log says why.
 Before the first takeover the database is copied to
 <data>/backups/before-1ma-builtins-<version>-<time>.db: an app from before
 0014 deletes these rows at start, so going back means restoring that copy.
+If the copy cannot be made, the installed copies stay until a later start.
 ---
- .../services/plugins/plugin-registration.ts   | 109 ++++++++++++++++-
- .../services/plugins/plugin-service.test.ts   | 111 ++++++++++++++++++
- 2 files changed, 219 insertions(+), 1 deletion(-)
+ .../services/plugins/plugin-registration.ts   | 113 ++++++++++++++++-
+ .../services/plugins/plugin-service.test.ts   | 116 ++++++++++++++++++
+ 2 files changed, 228 insertions(+), 1 deletion(-)
 
 diff --git a/apps/server/src/services/plugins/plugin-registration.ts b/apps/server/src/services/plugins/plugin-registration.ts
-index 8fa9e84..f296bbb 100644
+index 8fa9e84..b618c98 100644
 --- a/apps/server/src/services/plugins/plugin-registration.ts
 +++ b/apps/server/src/services/plugins/plugin-registration.ts
 @@ -4,7 +4,8 @@ import {
@@ -41,7 +42,7 @@ index 8fa9e84..f296bbb 100644
    SHIPPED_PLUGINS,
    builtinPluginSource,
    type BundledPluginRegistration,
-@@ -765,6 +767,80 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+@@ -765,6 +767,87 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
      });
    }
  
@@ -52,7 +53,7 @@ index 8fa9e84..f296bbb 100644
 +  // verifiable 1ma source qualifies, and never a copy newer than the built-in.
 +  const oneMaPluginNames = new Set(ONE_MA_PLUGINS.map((plugin) => plugin.name));
 +  const ONE_MA_REPOSITORY = "https://github.com/1ma-ai/1ma";
-+  let takeoverSnapshot: Promise<void> | null = null;
++  let takeoverSnapshotSaved = false;
 +
 +  function normalizedRepository(url: string): string {
 +    return url
@@ -104,9 +105,11 @@ index 8fa9e84..f296bbb 100644
 +
 +  // One copy of the database before the first takeover: an app version from
 +  // before the 1ma plugins were built in deletes their rows and settings at
-+  // start, so going back is done by restoring this copy.
-+  function snapshotBeforeTakeover(): Promise<void> {
-+    takeoverSnapshot ??= (async () => {
++  // start, so going back is done by restoring this copy. Without the copy the
++  // installed one, which still works, stays: returns why, or null.
++  async function snapshotBeforeTakeover(): Promise<string | null> {
++    if (takeoverSnapshotSaved) return null;
++    try {
 +      const directory = join(deps.dataDir, "backups");
 +      await mkdir(directory, { recursive: true });
 +      const target = join(
@@ -114,31 +117,33 @@ index 8fa9e84..f296bbb 100644
 +        `before-1ma-builtins-${deps.appVersion}-${Date.now()}.db`,
 +      );
 +      await deps.db.$client.backup(target);
++      takeoverSnapshotSaved = true;
 +      logger.info(`saved the database to ${target} before taking over the 1ma plugins`);
-+    })();
-+    return takeoverSnapshot;
++      return null;
++    } catch (error) {
++      return `could not save the database first: ${
++        error instanceof Error ? error.message : String(error)
++      }`;
++    }
 +  }
 +
    async function reconcileBundled(): Promise<void> {
      for (const bundled of bundledPlugins) {
        const source = builtinPluginSource(bundled.name);
-@@ -803,6 +879,37 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+@@ -803,6 +886,34 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
            name: bundled.name,
          })
        ) {
 +        if (oneMaPluginNames.has(bundled.name)) {
-+          const problem = await oneMaTakeoverProblem(
-+            existing,
-+            bundled.name,
-+            manifest.version,
-+          );
++          const problem =
++            (await oneMaTakeoverProblem(existing, bundled.name, manifest.version)) ??
++            (await snapshotBeforeTakeover());
 +          if (problem !== null) {
 +            logger.warn(
 +              `built-in 1ma plugin ${bundled.name} left the installed copy in place: ${problem}`,
 +            );
 +            continue;
 +          }
-+          await snapshotBeforeTakeover();
 +          upsertInstalledPlugin(deps.db, {
 +            id: manifest.id,
 +            source,
@@ -161,7 +166,7 @@ index 8fa9e84..f296bbb 100644
            `bundled plugin ${bundled.name} resolved to id "${manifest.id}", but that id is already installed from ${existing.source}; skipping bundled reconciliation`,
          );
 diff --git a/apps/server/test/services/plugins/plugin-service.test.ts b/apps/server/test/services/plugins/plugin-service.test.ts
-index 5dd296e..ba8004e 100644
+index 5dd296e..9e2b1f9 100644
 --- a/apps/server/test/services/plugins/plugin-service.test.ts
 +++ b/apps/server/test/services/plugins/plugin-service.test.ts
 @@ -3,6 +3,7 @@ import {
@@ -186,7 +191,7 @@ index 5dd296e..ba8004e 100644
    type DbConnection,
  } from "@bb/db";
  import { createMigratedConnection } from "@bb/db/testing";
-@@ -230,6 +234,113 @@ describe("plugin service", () => {
+@@ -230,6 +234,118 @@ describe("plugin service", () => {
      expect(order).toEqual(["zz-provider", "aa-installed"]);
    });
  
@@ -198,6 +203,7 @@ index 5dd296e..ba8004e 100644
 +      repo?: string;
 +      version?: string;
 +      marker?: boolean;
++      backupFails?: boolean;
 +    }) {
 +      const builtinRoot = await writePlugin(join(workDir, "builtin"), {
 +        name: "bb-plugin-1ma-brand",
@@ -242,6 +248,9 @@ index 5dd296e..ba8004e 100644
 +        enabledFollowsDefault: false,
 +      });
 +      setPluginSettingsValues(db, "1ma-brand", { accent: "#ff6600" });
++      if (copy.backupFails === true) {
++        vi.spyOn(db.$client, "backup").mockRejectedValue(new Error("disk full"));
++      }
 +      const warn = vi.spyOn(logger, "warn");
 +      service = createPluginService({
 +        aiServices: createAiServiceRegistry(),
@@ -288,6 +297,7 @@ index 5dd296e..ba8004e 100644
 +      ["from another repository", { kind: "git" as const, repo: "https://github.com/someone/1ma-brand.git" }, "not from 1ma's repository"],
 +      ["from a folder the release script did not install", { kind: "path" as const }, "not a 1ma release install"],
 +      ["newer than the built-in", { kind: "git" as const, version: "0.5.0" }, "newer than the built-in 0.4.0"],
++      ["when the database cannot be copied first", { kind: "git" as const, backupFails: true }, "could not save the database first: disk full"],
 +    ])("leaves a copy %s in place and says why", async (_case, copy, reason) => {
 +      const { row, lines, backups } = await start(copy);
 +      expect(row?.source.startsWith("builtin:")).toBe(false);
