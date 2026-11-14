@@ -18,24 +18,35 @@ export function mergeScopes(left: PassScope, right: PassScope): PassScope {
   return { full: false, threadKeys: new Set([...left.threadKeys, ...right.threadKeys]) };
 }
 
+import { type Background, inPlace } from "./background.js";
+
 export class PassRunner {
   readonly #execute: (scope: PassScope) => Promise<void>;
   readonly #onError: (error: unknown) => void;
+  readonly #background: Background;
   #pending: PassScope | null = null;
   #pendingWaiters: Array<() => void> = [];
   #running = false;
   #disposed = false;
 
-  constructor(execute: (scope: PassScope) => Promise<void>, onError: (error: unknown) => void) {
+  constructor(
+    execute: (scope: PassScope) => Promise<void>,
+    onError: (error: unknown) => void,
+    background: Background = inPlace,
+  ) {
     this.#execute = execute;
     this.#onError = onError;
+    this.#background = background;
   }
 
   request(scope: PassScope): Promise<void> {
     if (this.#disposed) return Promise.resolve();
     this.#pending = this.#pending === null ? scope : mergeScopes(this.#pending, scope);
     const done = new Promise<void>((resolve) => this.#pendingWaiters.push(resolve));
-    if (!this.#running) void this.#drain();
+    if (!this.#running) {
+      this.#running = true;
+      void this.#background.run(() => this.#drain());
+    }
     return done;
   }
 

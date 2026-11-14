@@ -22,6 +22,7 @@ import {
   unknownKind,
 } from "./src/action-runner.js";
 import { ActionStore } from "./src/actions.js";
+import { createBackground } from "./src/background.js";
 import { QuestionDispatcher } from "./src/dispatcher.js";
 import { BYPASS_KIND, type ReadJournal, mainWatchRows, runMainWatch } from "./src/main-watch.js";
 import { RESULT_KIND, runReports } from "./src/reports.js";
@@ -138,8 +139,11 @@ export function createPlugin(options: SuperagentOptions = {}) {
     bb.rpc.register(workRpcContract, handlers);
 
     const lifecycle = new AbortController();
+    const background = createBackground();
     const dispatcher = new QuestionDispatcher({
-      bb,
+      requestInput: (request, requestOptions) => bb.ui.requestInput(request, requestOptions),
+      warn: (message) => bb.log.warn(message),
+      background,
       store: questions,
       kinds,
       chat: () => (config.role === "control" ? config.mainBotThreadId : null),
@@ -202,6 +206,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
         ),
       (error) =>
         bb.log.error(`pass failed: ${error instanceof Error ? error.message : String(error)}`),
+      background,
     );
     bb.onDispose(() => {
       lifecycle.abort();

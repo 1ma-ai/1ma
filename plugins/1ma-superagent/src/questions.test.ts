@@ -1,6 +1,7 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
+import { inPlace } from "./background.js";
 import { QuestionDispatcher } from "./dispatcher.js";
 import {
   type AnswerOutcome,
@@ -46,7 +47,9 @@ function setup() {
   const lifecycle = new AbortController();
   const makeDispatcher = () =>
     new QuestionDispatcher({
-      bb,
+      requestInput: (request, requestOptions) => bb.ui.requestInput(request, requestOptions),
+      warn: () => {},
+      background: inPlace,
       store,
       kinds,
       chat: () => CHAT,

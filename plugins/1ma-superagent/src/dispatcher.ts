@@ -1,4 +1,5 @@
-import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import type { PluginUi } from "@get-bb/plugin-sdk";
+import type { Background } from "./background.js";
 import {
   type AnswerOutcome,
   QUESTION_RENDERER,
@@ -13,7 +14,9 @@ import {
 const RETRY_MS = 5 * 60 * 1000;
 
 export interface DispatcherDeps {
-  readonly bb: BbPluginApi;
+  readonly requestInput: PluginUi["requestInput"];
+  readonly warn: (message: string) => void;
+  readonly background: Background;
   readonly store: QuestionStore;
   readonly kinds: ReadonlyMap<string, QuestionKind>;
   readonly chat: () => string | null;
@@ -46,24 +49,30 @@ export class QuestionDispatcher {
     this.#live = { questionId: question.id, token };
     const waiting = Math.max(0, this.#deps.store.waiting().length - 1);
     const payload: QuestionPayload = { ...question.card, token, waiting };
-    void this.#deps.bb.ui
-      .requestInput(
-        {
-          threadId: chat,
-          rendererId: QUESTION_RENDERER,
-          title: question.card.title,
-          payload,
-          timeoutMs: QUESTION_TIMEOUT_MS,
-          presentation: { label: { pending: question.card.title, completed: question.card.title } },
-          describeSubmission: (value) => {
-            const parsed = answerSchema.safeParse(value);
-            const option = question.card.options.find(
-              (candidate) => parsed.success && candidate.id === parsed.data.optionId,
-            );
-            return option === undefined ? {} : { title: `${question.card.title}: ${option.label}` };
+    void this.#deps.background
+      .run(() =>
+        this.#deps.requestInput(
+          {
+            threadId: chat,
+            rendererId: QUESTION_RENDERER,
+            title: question.card.title,
+            payload,
+            timeoutMs: QUESTION_TIMEOUT_MS,
+            presentation: {
+              label: { pending: question.card.title, completed: question.card.title },
+            },
+            describeSubmission: (value) => {
+              const parsed = answerSchema.safeParse(value);
+              const option = question.card.options.find(
+                (candidate) => parsed.success && candidate.id === parsed.data.optionId,
+              );
+              return option === undefined
+                ? {}
+                : { title: `${question.card.title}: ${option.label}` };
+            },
           },
-        },
-        { signal: this.#deps.signal },
+          { signal: this.#deps.signal },
+        ),
       )
       .then(
         (result) => {
@@ -93,7 +102,7 @@ export class QuestionDispatcher {
         (error: unknown) => {
           this.#live = null;
           this.#deps.store.requeue(question.id, token, this.#deps.now() + RETRY_MS);
-          this.#deps.bb.log.warn(
+          this.#deps.warn(
             `could not open a question in ${chat}: ${error instanceof Error ? error.message : String(error)}`,
           );
         },
