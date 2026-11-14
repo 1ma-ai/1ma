@@ -4,6 +4,10 @@
   "private": true,
   "description": "Тема 1ma для bb: палитра, типографика и цвета терминала.",
   "license": "MIT",
+  "files": [
+    "themes",
+    "PLUGIN_OVERVIEW.md"
+  ],
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

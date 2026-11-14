@@ -4,6 +4,9 @@
   "private": true,
   "description": "Переключатель серверов 1ma в десктоп-приложении, рядом с кнопкой сайдбара.",
   "license": "MIT",
+  "files": [
+    "PLUGIN_OVERVIEW.md"
+  ],
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

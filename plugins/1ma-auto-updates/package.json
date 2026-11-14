@@ -4,6 +4,9 @@
   "private": true,
   "description": "Ставит обновления CLI провайдеров и плагинов, только когда ни один тред 1ma не работает.",
   "license": "MIT",
+  "files": [
+    "PLUGIN_OVERVIEW.md"
+  ],
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

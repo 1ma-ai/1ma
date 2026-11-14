@@ -7,14 +7,22 @@ on:
       - "desktop/**"
       - "!desktop/**/*.md"
       - "brand/**"
-      - "plugins/1ma-brand/assets/**"
+      - "plugins/1ma-brand/**"
+      - "plugins/1ma-theme/**"
+      - "plugins/1ma-server-switcher/**"
+      - "plugins/1ma-auto-updates/**"
+      - "pnpm-lock.yaml"
       - ".github/workflows/desktop.yml"
   pull_request:
     paths:
       - "desktop/**"
       - "!desktop/**/*.md"
       - "brand/**"
-      - "plugins/1ma-brand/assets/**"
+      - "plugins/1ma-brand/**"
+      - "plugins/1ma-theme/**"
+      - "plugins/1ma-server-switcher/**"
+      - "plugins/1ma-auto-updates/**"
+      - "pnpm-lock.yaml"
       - ".github/workflows/desktop.yml"
   workflow_dispatch:
 
@@ -106,6 +114,8 @@ jobs:
           restore-keys: pnpm-store-${{ runner.os }}-${{ runner.arch }}-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
+      - name: Put the 1ma plugins in as built-in plugins (patch 0014)
+        run: node "$GITHUB_WORKSPACE/desktop/scripts/embed-plugins.mjs" "$PWD"
       - name: Build the server package and smoke-test its tarball, as bb does before publishing
         run: pnpm exec turbo run smoke:tarball --filter=bb-app --force --output-logs=new-only
       - name: Pack the server package
@@ -173,10 +183,12 @@ jobs:
           restore-keys: pnpm-store-${{ runner.os }}-${{ runner.arch }}-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
+      - name: Put the 1ma plugins in as built-in plugins (patch 0014)
+        run: node "$GITHUB_WORKSPACE/desktop/scripts/embed-plugins.mjs" "$PWD"
       - name: Typecheck desktop, launcher and config
         run: pnpm exec turbo run typecheck --filter=@bb/desktop --filter=bb-app --filter=@bb/config --output-logs=new-only
       - name: Build desktop
-        run: pnpm exec turbo run build --filter=@bb/desktop --output-logs=new-only
+        run: pnpm exec turbo run build --filter=@bb/desktop --force --output-logs=new-only
       - name: Install Electron before parallel tests
         run: ELECTRON_RUN_AS_NODE=1 pnpm --filter @bb/desktop exec electron --version
       - name: Test desktop, launcher and config
