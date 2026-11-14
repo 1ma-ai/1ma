@@ -1,16 +1,17 @@
 {
-  "name": "bb-plugin-thread-list",
+  "name": "bb-plugin-1ma-sidebar",
   "version": "0.1.0",
   "private": true,
+  "description": "Боковая панель 1ma: штатный список чатов bb и блок ботов 1ma над проектами.",
+  "license": "MIT",
   "type": "module",
-  "description": "bb's sidebar thread list: pinned threads, custom sections, projects, machines, and nested threads.",
   "engines": {
-    "bb": ">=0.0",
-    "bbPluginSdk": ">=0.6.112"
+    "bb": ">=0.49",
+    "bbPluginSdk": ">=0.6.132"
   },
   "bb": {
-    "name": "Thread list",
-    "description": "bb's sidebar thread list: pinned threads, custom sections, projects, machines, and nested threads.",
+    "name": "1ma Sidebar",
+    "description": "1ma's sidebar: bb's thread list with a bots block above the projects.",
     "branding": {
       "icon": "ListView"
     },

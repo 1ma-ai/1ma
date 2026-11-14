@@ -4,7 +4,8 @@ export default defineConfig({
   resolve: { tsconfigPaths: true },
   test: {
     silent: "passed-only",
-    name: "bb-plugin-thread-list",
+    name: "bb-plugin-1ma-sidebar",
+    maxWorkers: 2,
     include: ["**/*.test.{ts,tsx}"],
     exclude: ["node_modules/**"],
   },

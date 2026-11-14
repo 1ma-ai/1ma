@@ -287,7 +287,7 @@ function ThreadTrailingIndicator({
 }
 
 const ARCHIVED_ROW_ACTION_KEYS = ["bb--core/archive"];
-const CUSTOMIZE_ROW_ACTIONS_KEY = "thread-list/customizeRowActions";
+const CUSTOMIZE_ROW_ACTIONS_KEY = "1ma-sidebar/customizeRowActions";
 
 function renderThreadActionsTrigger(props: PluginThreadActionsTriggerProps) {
   return (

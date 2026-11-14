@@ -1,6 +1,11 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["typescript", "react", "import", "unicorn"],
+  "plugins": [
+    "typescript",
+    "react",
+    "import",
+    "unicorn"
+  ],
   "categories": {
     "correctness": "error",
     "suspicious": "warn",
@@ -20,6 +25,8 @@
     "refs/**",
     "plugins/1ma-bots/components/ui/**",
     "plugins/1ma-bots/lib/**",
-    "plugins/1ma-bots/hooks/**"
+    "plugins/1ma-bots/hooks/**",
+    "plugins/1ma-sidebar/*",
+    "!plugins/1ma-sidebar/1ma/"
   ]
 }

@@ -50,7 +50,7 @@ const REGISTRATIONS: readonly PluginThreadActionRegistrationInfo[] = [
     icon: "Archive",
   },
   {
-    key: "thread-list/move",
+    key: "1ma-sidebar/move",
     pluginId: "thread-list",
     title: "Move to section",
     icon: "SectionMove",

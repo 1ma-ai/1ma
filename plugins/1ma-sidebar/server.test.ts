@@ -156,7 +156,7 @@ describe("thread-list preferences rpc", () => {
       }),
     ).resolves.toEqual({
       key: "rowActions",
-      value: ["thread-list/move", "push-notifications/level"],
+      value: ["1ma-sidebar/move", "push-notifications/level"],
     });
     await expect(
       harness.behavior.callRpc("setPreference", {
@@ -189,7 +189,7 @@ describe("thread-list preferences rpc", () => {
     };
     expect(listed.preferences.rowActions).toEqual([
       "bb--core/pin",
-      "thread-list/move",
+      "1ma-sidebar/move",
       "bb--core/rename",
     ]);
   });
@@ -251,7 +251,7 @@ describe("migration from bb's sidebar preferences", () => {
   });
 });
 
-describe("bb thread-list prefs", () => {
+describe("bb 1ma-sidebar prefs", () => {
   it("names the CLI after the plugin id", async () => {
     const builtIn = setup();
     await plugin(builtIn.bb);

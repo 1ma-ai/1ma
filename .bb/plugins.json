@@ -26,6 +26,10 @@
     {
       "name": "1ma-bots",
       "source": "./plugins/1ma-bots"
+    },
+    {
+      "name": "1ma-sidebar",
+      "source": "./plugins/1ma-sidebar"
     }
   ]
 }

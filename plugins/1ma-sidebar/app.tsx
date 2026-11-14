@@ -34,7 +34,7 @@ function ThreadList({
 export default definePluginApp((app) => {
   app.slots.experimental_threadList({
     id: "thread-list",
-    title: "Thread list",
+    title: "1ma Sidebar",
     description:
       "Pinned threads, custom sections, projects, machines, and nested threads.",
     component: ThreadList,
