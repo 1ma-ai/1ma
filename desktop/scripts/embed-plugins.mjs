@@ -67,7 +67,10 @@ export function embedPlugin({ tree, name, log = () => {} }) {
   }
   const deployed = path.join(tree, ".1ma-plugins", `${name}.deploy`);
   rmSync(deployed, { recursive: true, force: true });
-  run("pnpm", ["--filter", manifest.name, "deploy", "--prod", "--legacy", deployed], { cwd: repo });
+  // corepack runs the pnpm 1ma pins; a bb job may have bb's own pnpm first on PATH.
+  run("corepack", ["pnpm", "--filter", manifest.name, "deploy", "--prod", "--legacy", deployed], {
+    cwd: repo,
+  });
   if (existsSync(path.join(deployed, "node_modules"))) {
     cpSync(path.join(deployed, "node_modules"), path.join(staging, "node_modules"), {
       recursive: true,

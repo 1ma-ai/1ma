@@ -7,14 +7,30 @@ Subject: [PATCH] 1ma: the 1ma plugins are built in
 update with it. They live in the 1ma repository, not in this workspace: the
 1ma build prepares each one with this tree's prepare-bundled and puts the
 runtime at plugins/<name>/.bundled-runtime, which packages/bundled-plugins
-copies like any other. The bundled task-graph and id-prefix tests leave these
-prebuilt entries out, and a test pins the list.
+copies like any other. They are not bb's, so the bb official catalog leaves
+them out; the bundled task-graph and id-prefix tests leave these prebuilt
+entries out, and a test pins the list.
 ---
+ .../generate-bb-official-marketplace.ts       |  3 ++-
  .../src/services/plugins/builtin-registry.ts  | 19 +++++++++++++++++++
  .../services/plugins/builtin-registry.test.ts | 18 +++++++++++++++++-
  .../test/bundled-plugin-tasks.test.mjs        |  3 ++-
- 3 files changed, 38 insertions(+), 2 deletions(-)
+ 4 files changed, 40 insertions(+), 3 deletions(-)
 
+diff --git a/apps/server/scripts/generate-bb-official-marketplace.ts b/apps/server/scripts/generate-bb-official-marketplace.ts
+index 7dc4a32..c065a50 100644
+--- a/apps/server/scripts/generate-bb-official-marketplace.ts
++++ b/apps/server/scripts/generate-bb-official-marketplace.ts
+@@ -350,7 +350,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+     repositoryRoot,
+     catalogFieldsPath: path.join(repositoryRoot, "plugins", "bb-official.json"),
+     outputPath,
+-    plugins: BUNDLED_PLUGINS,
++    // 1ma plugins are not bb's: they stay out of the bb official catalog.
++    plugins: BUNDLED_PLUGINS.filter((plugin) => plugin.prebuilt !== true),
+     warn: (message) => process.stderr.write(`warning: ${message}\n`),
+   });
+ }
 diff --git a/apps/server/src/services/plugins/builtin-registry.ts b/apps/server/src/services/plugins/builtin-registry.ts
 index ab47686..1994b97 100644
 --- a/apps/server/src/services/plugins/builtin-registry.ts
