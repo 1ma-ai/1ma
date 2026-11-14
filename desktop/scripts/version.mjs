@@ -71,7 +71,15 @@ export function compareVersions(a, b) {
 // Each feed in desktop-latest is replaced separately, so a release that
 // failed halfway can leave one ahead of another: a build is checked against
 // every feed it would replace, not only one of them.
-export function checkFeedsMoveForward(version, folder) {
+// publishedTags, when given, lists release tags (desktop/v<version>) already
+// published: a feed can be lost by a failed upload, a release cannot, so the
+// newest release is the floor even when no feed names it.
+export function checkFeedsMoveForward(version, folder, publishedTags = []) {
+  const newerRelease = publishedTags
+    .map((tag) => /^desktop\/v(.+)$/u.exec(tag.trim())?.[1])
+    .filter((published) => published !== undefined)
+    .filter((published) => compareVersions(published, version) > 0)
+    .map((published) => `1ma already published desktop/v${published}, newer than ${version}`);
   const newer = readdirSync(folder)
     .filter((name) => name.endsWith(".json"))
     .map((name) => ({
@@ -79,25 +87,29 @@ export function checkFeedsMoveForward(version, folder) {
       announced: JSON.parse(readFileSync(path.join(folder, name), "utf8")).version,
     }))
     .filter(({ announced }) => compareVersions(String(announced), version) > 0);
-  if (newer.length > 0)
-    throw new Error(
-      newer
-        .map(
-          ({ name, announced }) =>
-            `desktop-latest already announces ${announced} in ${name}, newer than ${version}`,
-        )
-        .join("\n"),
-    );
+  const problems = [
+    ...newer.map(
+      ({ name, announced }) =>
+        `desktop-latest already announces ${announced} in ${name}, newer than ${version}`,
+    ),
+    ...newerRelease,
+  ];
+  if (problems.length > 0) throw new Error(problems.join("\n"));
   return `${version} is not older than any feed in ${folder}`;
 }
 
 const USAGE =
-  "usage: node desktop/scripts/version.mjs next <bb version> <run id> <run attempt> | compare <version> <version> | forward <version> <folder with the announced feeds>";
+  "usage: node desktop/scripts/version.mjs next <bb version> <run id> <run attempt> | compare <version> <version> | forward <version> <folder with the announced feeds> [file with published release tags]";
 
 function main([command, ...args]) {
   if (command === "next" && args.length === 3) return oneMaVersion(...args);
   if (command === "compare" && args.length === 2) return String(compareVersions(...args));
-  if (command === "forward" && args.length === 2) return checkFeedsMoveForward(...args);
+  if (command === "forward" && (args.length === 2 || args.length === 3)) {
+    const [version, folder, tagsFile] = args;
+    const tags =
+      tagsFile === undefined ? [] : readFileSync(tagsFile, "utf8").split("\n").filter(Boolean);
+    return checkFeedsMoveForward(version, folder, tags);
+  }
   throw new Error(USAGE);
 }
 

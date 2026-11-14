@@ -50,14 +50,14 @@ describe("version order", () => {
   });
 });
 
-describe("the feeds only move forward", () => {
-  const feeds = (files) => {
-    const dir = mkdtempSync(path.join(tmpdir(), "1ma-feeds-"));
-    for (const [name, version] of Object.entries(files))
-      writeFileSync(path.join(dir, name), JSON.stringify({ version }));
-    return dir;
-  };
+function feeds(files) {
+  const dir = mkdtempSync(path.join(tmpdir(), "1ma-feeds-"));
+  for (const [name, version] of Object.entries(files))
+    writeFileSync(path.join(dir, name), JSON.stringify({ version }));
+  return dir;
+}
 
+describe("the feeds only move forward", () => {
   test("a build may replace feeds that announce it or an older build", () => {
     const dir = feeds({
       "desktop-version.json": "0.49.1-1ma.9.1",
@@ -79,6 +79,20 @@ describe("the feeds only move forward", () => {
       result.stderr,
       /already announces 0\.49\.1-1ma\.10\.1 in desktop-version\.json, newer than 0\.49\.1-1ma\.9\.2/,
     );
+  });
+
+  test("refuses when a published release is newer, even if no feed names it any more", () => {
+    // A failed upload with --clobber can remove the feed that announced it.
+    const dir = feeds({ "server-version.json": "0.49.1-1ma.9.1" });
+    const published = path.join(dir, "..", `published-${path.basename(dir)}.txt`);
+    writeFileSync(published, "desktop/v0.49.1-1ma.9.1\ndesktop/v0.49.1-1ma.10.1\nsomething-else\n");
+    const result = run("forward", "0.49.1-1ma.9.2", dir, published);
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /already published desktop\/v0\.49\.1-1ma\.10\.1, newer than 0\.49\.1-1ma\.9\.2/,
+    );
+    assert.equal(run("forward", "0.49.1-1ma.10.1", dir, published).status, 0);
   });
 
   test("refuses a feed without a version it can compare", () => {
