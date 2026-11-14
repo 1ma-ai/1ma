@@ -15,9 +15,14 @@ export interface ProviderTarget {
   providerId: string;
 }
 
+export interface PluginTarget {
+  id: string;
+  fromOneMa: boolean;
+}
+
 export interface UpdateWork {
   providers: ProviderTarget[];
-  plugins: string[];
+  plugins: PluginTarget[];
 }
 
 export interface UpdateChoices {
@@ -53,6 +58,7 @@ export type DispatchDecision =
 
 interface Step {
   label: string;
+  allowed(choices: UpdateChoices): boolean;
   run(): Promise<boolean>;
 }
 
@@ -77,6 +83,7 @@ export function threadsAreBusy(threads: ThreadState[] | null): boolean {
 
 export function createAutoUpdates(deps: AutoUpdatesDeps, holdReason: (update: string) => string) {
   let lastActivityAt = deps.now();
+  let activityCount = 0;
   let installing: string | null = null;
   let current: Promise<PassOutcome> | null = null;
 
@@ -94,11 +101,21 @@ export function createAutoUpdates(deps: AutoUpdatesDeps, holdReason: (update: st
     return false;
   }
 
-  async function install(step: Step): Promise<"installed" | "failed" | "busy"> {
+  // Settings and activity are read again before every update: a pass can
+  // last many minutes, and what held at its start may not hold any more.
+  async function install(
+    step: Step,
+    activityAtStart: number,
+  ): Promise<"installed" | "failed" | "postponed"> {
     installing = step.label;
     try {
       await deps.sleep(SETTLE_MS);
-      if (await busy()) return "busy";
+      if (
+        activityCount !== activityAtStart ||
+        !step.allowed(await deps.choices()) ||
+        (await busy())
+      )
+        return "postponed";
       return (await attempt(step)) ? "installed" : "failed";
     } finally {
       installing = null;
@@ -106,21 +123,27 @@ export function createAutoUpdates(deps: AutoUpdatesDeps, holdReason: (update: st
     }
   }
 
-  async function installEach(steps: Step[], progress: Progress): Promise<PassOutcome> {
+  async function installEach(
+    steps: Step[],
+    progress: Progress,
+    activityAtStart: number,
+  ): Promise<PassOutcome> {
     const [step, ...rest] = steps;
     if (step === undefined) return { kind: "attempted", ...progress, postponed: [] };
-    const result = await install(step);
-    if (result === "busy")
+    const result = await install(step, activityAtStart);
+    if (result === "postponed")
       return { kind: "attempted", ...progress, postponed: steps.map((each) => each.label) };
     return installEach(
       rest,
       result === "installed"
         ? { installed: [...progress.installed, step.label], failed: progress.failed }
         : { installed: progress.installed, failed: [...progress.failed, step.label] },
+      activityAtStart,
     );
   }
 
   async function pass(): Promise<PassOutcome> {
+    const activityAtStart = activityCount;
     const choices = await deps.choices();
     if (!choices.providers && !choices.plugins && !choices.otherPlugins) return { kind: "off" };
     if (deps.now() - lastActivityAt < QUIET_MS) return { kind: "recent-activity" };
@@ -129,23 +152,26 @@ export function createAutoUpdates(deps: AutoUpdatesDeps, holdReason: (update: st
     const steps: Step[] = [
       ...work.providers.map((target) => ({
         label: `${target.providerId} on ${target.hostName}`,
+        allowed: (now: UpdateChoices) => now.providers,
         run: () => deps.installProvider(target),
       })),
       ...[
-        ...work.plugins.filter((id) => id !== deps.selfId),
-        ...work.plugins.filter((id) => id === deps.selfId),
-      ].map((pluginId) => ({
-        label: `plugin ${pluginId}`,
-        run: () => deps.updatePlugin(pluginId),
+        ...work.plugins.filter((plugin) => plugin.id !== deps.selfId),
+        ...work.plugins.filter((plugin) => plugin.id === deps.selfId),
+      ].map((plugin) => ({
+        label: `plugin ${plugin.id}`,
+        allowed: (now: UpdateChoices) => (plugin.fromOneMa ? now.plugins : now.otherPlugins),
+        run: () => deps.updatePlugin(plugin.id),
       })),
     ];
     if (steps.length === 0) return { kind: "nothing-to-update" };
-    return installEach(steps, { installed: [], failed: [] });
+    return installEach(steps, { installed: [], failed: [] }, activityAtStart);
   }
 
   return {
     noteThreadActivity(): void {
       lastActivityAt = deps.now();
+      activityCount += 1;
     },
     decideDispatch(): DispatchDecision {
       return installing === null

@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-1ma-auto-updates",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Ставит обновления CLI провайдеров и плагинов, только когда ни один тред 1ma не работает.",
   "license": "MIT",

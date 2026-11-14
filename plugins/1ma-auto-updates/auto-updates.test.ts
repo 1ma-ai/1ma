@@ -19,7 +19,10 @@ const work: UpdateWork = {
     { hostId: "mac", hostName: "MacBook", providerId: "codex" },
     { hostId: "mac", hostName: "MacBook", providerId: "claude-code" },
   ],
-  plugins: ["1ma-auto-updates", "pool-usage"],
+  plugins: [
+    { id: "1ma-auto-updates", fromOneMa: true },
+    { id: "pool-usage", fromOneMa: true },
+  ],
 };
 
 const everyUpdate = [
@@ -183,6 +186,47 @@ describe("installing updates while 1ma is quiet", () => {
       postponed: ["claude-code on MacBook", "plugin pool-usage", "plugin 1ma-auto-updates"],
     });
     expect(calls).toEqual(["settle", "provider codex", "release", "settle", "release"]);
+  });
+
+  it("reads the settings again before every update and leaves out a kind turned off meanwhile", async () => {
+    let choices = { providers: true, plugins: true, otherPlugins: true };
+    const { updates, calls, advance } = setup({
+      choices: async () => choices,
+      findWork: async () => ({
+        providers: [{ hostId: "mac", hostName: "MacBook", providerId: "codex" }],
+        plugins: [{ id: "focus-board", fromOneMa: false }],
+      }),
+      installProvider: async () => {
+        calls.push("provider codex");
+        choices = { ...choices, otherPlugins: false };
+        return true;
+      },
+    });
+    advance(QUIET_MS);
+    expect(await updates.run()).toEqual({
+      kind: "attempted",
+      installed: ["codex on MacBook"],
+      failed: [],
+      postponed: ["plugin focus-board"],
+    });
+    expect(calls).not.toContain("plugin focus-board");
+  });
+
+  it("leaves the rest for later when work started and finished between two updates", async () => {
+    const state = setup({
+      installProvider: async ({ providerId }) => {
+        state.calls.push(`provider ${providerId}`);
+        state.updates.noteThreadActivity();
+        return true;
+      },
+    });
+    state.advance(QUIET_MS);
+    expect(await state.updates.run()).toEqual({
+      kind: "attempted",
+      installed: ["codex on MacBook"],
+      failed: [],
+      postponed: ["claude-code on MacBook", "plugin pool-usage", "plugin 1ma-auto-updates"],
+    });
   });
 
   it("restarts the quiet period whenever a thread runs, finishes or fails", async () => {

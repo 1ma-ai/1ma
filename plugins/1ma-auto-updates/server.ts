@@ -108,12 +108,9 @@ async function findWork(bb: BbPluginApi, choices: UpdateChoices): Promise<Update
     choices.plugins || choices.otherPlugins
       ? pluginListSchema
           .parse(await bb.sdk.plugins.list())
-          .plugins.filter(
-            (entry) =>
-              entry.updateState?.outcome === "update-available" &&
-              (comesFrom1ma(entry.source) ? choices.plugins : choices.otherPlugins),
-          )
-          .map((entry) => entry.id)
+          .plugins.filter((entry) => entry.updateState?.outcome === "update-available")
+          .map((entry) => ({ id: entry.id, fromOneMa: comesFrom1ma(entry.source) }))
+          .filter((entry) => (entry.fromOneMa ? choices.plugins : choices.otherPlugins))
       : [];
   return { providers: perHost.flat(), plugins };
 }
