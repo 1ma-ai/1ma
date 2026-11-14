@@ -6,7 +6,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node --test --test-concurrency=1 scripts/rebrand.test.mjs scripts/known-test-failures.test.mjs scripts/migrate-from-bb.test.mjs scripts/version.test.mjs"
+    "test": "node --test --test-concurrency=1 scripts/series.test.mjs scripts/rebrand.test.mjs scripts/known-test-failures.test.mjs scripts/migrate-from-bb.test.mjs scripts/version.test.mjs"
   },
   "devDependencies": {
     "typescript": "5.9.3"

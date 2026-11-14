@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { applySeries, checkoutUpstream, describeFailures, git } from "./series.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const desktop = path.join(repo, "desktop");
@@ -49,52 +50,20 @@ function parseArgs(argv) {
   };
 }
 
-function git(cwd, args) {
-  const result = spawnSync(
-    "git",
-    ["-c", "user.name=1ma", "-c", "user.email=hello@1ma.ai", ...args],
-    {
-      cwd,
-      encoding: "utf8",
-    },
-  );
-  if (result.status !== 0) {
-    throw new Error(`git ${args.join(" ")} failed in ${cwd}\n${result.stdout}${result.stderr}`);
-  }
-  return result.stdout.trim();
-}
-
 const { out, rebrand, updateLock } = parseArgs(process.argv.slice(2));
 if (existsSync(out) && readdirSync(out).length > 0) {
   throw new Error(`${out} is not empty; prepare writes a fresh tree`);
 }
 mkdirSync(out, { recursive: true });
 
-git(out, ["init", "--quiet"]);
-git(out, ["remote", "add", "origin", upstream.repository]);
-git(out, [
-  "fetch",
-  "--quiet",
-  "--depth",
-  "1",
-  "origin",
-  `refs/tags/${upstream.tag}:refs/tags/${upstream.tag}`,
-]);
-const tagged = git(out, ["rev-list", "-n", "1", upstream.tag]);
-if (tagged !== upstream.commit) {
-  throw new Error(
-    `${upstream.tag} points at ${tagged}, upstream.json pins ${upstream.commit}; refusing a moved tag`,
-  );
-}
-git(out, ["checkout", "--quiet", "--detach", upstream.tag]);
+checkoutUpstream(out, upstream);
 console.log(`bb ${upstream.tag} (${upstream.commit.slice(0, 7)}) checked out in ${out}`);
 
-const patches = readdirSync(path.join(desktop, "patches"))
-  .filter((name) => name.endsWith(".patch"))
-  .toSorted();
-for (const name of patches) {
-  git(out, ["am", "--quiet", "--3way", path.join(desktop, "patches", name)]);
-  console.log(`applied ${name}`);
+const { names: patches, failed } = applySeries(out, path.join(desktop, "patches"), console.log);
+if (failed.length > 0) {
+  throw new Error(
+    `${failed.length} of ${patches.length} 1ma patches do not apply to bb ${upstream.tag}:\n${describeFailures(failed)}\nRebase them in a prepared tree (desktop/README.md).`,
+  );
 }
 // The patch series ends here; the asset swap and the rebrand come on top and are
 // never exported as patches.

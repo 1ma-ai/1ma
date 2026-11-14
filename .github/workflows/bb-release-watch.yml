@@ -90,7 +90,7 @@ jobs:
           fi
           gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/heads/$branch" -f "sha=$GITHUB_SHA" --silent
           current=$(gh api "repos/$GITHUB_REPOSITORY/contents/desktop/upstream.json?ref=$branch" --jq .sha)
-          content=$(jq --arg tag "$TAG" --arg commit "$commit" '.tag = $tag | .commit = $commit' desktop/upstream.json | base64 -w0)
+          content=$(jq --arg tag "$TAG" --arg commit "$commit" '.seriesBase = .commit | .tag = $tag | .commit = $commit' desktop/upstream.json | base64 -w0)
           gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/desktop/upstream.json" \
             -f "message=Trial: the 1ma patches on bb $TAG (not for main)" \
             -f "content=$content" -f "sha=$current" -f "branch=$branch" --silent
