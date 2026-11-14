@@ -80,3 +80,34 @@ describe("bot page helpers", () => {
     expect(parseRoute("bot_1/chat")).toEqual({ page: "chat", botId: "bot_1" });
   });
 });
+
+describe("the bot page", () => {
+  it("keeps unsaved edits when the bot changes elsewhere and says so", async () => {
+    const app = await loadPluginApp(() => import("./app.js"));
+    const panel = app.navPanels.find((item) => item.id === "bots")!;
+    let detail = {
+      ...bot("bot_1", "Marketer", []),
+      instructions: "Write posts.",
+      memory: "",
+      memorySha256: "",
+      defaults: null,
+      revision: 1,
+    };
+    const view = renderSlot(panel, { subPath: "bot_1" } as never, {
+      pluginId: "1ma-bots",
+      rpc: {
+        "bots.v1.get": () => detail,
+        "bots.v1.list": () => ({ bots: [] }),
+        "bots.v1.events": () => ({ events: [] }),
+      },
+    });
+    const field = await screen.findByLabelText(strings.fields.instructions);
+    fireEvent.change(field, { target: { value: "Write short posts." } });
+    detail = { ...detail, memory: "- a fact", revision: 2 };
+    await view.behavior.experimental_invalidateRpc(null);
+    await screen.findByText(strings.changedElsewhere);
+    expect(screen.getByLabelText<HTMLTextAreaElement>(strings.fields.instructions).value).toBe(
+      "Write short posts.",
+    );
+  });
+});

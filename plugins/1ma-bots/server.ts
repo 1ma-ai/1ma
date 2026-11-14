@@ -7,18 +7,24 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { agentText, strings } from "./strings.js";
-import { botsRpc, chatDefaultsSchema, type Actor, type ChatDefaults } from "./src/contract.js";
+import {
+  botNameSchema,
+  botRoleSchema,
+  botsRpc,
+  chatDefaultsSchema,
+  type Actor,
+  type ChatDefaults,
+} from "./src/contract.js";
 import { BotsError } from "./src/errors.js";
 import { botInstructions } from "./src/instructions.js";
-import { clearChain, routeLetter } from "./src/letters.js";
+import { routeLetter, startOwnerExchange } from "./src/letters.js";
 import {
   CHAIN_LETTERS_DEFAULT,
   HOUR_MS,
   HOURLY_LETTERS_DEFAULT,
   INSTRUCTIONS_MAX,
   LETTER_MAX,
-  NAME_MAX,
-  ROLE_MAX,
+  MEMORY_MAX,
 } from "./src/limits.js";
 import { appendFact, checkMemorySize, forgetFact, memoryChangeSchema } from "./src/memory.js";
 import { BotStore, MIGRATIONS, sha256 } from "./src/store.js";
@@ -147,7 +153,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         memory: bot.memory,
         sha256: bot.memorySha256,
         characters: bot.memory.length,
-        maxCharacters: 3000,
+        maxCharacters: MEMORY_MAX,
       });
     },
   });
@@ -189,8 +195,8 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     description: agentText.tools.identityUpdate,
     parameters: z.object({
       expectedRevision: z.number().int(),
-      name: z.string().trim().min(1).max(NAME_MAX).optional(),
-      role: z.string().trim().max(ROLE_MAX).optional(),
+      name: botNameSchema.optional(),
+      role: botRoleSchema.optional(),
       instructions: z.string().max(INSTRUCTIONS_MAX).optional(),
     }),
     execute: (input, ctx) => {
@@ -261,25 +267,38 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       changed();
       const from = store.get(route.fromBotId);
       const to = store.get(route.toBotId);
-      await bb.sdk.threads.send({
-        threadId: route.toThreadId,
-        senderThreadId: ctx.threadId,
-        mode: "queue-if-active",
-        input: [
-          {
-            type: "text",
-            mentions: [],
-            text: agentText.letter({
-              fromName: from.name,
-              fromBotId: from.id,
-              fromThreadId: ctx.threadId,
-              number: route.letterNumber,
-              limit: limits.chainLetters,
-              text: input.text,
-            }),
+      try {
+        await bb.sdk.threads.send({
+          threadId: route.toThreadId,
+          senderThreadId: ctx.threadId,
+          mode: "queue-if-active",
+          input: [
+            {
+              type: "text",
+              mentions: [],
+              text: agentText.letter({
+                fromName: from.name,
+                fromBotId: from.id,
+                fromThreadId: ctx.threadId,
+                number: route.letterNumber,
+                limit: limits.chainLetters,
+                text: input.text,
+              }),
+            },
+          ],
+        });
+      } catch (error) {
+        store.record({
+          botId: route.fromBotId,
+          kind: "letter.failed",
+          actor: agent,
+          detail: {
+            toThreadId: route.toThreadId,
+            reason: error instanceof Error ? error.message : String(error),
           },
-        ],
-      });
+        });
+        throw error;
+      }
       return agentText.sent(to.name, route.toThreadId, route.letterNumber, limits.chainLetters);
     },
   });
@@ -287,7 +306,8 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   bb.experimental_hooks.on("message.dispatch", (ctx) => {
     const threadId = ctx.thread.id;
     if (store.botOfThread(threadId) !== null) {
-      if (ctx.initiator === "user" && ctx.senderThreadId === null) clearChain(store, threadId);
+      if (ctx.initiator === "user" && ctx.senderThreadId === null)
+        startOwnerExchange(store, threadId, now());
       reopen(threadId);
     }
     return { action: "proceed" };
@@ -296,7 +316,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   bb.events.on("interaction.pending", ({ thread }) => reopen(thread.id));
   bb.events.on("thread.failed", ({ thread }) => reopen(thread.id));
   bb.events.on("thread.deleted", ({ thread }) => {
-    store.unbind(thread.id);
+    store.forgetThread(thread.id);
     changed();
   });
 
@@ -310,25 +330,35 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     const cutoff = now() - hours * HOUR_MS;
     for (const candidate of store.idleCandidates()) {
       if (candidate.isFirst) continue;
-      const thread = await bb.sdk.threads.get({ threadId: candidate.threadId });
-      if (thread.pinnedAt !== null || thread.status !== "idle") continue;
-      if (thread.queuedMessageCount > 0 || thread.updatedAt > cutoff) continue;
-      const pending = await bb.sdk.threads.interactions.list({ threadId: candidate.threadId });
-      if (pending.length > 0) continue;
-      if (store.setCompleted(candidate.threadId, true)) changed();
+      try {
+        const pending = await bb.sdk.threads.interactions.list({ threadId: candidate.threadId });
+        if (pending.length > 0) continue;
+        // Read the thread last: nothing awaits between this check and the write.
+        const thread = await bb.sdk.threads.get({ threadId: candidate.threadId });
+        if (thread.deletedAt !== null) {
+          store.forgetThread(candidate.threadId);
+          changed();
+          continue;
+        }
+        if (thread.pinnedAt !== null || thread.status !== "idle") continue;
+        if (thread.queuedMessageCount > 0 || thread.updatedAt > cutoff) continue;
+        if (store.setCompleted(candidate.threadId, true)) changed();
+      } catch (error) {
+        bb.log.warn(
+          `auto-complete skipped ${candidate.threadId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   });
 
   const startIn = async (botId: string, create: (token: string) => Promise<{ id: string }>) => {
+    // A failed create keeps its token: the thread may exist anyway, and its
+    // first configure still claims it. Old tokens expire in addPendingStart.
     const token = store.addPendingStart(botId);
-    try {
-      const thread = await create(token);
-      store.claimPendingStart(thread.id, token);
-      changed();
-      return { threadId: thread.id };
-    } finally {
-      store.dropPendingStart(token);
-    }
+    const thread = await create(token);
+    store.claimPendingStart(thread.id, token);
+    changed();
+    return { threadId: thread.id };
   };
 
   bb.rpc.register(botsRpc, {

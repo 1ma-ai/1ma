@@ -103,6 +103,8 @@ interface ThreadRow {
   completed_at: number | null;
 }
 
+const PENDING_START_TTL_MS = 24 * 60 * 60 * 1000;
+
 export function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
@@ -296,6 +298,13 @@ export class BotStore {
 
   reorderBots(botIds: readonly string[]): void {
     this.db.transaction(() => {
+      requireSameSet(
+        botIds,
+        this.db
+          .prepare<[], { id: string }>("SELECT id FROM bots")
+          .all()
+          .map((row) => row.id),
+      );
       botIds.forEach((id, index) => {
         this.requireRow(id);
         this.db.prepare("UPDATE bots SET position = ? WHERE id = ?").run(index, id);
@@ -345,6 +354,13 @@ export class BotStore {
     })();
   }
 
+  forgetThread(threadId: string): void {
+    this.transaction(() => {
+      this.unbind(threadId);
+      this.db.prepare("DELETE FROM thread_chains WHERE thread_id = ?").run(threadId);
+    });
+  }
+
   unbind(threadId: string): void {
     this.db.prepare("DELETE FROM bot_threads WHERE thread_id = ?").run(threadId);
   }
@@ -352,6 +368,10 @@ export class BotStore {
   reorderThreads(botId: string, threadIds: readonly string[]): void {
     this.db.transaction(() => {
       this.requireRow(botId);
+      requireSameSet(
+        threadIds,
+        this.threadsOf(botId).map((thread) => thread.threadId),
+      );
       threadIds.forEach((threadId, index) => {
         if (this.botOfThread(threadId) !== botId) {
           throw new BotsError("invalid", `Thread ${threadId} does not belong to this bot`);
@@ -440,6 +460,9 @@ export class BotStore {
 
   addPendingStart(botId: string): string {
     this.requireRow(botId);
+    this.db
+      .prepare("DELETE FROM pending_starts WHERE created_at < ?")
+      .run(this.now() - PENDING_START_TTL_MS);
     const token = randomUUID();
     this.db
       .prepare("INSERT INTO pending_starts (token, bot_id, created_at) VALUES (?, ?, ?)")
@@ -483,4 +506,11 @@ function placeAt(positions: readonly number[], place: "first" | "after-first" | 
   if (place === "last") return last + 1;
   const second = positions[1];
   return second === undefined ? first + 1 : (first + second) / 2;
+}
+
+function requireSameSet(given: readonly string[], actual: readonly string[]): void {
+  const wanted = new Set(actual);
+  if (given.length !== wanted.size || !given.every((id) => wanted.has(id))) {
+    throw new BotsError("invalid", "Pass the complete current list in its new order");
+  }
 }

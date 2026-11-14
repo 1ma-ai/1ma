@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   experimental_NewThreadComposer as NewThreadComposer,
+  experimental_PluginRpcCallError as PluginRpcCallError,
   experimental_useRpcMutation as useRpcMutation,
   experimental_useRpcQuery as useRpcQuery,
   useBbNavigate,
@@ -141,14 +142,30 @@ function Field({
 export function BotEditor({ bot }: { bot: BotDetail | null }) {
   const navigate = useBbNavigate();
   const [draft, setDraft] = useState<Draft>(() => draftOf(bot));
+  const [baseRevision, setBaseRevision] = useState(bot?.revision ?? 0);
+  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  if (bot !== null && bot.revision !== baseRevision && !dirty) {
+    setDraft(draftOf(bot));
+    setBaseRevision(bot.revision);
+  }
+  const stale = bot !== null && bot.revision !== baseRevision;
+  const loadLatest = () => {
+    if (bot === null) return;
+    setDraft(draftOf(bot));
+    setBaseRevision(bot.revision);
+    setDirty(false);
+    setError(null);
+  };
   const [confirmRemove, setConfirmRemove] = useState(false);
   const create = useRpcMutation({ contract: botsRpc, method: "bots.v1.create" });
   const update = useRpcMutation({ contract: botsRpc, method: "bots.v1.update" });
   const remove = useRpcMutation({ contract: botsRpc, method: "bots.v1.remove" });
   const pending = create.isPending || update.isPending || remove.isPending;
-  const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
+  const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
+    setDirty(true);
     setDraft((current) => ({ ...current, [key]: value }));
+  };
 
   const save = async () => {
     setError(null);
@@ -166,16 +183,22 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
       } else {
         await update.mutate({
           botId: bot.id,
-          expectedRevision: bot.revision,
+          expectedRevision: baseRevision,
           ...fields,
           memory: draft.memory,
           hidden: draft.hidden,
           reach: draft.reach,
         });
+        setDirty(false);
       }
     } catch (caught) {
-      const code = (caught as { code?: string }).code;
-      setError(code === "conflict" ? strings.conflict : String((caught as Error).message));
+      setError(
+        caught instanceof PluginRpcCallError && caught.code === "conflict"
+          ? strings.conflict
+          : caught instanceof Error
+            ? caught.message
+            : String(caught),
+      );
     }
   };
 
@@ -307,6 +330,14 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
             {strings.hide}
           </label>
         </>
+      ) : null}
+      {stale ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          {strings.changedElsewhere}
+          <Button type="button" variant="link" size="sm" onClick={loadLatest}>
+            {strings.loadLatest}
+          </Button>
+        </div>
       ) : null}
       {error ? <p className="text-sm text-destructive-text">{error}</p> : null}
       <div className="flex items-center gap-2">
@@ -454,11 +485,7 @@ function BotRoute({ botId, chat }: { botId: string; chat: boolean }) {
   const query = useRpcQuery({ contract: botsRpc, method: "bots.v1.get", input: { botId } });
   if (query.error) return <p className="text-sm text-muted-foreground">{strings.unavailable}</p>;
   if (!query.data) return <p className="text-sm text-muted-foreground">{strings.loading}</p>;
-  return chat ? (
-    <BotChat bot={query.data} />
-  ) : (
-    <BotEditor key={`${query.data.id}:${query.data.revision}`} bot={query.data} />
-  );
+  return chat ? <BotChat bot={query.data} /> : <BotEditor key={query.data.id} bot={query.data} />;
 }
 
 export function BotsPanel({ subPath }: PluginNavPanelProps) {

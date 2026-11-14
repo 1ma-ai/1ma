@@ -29,8 +29,12 @@ export const appearanceSchema = z.object({
 });
 export type Appearance = z.infer<typeof appearanceSchema>;
 
-const name = z.string().trim().min(1).max(NAME_MAX);
-const role = z.string().trim().max(ROLE_MAX);
+const singleLine = (schema: z.ZodString) =>
+  schema.regex(/^[^\p{Cc}]*$/u, "One line of text without control characters");
+export const botNameSchema = singleLine(z.string().trim().min(1).max(NAME_MAX));
+export const botRoleSchema = singleLine(z.string().trim().max(ROLE_MAX));
+const name = botNameSchema;
+const role = botRoleSchema;
 const instructions = z.string().max(INSTRUCTIONS_MAX);
 const capabilities = z.array(z.string().regex(CAPABILITY_PATTERN)).max(CAPABILITIES_MAX);
 

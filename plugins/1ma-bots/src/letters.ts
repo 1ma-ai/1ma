@@ -73,12 +73,14 @@ export function routeLetter(
       );
     }
 
-    const current = db
-      .prepare<[string], { id: string; letters: number }>(
-        `SELECT chains.id, chains.letters FROM thread_chains
-         JOIN chains ON chains.id = thread_chains.chain_id WHERE thread_chains.thread_id = ?`,
-      )
-      .get(args.fromThreadId);
+    const chainOf = db.prepare<[string], { id: string; letters: number }>(
+      `SELECT chains.id, chains.letters FROM thread_chains
+       JOIN chains ON chains.id = thread_chains.chain_id WHERE thread_chains.thread_id = ?`,
+    );
+    // A conversation the owner wrote in carries its own exchange; one that
+    // never had one joins the recipient's, so a fresh conversation cannot
+    // restart an exchange that ran out.
+    const current = chainOf.get(args.fromThreadId) ?? chainOf.get(toThreadId);
     if (current && current.letters >= limits.chainLetters) {
       throw new BotsError(
         "forbidden",
@@ -115,6 +117,18 @@ export function routeLetter(
   });
 }
 
-export function clearChain(store: BotStore, threadId: string): void {
-  store.database.prepare("DELETE FROM thread_chains WHERE thread_id = ?").run(threadId);
+// The owner's own message starts a new, empty exchange in that conversation.
+export function startOwnerExchange(store: BotStore, threadId: string, now: number): void {
+  store.transaction(() => {
+    const chainId = `chain_${randomUUID()}`;
+    store.database
+      .prepare("INSERT INTO chains (id, letters, created_at) VALUES (?, 0, ?)")
+      .run(chainId, now);
+    store.database
+      .prepare(
+        `INSERT INTO thread_chains (thread_id, chain_id) VALUES (?, ?)
+         ON CONFLICT(thread_id) DO UPDATE SET chain_id = excluded.chain_id`,
+      )
+      .run(threadId, chainId);
+  });
 }
