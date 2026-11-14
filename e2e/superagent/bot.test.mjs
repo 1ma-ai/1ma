@@ -180,8 +180,8 @@ describe("1ma-superagent bot actions with a model turn", () => {
       },
     ]);
     for (const server of [control, executor]) {
-      server.bb(["plugin", "config", "provider-acp", "set", "customAgents", agents]);
       server.bb(["plugin", "install", pluginDir, "--yes"]);
+      server.bb(["plugin", "config", "provider-acp", "set", "customAgents", agents]);
     }
     control.bb(["plugin", "config", PLUGIN, "set", "role", "control"]);
     control.bb(["plugin", "config", PLUGIN, "set", "linuxServerUrl", proxy.url]);

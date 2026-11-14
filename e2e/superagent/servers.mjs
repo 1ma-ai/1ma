@@ -79,7 +79,7 @@ export class Server {
       env: cleanEnv({ HOME: this.home, BB_SERVER_URL: this.url, BB_DATA_DIR: this.dataDir }),
       encoding: "utf8",
       input,
-      timeout: 120_000,
+      timeout: 300_000,
     });
     if (result.status !== 0) {
       throw new Error(

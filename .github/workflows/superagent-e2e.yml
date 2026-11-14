@@ -44,7 +44,7 @@ jobs:
       - name: Server logs
         if: always()
         run: |
-          for log in "$E2E_ROOT"/*.log "$E2E_ROOT"/bot/*.log; do
+          for log in "$E2E_ROOT"/*.log "$E2E_ROOT"/bot/*.log "$E2E_ROOT"/*/data/logs/*.log "$E2E_ROOT"/bot/*/data/logs/*.log; do
             [ -f "$log" ] || continue
             echo "::group::$log"
             tail -n 300 "$log"
