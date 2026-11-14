@@ -174,3 +174,23 @@ describe("remote-http task outcome", () => {
     });
   });
 });
+
+describe("remote-http time limits", () => {
+  it("gives up on every request that does not answer in time, not only on list pages", async () => {
+    const hanging: Fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+      });
+    const executor = createRemoteHttpExecutor({
+      serverId: "linux",
+      baseUrl: "http://linux.test",
+      fetch: hanging,
+      limits: { ...limits, pageTimeoutMs: 50 },
+    });
+    const signal = new AbortController().signal;
+    await expect(executor.taskOutcome("thr_t", signal)).rejects.toBeDefined();
+    await expect(executor.queuedWaits("thr_t", signal)).rejects.toBeDefined();
+    await expect(executor.projectRemote("proj_x", signal)).rejects.toBeDefined();
+    await expect(executor.clearQueueAndStop("thr_t", signal)).rejects.toBeDefined();
+  });
+});

@@ -64,6 +64,7 @@ const projectSchema = z.object({
 });
 
 export const PLUGIN_ID = "1ma-superagent";
+export const SPAWN_TIMEOUT_MS = 30_000;
 
 export class RemoteHttpError extends Error {
   readonly status: number | null;
@@ -100,10 +101,11 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
     signal: AbortSignal,
     body?: unknown,
     methodOverride?: string,
+    timeoutMs: number = limits.pageTimeoutMs,
   ): Promise<T> {
     const method = methodOverride ?? (body === undefined ? "GET" : "POST");
     const response = await fetchImpl(`${base}/api/v1${path}`, {
-      signal,
+      signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
       headers:
         body === undefined
           ? { accept: "application/json" }
@@ -196,17 +198,24 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
     },
     async spawn(request, signal) {
       try {
-        const thread = await getJson("/threads", spawnedSchema, signal, {
-          projectId: request.projectId,
-          providerId: request.providerId,
-          model: request.model,
-          title: request.title,
-          origin: "plugin",
-          originPluginId: PLUGIN_ID,
-          pluginMetadata: { spawn: { ...request.label } },
-          environment: { type: "project-default" },
-          input: [{ type: "text", text: request.prompt }],
-        });
+        const thread = await getJson(
+          "/threads",
+          spawnedSchema,
+          signal,
+          {
+            projectId: request.projectId,
+            providerId: request.providerId,
+            model: request.model,
+            title: request.title,
+            origin: "plugin",
+            originPluginId: PLUGIN_ID,
+            pluginMetadata: { spawn: { ...request.label } },
+            environment: { type: "project-default" },
+            input: [{ type: "text", text: request.prompt }],
+          },
+          undefined,
+          SPAWN_TIMEOUT_MS,
+        );
         return { threadId: thread.id };
       } catch (error) {
         if (
