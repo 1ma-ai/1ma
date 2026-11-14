@@ -20,7 +20,7 @@ jobs:
     name: Two 1ma servers with the superagent plugin
     if: github.event_name != 'pull_request' || github.head_ref == 'superagent'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Choose the scratch directory
         run: echo "E2E_ROOT=$RUNNER_TEMP/superagent-e2e" >> "$GITHUB_ENV"
@@ -40,11 +40,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: node e2e/superagent/install-server.mjs
       - name: Run the end-to-end tests
-        run: node --test --test-concurrency=1 --test-timeout=900000 e2e/superagent/superagent.test.mjs
+        run: node --test --test-concurrency=1 --test-timeout=2400000 e2e/superagent/superagent.test.mjs e2e/superagent/bot.test.mjs
       - name: Server logs
         if: always()
         run: |
-          for log in "$E2E_ROOT"/*.log; do
+          for log in "$E2E_ROOT"/*.log "$E2E_ROOT"/bot/*.log; do
             [ -f "$log" ] || continue
             echo "::group::$log"
             tail -n 300 "$log"
