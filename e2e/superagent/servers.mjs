@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
+import { request } from "node:http";
 import path from "node:path";
 
 export function requireEnv(name) {
@@ -91,16 +92,42 @@ export class Server {
     return JSON.parse(this.bb([...args, "--json"]));
   }
 
-  async api(method, pathname, body) {
-    const response = await fetch(`${this.url}/api/v1${pathname}`, {
-      method,
-      headers: { "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  api(method, pathname, body) {
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    return new Promise((resolve, reject) => {
+      const req = request(
+        `${this.url}/api/v1${pathname}`,
+        {
+          method,
+          agent: false,
+          headers: {
+            accept: "application/json",
+            ...(payload === undefined ? {} : { "content-type": "application/json" }),
+          },
+          timeout: 30_000,
+        },
+        (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            if ((res.statusCode ?? 0) >= 400) {
+              reject(
+                new Error(`[${this.name}] ${method} ${pathname} → ${res.statusCode}: ${text}`),
+              );
+              return;
+            }
+            resolve(text === "" ? null : JSON.parse(text));
+          });
+          res.on("error", reject);
+        },
+      );
+      req.on("timeout", () =>
+        req.destroy(new Error(`[${this.name}] ${method} ${pathname} timed out`)),
+      );
+      req.on("error", reject);
+      req.end(payload);
     });
-    const text = await response.text();
-    if (!response.ok)
-      throw new Error(`[${this.name}] ${method} ${pathname} → ${response.status}: ${text}`);
-    return text === "" ? null : JSON.parse(text);
   }
 
   async rpc(pluginId, method, input) {
@@ -115,8 +142,8 @@ export class Server {
       if (this.process?.exitCode !== null)
         throw new Error(`${this.name} exited; see ${this.logFile}`);
       try {
-        const response = await fetch(`${this.url}/api/v1/threads?limit=1`);
-        return response.ok;
+        await this.api("GET", "/threads?limit=1");
+        return true;
       } catch {
         return false;
       }
