@@ -127,6 +127,8 @@ jobs:
           version="$(jq -r .version packages/bb-app/package.json)"
           mv "$RUNNER_TEMP/server/$packed" "$RUNNER_TEMP/server/1ma-server-${version}.tgz"
           cp 1ma-provenance.json "$RUNNER_TEMP/server/"
+      - name: Start the packed server from an empty folder and check the built-in 1ma plugins over HTTP
+        run: node "$GITHUB_WORKSPACE/desktop/scripts/smoke-builtin-plugins.mjs" "$RUNNER_TEMP"/server/1ma-server-*.tgz
       - uses: actions/upload-artifact@v4
         with:
           name: 1ma-server-linux
