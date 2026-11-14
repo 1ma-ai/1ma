@@ -1,5 +1,6 @@
 import { defineRpcContract, experimental_PluginRpcRefusal } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import type { ActionStore } from "./actions.js";
 import type { GitHubPassState } from "./pass.js";
 import type { PrLinkRow, PrStore } from "./pr-store.js";
 import type { QuestionStore } from "./questions.js";
@@ -39,6 +40,30 @@ const pullRequestSchema = z.object({
 });
 
 export type PullRequestDto = z.infer<typeof pullRequestSchema>;
+
+const actionSchema = z.object({
+  id: z.string(),
+  kind: z.literal("spawn_thread"),
+  serverId: z.enum(["mac", "linux"]),
+  attempt: z.number().int(),
+  state: z.enum([
+    "proposed",
+    "confirmed",
+    "sending",
+    "unknown",
+    "bound",
+    "ambiguous",
+    "failed",
+    "canceled",
+  ]),
+  threadId: z.string().nullable(),
+  result: z.string().nullable(),
+  replacedBy: z.string().nullable(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+
+export type ActionDto = z.infer<typeof actionSchema>;
 
 const githubSchema = z.object({ at: z.number(), problems: z.array(z.string()) }).nullable();
 
@@ -92,6 +117,10 @@ export const workRpcContract = defineRpcContract({
   "work.v1.pullRequests": {
     input: z.object({ unlinkedOnly: z.boolean().optional() }).strict(),
     output: z.object({ pullRequests: z.array(pullRequestSchema), github: githubSchema }),
+  },
+  "work.v1.actions": {
+    input: z.object({ limit: z.number().int().min(1).max(MAX_PAGE).optional() }).strict(),
+    output: z.object({ actions: z.array(actionSchema) }),
   },
   "work.v1.get": {
     input: z.object({ workId: z.string().min(1) }).strict(),
@@ -175,6 +204,7 @@ export function workRpcHandlers(
     checkedAt: number;
   }>,
   github: () => Promise<GitHubPassState | null>,
+  actions: ActionStore,
 ) {
   const toDto = (row: WorkRow) => toWorkDto(row, prStore);
   const githubDto = async () => {
@@ -224,6 +254,22 @@ export function workRpcHandlers(
           title: question.card.title,
           state: question.state === "open" ? ("open" as const) : ("queued" as const),
           createdAt: question.createdAt,
+        })),
+      };
+    },
+    "work.v1.actions"(input: { limit?: number }) {
+      return {
+        actions: actions.recent(input.limit ?? 50).map((action) => ({
+          id: action.id,
+          kind: action.kind,
+          serverId: action.serverId,
+          attempt: action.attempt,
+          state: action.state,
+          threadId: action.threadId,
+          result: action.result,
+          replacedBy: action.replacedBy,
+          createdAt: action.createdAt,
+          updatedAt: action.updatedAt,
         })),
       };
     },

@@ -133,6 +133,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
       questions,
       () => mainWatchRows(db),
       async () => (await bb.storage.kv.get<GitHubPassState>(GITHUB_STATE_KEY)) ?? null,
+      actions,
     );
     bb.rpc.register(workRpcContract, handlers);
 

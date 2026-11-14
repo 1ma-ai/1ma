@@ -98,3 +98,16 @@ describe("sa_start_chat", () => {
     await excluded.harness.lifecycle.dispose();
   });
 });
+
+describe("work.v1.actions", () => {
+  it("lists the bot's proposals with their state and without the owner's words", async () => {
+    const { harness, propose } = await setup();
+    await propose();
+    const result = await harness.behavior.callRpc("work.v1.actions", {});
+    expect(result).toMatchObject({
+      actions: [{ kind: "spawn_thread", serverId: "linux", state: "proposed", attempt: 1 }],
+    });
+    expect(JSON.stringify(result)).not.toContain(PROMPT);
+    await harness.lifecycle.dispose();
+  });
+});
