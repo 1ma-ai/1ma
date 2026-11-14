@@ -1,0 +1,302 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Sat, 14 Nov 2026 22:46:13 +0100
+Subject: [PATCH] 1ma: built-in 1ma plugins take over verified installed copies
+
+Before patch 0014 the 1ma plugins were installed from 1ma's repository (git)
+or from the Linux release folder (path). When a built-in 1ma plugin meets a
+copy with its id, reconcileBundled now moves that row to the built-in source
+instead of skipping it, keeping the enablement and, through the plugin id,
+the settings, secrets, schedules and data. Only a verifiable 1ma source
+qualifies: git from github.com/1ma-ai/1ma with subdirectory plugins/<name>,
+or a folder carrying the release script's .1ma-release.json; a copy newer
+than the built-in is kept. Every other copy stays and the log says why.
+Before the first takeover the database is copied to
+<data>/backups/before-1ma-builtins-<version>-<time>.db: an app from before
+0014 deletes these rows at start, so going back means restoring that copy.
+---
+ .../services/plugins/plugin-registration.ts   | 109 ++++++++++++++++-
+ .../services/plugins/plugin-service.test.ts   | 111 ++++++++++++++++++
+ 2 files changed, 219 insertions(+), 1 deletion(-)
+
+diff --git a/apps/server/src/services/plugins/plugin-registration.ts b/apps/server/src/services/plugins/plugin-registration.ts
+index 8fa9e84..ac790ae 100644
+--- a/apps/server/src/services/plugins/plugin-registration.ts
++++ b/apps/server/src/services/plugins/plugin-registration.ts
+@@ -4,7 +4,8 @@ import {
+ } from "@bb/db";
+ import { isHostPathWithin } from "@bb/domain";
+ import { realpathSync } from "node:fs";
+-import { cp, rename, rm, stat } from "node:fs/promises";
++import { cp, mkdir, readFile, rename, rm, stat } from "node:fs/promises";
++import semver from "semver";
+ import { join, resolve } from "node:path";
+ import { isFsErrorWithCode } from "../lib/fs-errors.js";
+ import {
+@@ -27,6 +28,7 @@ import {
+ } from "@bb/db";
+ import {
+   BUILTIN_PLUGIN_ID_PREFIX,
++  ONE_MA_PLUGINS,
+   SHIPPED_PLUGINS,
+   builtinPluginSource,
+   type BundledPluginRegistration,
+@@ -765,6 +767,80 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+     });
+   }
+ 
++  // A 1ma plugin that became built in may still be installed from 1ma's
++  // repository or from the Linux release folder. Such a copy is taken over:
++  // its row moves to the built-in source and keeps its enablement, settings,
++  // secrets, schedules and data, which belong to the plugin id. Only a
++  // verifiable 1ma source qualifies, and never a copy newer than the built-in.
++  const oneMaPluginNames = new Set(ONE_MA_PLUGINS.map((plugin) => plugin.name));
++  const ONE_MA_REPOSITORY = "https://github.com/1ma-ai/1ma";
++  let takeoverSnapshot: Promise<void> | null = null;
++
++  function normalizedRepository(url: string): string {
++    return url
++      .replace(/^git\+/u, "")
++      .replace(/\.git$/u, "")
++      .replace(/\/+$/u, "")
++      .toLowerCase();
++  }
++
++  async function oneMaTakeoverProblem(
++    existing: InstalledPluginRow,
++    name: string,
++    builtinVersion: string,
++  ): Promise<string | null> {
++    const intent = existing.sourceIntent;
++    if (intent.kind === "git") {
++      if (
++        normalizedRepository(intent.url) !== ONE_MA_REPOSITORY ||
++        intent.subdirectory !== `plugins/${name}`
++      ) {
++        return `it is installed from ${existing.source}, not from 1ma's repository`;
++      }
++    } else if (intent.kind === "path") {
++      let repository: unknown = null;
++      try {
++        repository = JSON.parse(
++          await readFile(join(existing.rootDir, ".1ma-release.json"), "utf8"),
++        ).repository;
++      } catch {}
++      if (
++        typeof repository !== "string" ||
++        normalizedRepository(repository) !== ONE_MA_REPOSITORY
++      ) {
++        return `${existing.rootDir} is not a 1ma release install (no .1ma-release.json)`;
++      }
++    } else {
++      return `it is installed from ${existing.source}`;
++    }
++    const installed = semver.valid(existing.version);
++    const shipped = semver.valid(builtinVersion);
++    if (installed === null || shipped === null) {
++      return `its version ${existing.version} cannot be compared with ${builtinVersion}`;
++    }
++    if (semver.gt(installed, shipped)) {
++      return `the installed ${existing.version} is newer than the built-in ${builtinVersion}`;
++    }
++    return null;
++  }
++
++  // One copy of the database before the first takeover: an app version from
++  // before the 1ma plugins were built in deletes their rows and settings at
++  // start, so going back is done by restoring this copy.
++  function snapshotBeforeTakeover(): Promise<void> {
++    takeoverSnapshot ??= (async () => {
++      const directory = join(deps.dataDir, "backups");
++      await mkdir(directory, { recursive: true });
++      const target = join(
++        directory,
++        `before-1ma-builtins-${deps.appVersion}-${Date.now()}.db`,
++      );
++      await deps.db.$client.backup(target);
++      logger.info(`saved the database to ${target} before taking over the 1ma plugins`);
++    })();
++    return takeoverSnapshot;
++  }
++
+   async function reconcileBundled(): Promise<void> {
+     for (const bundled of bundledPlugins) {
+       const source = builtinPluginSource(bundled.name);
+@@ -803,6 +879,37 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+           name: bundled.name,
+         })
+       ) {
++        if (oneMaPluginNames.has(bundled.name)) {
++          const problem = await oneMaTakeoverProblem(
++            existing,
++            bundled.name,
++            manifest.version,
++          );
++          if (problem !== null) {
++            logger.warn(
++              `built-in 1ma plugin ${bundled.name} left the installed copy in place: ${problem}`,
++            );
++            continue;
++          }
++          await snapshotBeforeTakeover();
++          upsertInstalledPlugin(deps.db, {
++            id: manifest.id,
++            source,
++            provenance,
++            sourceIntent: { kind: "builtin", name: bundled.name },
++            exactResolution: { kind: "builtin" },
++            updateState: emptyPluginUpdateState(),
++            activeArtifactId: null,
++            rootDir: bundled.rootDir,
++            version: manifest.version,
++            enabled: existing.enabled,
++            enabledFollowsDefault: existing.enabledFollowsDefault,
++          });
++          logger.info(
++            `built-in 1ma plugin ${bundled.name} took over the copy installed from ${existing.source}`,
++          );
++          continue;
++        }
+         logger.warn(
+           `bundled plugin ${bundled.name} resolved to id "${manifest.id}", but that id is already installed from ${existing.source}; skipping bundled reconciliation`,
+         );
+diff --git a/apps/server/test/services/plugins/plugin-service.test.ts b/apps/server/test/services/plugins/plugin-service.test.ts
+index 5dd296e..ba8004e 100644
+--- a/apps/server/test/services/plugins/plugin-service.test.ts
++++ b/apps/server/test/services/plugins/plugin-service.test.ts
+@@ -3,6 +3,7 @@ import {
+   mkdtemp,
+   mkdir,
+   readFile,
++  readdir,
+   rename,
+   rm,
+   symlink,
+@@ -16,10 +17,13 @@ import {
+   createEnvironment,
+   createProject,
+   getInstalledPlugin,
++  getInstalledPluginRegistration,
++  getPluginSettingsValues,
+   noopNotifier,
+   upsertHost,
+   upsertInstalledPlugin,
+   upsertPluginMarketplace,
++  setPluginSettingsValues,
+   type DbConnection,
+ } from "@bb/db";
+ import { createMigratedConnection } from "@bb/db/testing";
+@@ -230,6 +234,113 @@ describe("plugin service", () => {
+     expect(order).toEqual(["zz-provider", "aa-installed"]);
+   });
+ 
++  describe("a built-in 1ma plugin already installed as a copy", () => {
++    const repository = "https://github.com/1ma-ai/1ma.git";
++
++    async function start(copy: {
++      kind: "git" | "path";
++      repo?: string;
++      version?: string;
++      marker?: boolean;
++    }) {
++      const builtinRoot = await writePlugin(join(workDir, "builtin"), {
++        name: "bb-plugin-1ma-brand",
++        version: "0.4.0",
++        serverSource: "export default function plugin() {}",
++      });
++      const copyRoot = await writePlugin(join(workDir, "copy"), {
++        name: "bb-plugin-1ma-brand",
++        version: copy.version ?? "0.3.1",
++        serverSource: "export default function plugin() {}",
++      });
++      if (copy.marker === true) {
++        await writeFile(
++          join(copyRoot, ".1ma-release.json"),
++          JSON.stringify({ repository: "https://github.com/1ma-ai/1ma", commit: "a".repeat(40) }),
++        );
++      }
++      const git = copy.kind === "git";
++      upsertInstalledPlugin(db, {
++        id: "1ma-brand",
++        source: git ? `git:${copy.repo ?? repository}@^0` : `path:${copyRoot}`,
++        provenance: { kind: "direct" },
++        sourceIntent: git
++          ? {
++              kind: "git",
++              url: copy.repo ?? repository,
++              subdirectory: "plugins/1ma-brand",
++              selector: { kind: "range", range: "^0", tagPrefix: "1ma-brand/", resolvedTag: "1ma-brand/v0.3.1" },
++            }
++          : { kind: "path", canonicalPath: copyRoot },
++        exactResolution: git ? { kind: "git", commit: "b".repeat(40) } : { kind: "path" },
++        updateState: {
++          lastCheckAt: null,
++          availableCompatibleVersion: null,
++          newestIncompatibleVersion: null,
++          statusDetail: null,
++        },
++        activeArtifactId: null,
++        rootDir: copyRoot,
++        version: copy.version ?? "0.3.1",
++        enabled: false,
++        enabledFollowsDefault: false,
++      });
++      setPluginSettingsValues(db, "1ma-brand", { accent: "#ff6600" });
++      const warn = vi.spyOn(logger, "warn");
++      service = createPluginService({
++        aiServices: createAiServiceRegistry(),
++        telemetry: createNoopTelemetryService(),
++        db,
++        hub: {
++          getDaemonSessionIdForHost: () => null,
++          notifyPluginChanged: () => {},
++          onWatchedTargets: () => () => {},
++          notifyPluginSignal: () => 0,
++          notifySystem: () => {},
++        },
++        logger,
++        dataDir: join(workDir, "data"),
++        appVersion: "0.9.0",
++        loadTimeoutMs: 2000,
++        bundledPlugins: [
++          {
++            name: "1ma-brand",
++            pluginId: "1ma-brand",
++            autoInstall: true,
++            defaultEnabled: true,
++            rootDir: builtinRoot,
++          },
++        ],
++      });
++      await service.start();
++      const backups = await readdir(join(workDir, "data", "backups")).catch(() => []);
++      const lines = warn.mock.calls.map((call) => `warn ${String(call[0])}`);
++      return { row: getInstalledPluginRegistration(db, "1ma-brand"), lines, backups };
++    }
++
++    it.each([
++      ["installed from 1ma's repository", { kind: "git" as const }],
++      ["installed by the Linux release script", { kind: "path" as const, marker: true }],
++    ])("takes over a copy %s, keeping its enablement and settings, after a database copy", async (_case, copy) => {
++      const { row, backups } = await start(copy);
++      expect(row).toMatchObject({ source: "builtin:1ma-brand", version: "0.4.0", enabled: false });
++      expect(getPluginSettingsValues(db, "1ma-brand")).toEqual({ accent: "#ff6600" });
++      expect(backups).toEqual([expect.stringMatching(/^before-1ma-builtins-0\.9\.0-\d+\.db$/u)]);
++    });
++
++    it.each([
++      ["from another repository", { kind: "git" as const, repo: "https://github.com/someone/1ma-brand.git" }, "not from 1ma's repository"],
++      ["from a folder the release script did not install", { kind: "path" as const }, "not a 1ma release install"],
++      ["newer than the built-in", { kind: "git" as const, version: "0.5.0" }, "newer than the built-in 0.4.0"],
++    ])("leaves a copy %s in place and says why", async (_case, copy, reason) => {
++      const { row, lines, backups } = await start(copy);
++      expect(row?.source.startsWith("builtin:")).toBe(false);
++      expect(getPluginSettingsValues(db, "1ma-brand")).toEqual({ accent: "#ff6600" });
++      expect(lines.some((line) => line.startsWith("warn built-in 1ma plugin 1ma-brand left the installed copy in place") && line.includes(reason))).toBe(true);
++      expect(backups).toEqual([]);
++    });
++  });
++
+   it.each(["startup", "retry"])(
+     "reports starting while a %s factory is pending",
+     async (mode) => {
