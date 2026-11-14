@@ -280,6 +280,31 @@ importers:
         specifier: ^4.1.0
         version: 4.1.12(@types/node@24.19.2)(jsdom@29.1.1)(vite@8.3.5(@types/node@24.19.2))
 
+  plugins/1ma-superagent:
+    dependencies:
+      zod:
+        specifier: ^4.3.6
+        version: 4.6.7
+    devDependencies:
+      '@get-bb/plugin-sdk':
+        specifier: 0.6.132
+        version: 0.6.132(@types/better-sqlite3@7.6.13)(@types/react@19.3.0)(better-sqlite3@12.11.1)(cron-parser@5.10.2)(hono@4.13.14)(react@19.3.1)
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.2
+      better-sqlite3:
+        specifier: 12.11.1
+        version: 12.11.1
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.0
+        version: 4.1.12(@types/node@24.19.2)(jsdom@29.1.1)(vite@8.3.5(@types/node@24.19.2))
+
   plugins/1ma-theme:
     devDependencies:
       '@get-bb/plugin-sdk':
@@ -359,6 +384,35 @@ packages:
       '@noble/hashes': ^1.8.0 || ^2.0.0
     peerDependenciesMeta:
       '@noble/hashes':
+        optional: true
+
+  '@get-bb/plugin-sdk@0.6.132':
+    resolution: {integrity: sha512-gxRXAikswX3+gKcLODVz8uIl8fPU2M5KYApZOjZ6VX38o3nmP0Iv27FJE7AGybvK6DQSc9USBYmXIVBaEEIgcw==}
+    peerDependencies:
+      '@testing-library/react': ^16.3.2
+      '@types/better-sqlite3': ^7.6.12
+      '@types/react': ^19.0.0
+      better-sqlite3: '>=12'
+      cron-parser: ^5.5.0
+      hono: ^4.11.9
+      react: ^19.0.0
+      react-dom: ^19.0.0
+    peerDependenciesMeta:
+      '@testing-library/react':
+        optional: true
+      '@types/better-sqlite3':
+        optional: true
+      '@types/react':
+        optional: true
+      better-sqlite3:
+        optional: true
+      cron-parser:
+        optional: true
+      hono:
+        optional: true
+      react:
+        optional: true
+      react-dom:
         optional: true
 
   '@get-bb/plugin-sdk@0.6.79':
@@ -830,8 +884,20 @@ packages:
   '@tanstack/query-core@5.105.0':
     resolution: {integrity: sha512-7p56vRmT/z4UJ6sctGIdl5WRUQyUv53IUpUwEKi2g97zMbO7zh8ZsCLffGAvCPBR4xD72e3VXsDyLwXHhoNTMQ==}
 
+  '@tanstack/query-core@5.107.1':
+    resolution: {integrity: sha512-PSyAik11oQBEVOiVy5hjZWHmoUqOXqK1WYy4v55mcxozEfKaQgpUMsgnXhWjuESzSht8JfzqMS1m6M/9CpNgvg==}
+
   '@tanstack/react-query@5.105.0':
     resolution: {integrity: sha512-y+hMuDERvgg6ay1da0V1a6ZC0ZONt7dELxSFkqRZuwm7p1TTZs0MoXrPlBRflIpRoYjvzQVYxycnLImpFLhWrw==}
+    peerDependencies:
+      '@types/react': ^18 || ^19
+      react: ^18 || ^19
+    peerDependenciesMeta:
+      '@types/react':
+        optional: true
+
+  '@tanstack/react-query@5.107.1':
+    resolution: {integrity: sha512-udCOOLp3ZAheUrIHLCe+ZZge6nr2ZUrGMSWcCuXsjY1Bf2JeeE09oxst97PILiCY6N8xo/7bIo3Hvz13zh06FA==}
     peerDependencies:
       '@types/react': ^18 || ^19
       react: ^18 || ^19
@@ -1726,6 +1792,19 @@ snapshots:
 
   '@exodus/bytes@1.16.0': {}
 
+  '@get-bb/plugin-sdk@0.6.132(@types/better-sqlite3@7.6.13)(@types/react@19.3.0)(better-sqlite3@12.11.1)(cron-parser@5.10.2)(hono@4.13.14)(react@19.3.1)':
+    dependencies:
+      '@tanstack/react-query': 5.107.1(@types/react@19.3.0)(react@19.3.1)
+      cross-spawn: 7.0.6
+      zod: 4.6.7
+    optionalDependencies:
+      '@types/better-sqlite3': 7.6.13
+      '@types/react': 19.3.0
+      better-sqlite3: 12.11.1
+      cron-parser: 5.10.2
+      hono: 4.13.14
+      react: 19.3.1
+
   '@get-bb/plugin-sdk@0.6.79(@types/better-sqlite3@7.6.13)(@types/react@19.3.0)(better-sqlite3@12.11.1)(cron-parser@5.10.2)(hono@4.13.14)(react@19.3.1)':
     dependencies:
       '@tanstack/react-query': 5.105.0(@types/react@19.3.0)(react@19.3.1)
@@ -1979,9 +2058,18 @@ snapshots:
 
   '@tanstack/query-core@5.105.0': {}
 
+  '@tanstack/query-core@5.107.1': {}
+
   '@tanstack/react-query@5.105.0(@types/react@19.3.0)(react@19.3.1)':
     dependencies:
       '@tanstack/query-core': 5.105.0
+      react: 19.3.1
+    optionalDependencies:
+      '@types/react': 19.3.0
+
+  '@tanstack/react-query@5.107.1(@types/react@19.3.0)(react@19.3.1)':
+    dependencies:
+      '@tanstack/query-core': 5.107.1
       react: 19.3.1
     optionalDependencies:
       '@types/react': 19.3.0
