@@ -19,6 +19,7 @@ export interface PassDeps {
   readonly policy: () => RepoPolicy;
   readonly mainBotThreadId: () => string | null;
   readonly recordGitHub: (state: GitHubPassState) => Promise<void>;
+  readonly afterFullPass: (now: number) => void;
   readonly now: () => number;
   readonly signal: AbortSignal;
 }
@@ -55,4 +56,5 @@ export async function runPass(deps: PassDeps, scope: PassScope): Promise<void> {
     signal: deps.signal,
   });
   await deps.recordGitHub({ at: now, problems: problems.slice(0, 20) });
+  deps.afterFullPass(now);
 }

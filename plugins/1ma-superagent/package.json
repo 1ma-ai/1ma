@@ -17,6 +17,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
     "better-sqlite3": "12.11.1",
     "typescript": "^5.9.0",
     "vitest": "^4.1.0"
@@ -32,6 +33,7 @@
       "icon": "Workflow"
     },
     "server": "./server.ts",
-    "host": "./host.ts"
+    "host": "./host.ts",
+    "app": "./app.tsx"
   }
 }

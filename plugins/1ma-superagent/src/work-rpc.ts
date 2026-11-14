@@ -2,6 +2,7 @@ import { defineRpcContract, experimental_PluginRpcRefusal } from "@get-bb/plugin
 import { z } from "zod";
 import type { GitHubPassState } from "./pass.js";
 import type { PrLinkRow, PrStore } from "./pr-store.js";
+import type { QuestionStore } from "./questions.js";
 import type { ServerRow, Store, WorkRow } from "./store.js";
 
 const MAX_PAGE = 200;
@@ -89,7 +90,18 @@ export const workRpcContract = defineRpcContract({
   },
   "work.v1.waiting": {
     input: z.null(),
-    output: z.object({ works: z.array(workSchema) }),
+    output: z.object({
+      works: z.array(workSchema),
+      questions: z.array(
+        z.object({
+          id: z.string(),
+          kind: z.string(),
+          title: z.string(),
+          state: z.enum(["queued", "open"]),
+          createdAt: z.number(),
+        }),
+      ),
+    }),
   },
 });
 
@@ -145,6 +157,7 @@ function serverDto(row: ServerRow): z.infer<typeof serverSchema> {
 export function workRpcHandlers(
   store: Store,
   prStore: PrStore,
+  questions: QuestionStore,
   github: () => Promise<GitHubPassState | null>,
 ) {
   const toDto = (row: WorkRow) => toWorkDto(row, prStore);
@@ -180,7 +193,16 @@ export function workRpcHandlers(
       return { work: toDto(row), server: server === null ? null : serverDto(server) };
     },
     "work.v1.waiting"() {
-      return { works: store.waitingWorks().map(toDto) };
+      return {
+        works: store.waitingWorks().map(toDto),
+        questions: questions.waiting().map((question) => ({
+          id: question.id,
+          kind: question.kind,
+          title: question.card.title,
+          state: question.state === "open" ? ("open" as const) : ("queued" as const),
+          createdAt: question.createdAt,
+        })),
+      };
     },
     async "work.v1.pullRequests"(input: { unlinkedOnly?: boolean }) {
       const links = prStore

@@ -21,7 +21,10 @@ export interface BotReadSource {
     }>;
     github: { at: number; problems: string[] } | null;
   }>;
-  waiting(): Promise<{ works: WorkDto[] }>;
+  waiting(): Promise<{
+    works: WorkDto[];
+    questions: Array<{ kind: string; title: string; state: string }>;
+  }>;
   pullRequests(): Promise<{ pullRequests: PullRequestDto[] }>;
 }
 
@@ -102,6 +105,11 @@ export function registerBotReadTools(
         works: list.works.slice(0, OVERVIEW_LIMIT).map(botWork),
         moreWorks: Math.max(0, list.works.length - OVERVIEW_LIMIT),
         waiting: waiting.works.map((work) => `${work.source.serverId}:${work.source.threadId}`),
+        questionsForOwner: waiting.questions.map((question) => ({
+          kind: question.kind,
+          title: question.title,
+          state: question.state,
+        })),
         unlinkedPullRequests: pulls.pullRequests
           .filter((pr) => pr.link.threadId === null && pr.state === "open")
           .map(botPullRequest),

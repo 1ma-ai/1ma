@@ -67,4 +67,23 @@ export const MIGRATIONS: string[] = [
     repo TEXT PRIMARY KEY,
     pulls_seen_until INTEGER NOT NULL
   )`,
+  `CREATE TABLE questions (
+    id TEXT PRIMARY KEY,
+    key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    chat_thread_id TEXT,
+    subject TEXT NOT NULL,
+    expected_version TEXT NOT NULL,
+    card TEXT NOT NULL,
+    priority INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    token TEXT,
+    answer TEXT,
+    remind_at INTEGER,
+    created_at INTEGER NOT NULL,
+    opened_at INTEGER,
+    answered_at INTEGER
+  )`,
+  `CREATE UNIQUE INDEX questions_live_key ON questions (key) WHERE state IN ('queued', 'open')`,
+  `ALTER TABLE pr_links ADD COLUMN unlinked_since INTEGER`,
 ];

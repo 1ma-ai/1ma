@@ -9,7 +9,10 @@ import { createRemoteHttpExecutor } from "./src/executors/remote-http.js";
 import type { Executor } from "./src/observation.js";
 import { type GitHubPassState, runPass } from "./src/pass.js";
 import { FULL_SCOPE, PassRunner, threadScope } from "./src/pass-runner.js";
+import { QuestionDispatcher } from "./src/dispatcher.js";
+import { UNLINKED_KIND, askAboutUnlinked, unlinkedKind } from "./src/kinds/unlinked-pr.js";
 import { PrStore } from "./src/pr-store.js";
+import { type QuestionKind, QuestionStore } from "./src/questions.js";
 import { repoPolicy } from "./src/repos.js";
 import { MIGRATIONS } from "./src/schema.js";
 import { type Config, defineSettings, reposProblem, toConfig } from "./src/settings.js";
@@ -69,14 +72,26 @@ export function createPlugin(options: SuperagentOptions = {}) {
     const policy = () => repoPolicy(config.repos, config.excludedRepos);
     const gh = (options.gh ?? hostGh)(bb);
     const github: GitHubReader = createGitHubReader(gh);
+    const questions = new QuestionStore(db);
+    const kinds = new Map<string, QuestionKind>([[UNLINKED_KIND, unlinkedKind(prStore)]]);
     const handlers = workRpcHandlers(
       store,
       prStore,
+      questions,
       async () => (await bb.storage.kv.get<GitHubPassState>(GITHUB_STATE_KEY)) ?? null,
     );
     bb.rpc.register(workRpcContract, handlers);
 
     const lifecycle = new AbortController();
+    const dispatcher = new QuestionDispatcher({
+      bb,
+      store: questions,
+      kinds,
+      chat: () => (config.role === "control" ? config.mainBotThreadId : null),
+      now: Date.now,
+      onAnswered: () => void runner.request(FULL_SCOPE),
+      signal: lifecycle.signal,
+    });
     const executorsFor = options.executors ?? defaultExecutors;
     const runner = new PassRunner(
       (scope) =>
@@ -89,6 +104,10 @@ export function createPlugin(options: SuperagentOptions = {}) {
             policy,
             mainBotThreadId: () => config.mainBotThreadId,
             recordGitHub: (state) => bb.storage.kv.set(GITHUB_STATE_KEY, state),
+            afterFullPass: (now) => {
+              askAboutUnlinked(prStore, questions, policy(), now);
+              dispatcher.dispatch();
+            },
             now: Date.now,
             signal: lifecycle.signal,
           },

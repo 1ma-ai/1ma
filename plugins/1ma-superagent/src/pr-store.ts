@@ -17,6 +17,7 @@ export interface PrLinkRow {
   claimProblem: string | null;
   branchHint: string | null;
   provenanceGap: boolean;
+  unlinkedSince: number | null;
   observedAt: number;
 }
 
@@ -35,6 +36,7 @@ interface RawLink {
   claim_problem: string | null;
   branch_hint: string | null;
   provenance_gap: number;
+  unlinked_since: number | null;
   observed_at: number;
 }
 
@@ -67,6 +69,7 @@ function toLink(raw: RawLink): PrLinkRow {
     claimProblem: raw.claim_problem,
     branchHint: raw.branch_hint,
     provenanceGap: raw.provenance_gap === 1,
+    unlinkedSince: raw.unlinked_since,
     observedAt: raw.observed_at,
   };
 }
@@ -143,14 +146,15 @@ export class PrStore {
       .prepare(
         `INSERT INTO pr_links (repo, number, head_repo, head_ref, head_sha, author, pr_state, pr_updated_at,
            delivery_server_id, delivery_thread_id, link_kind, claim_problem, claim_checked_at, branch_hint,
-           observed_at)
+           observed_at, unlinked_since)
          VALUES (@repo, @number, @headRepo, @headRef, @headSha, @author, @state, @updatedAt, @server, @thread,
-           @kind, @problem, @now, @hint, @now)
+           @kind, @problem, @now, @hint, @now, CASE WHEN @thread IS NULL THEN @now ELSE NULL END)
          ON CONFLICT (repo, number) DO UPDATE SET
            head_repo = @headRepo, head_ref = @headRef, head_sha = @headSha, author = @author,
            pr_state = @state, pr_updated_at = @updatedAt, delivery_server_id = @server,
            delivery_thread_id = @thread, link_kind = @kind, claim_problem = @problem,
-           claim_checked_at = @now, branch_hint = @hint, observed_at = @now`,
+           claim_checked_at = @now, branch_hint = @hint, observed_at = @now,
+           unlinked_since = CASE WHEN @thread IS NULL THEN COALESCE(pr_links.unlinked_since, @now) ELSE NULL END`,
       )
       .run({
         repo: pull.repo,
@@ -174,7 +178,7 @@ export class PrStore {
     const changes = this.#db
       .prepare(
         `UPDATE pr_links SET link_kind = 'manual', delivery_server_id = ?, delivery_thread_id = ?,
-           claim_problem = NULL WHERE repo = ? AND number = ?`,
+           claim_problem = NULL, unlinked_since = NULL WHERE repo = ? AND number = ?`,
       )
       .run(serverId, threadId, repo, number).changes;
     if (changes === 1) {
