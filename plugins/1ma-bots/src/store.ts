@@ -73,6 +73,12 @@ export const MIGRATIONS = [
     detail TEXT NOT NULL DEFAULT '{}'
   );
   CREATE INDEX bot_events_by_bot ON bot_events(bot_id, id);
+  CREATE TABLE pending_letters (
+    token TEXT PRIMARY KEY,
+    chain_id TEXT NOT NULL REFERENCES chains(id),
+    to_thread TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
   CREATE TABLE pending_starts (
     token TEXT PRIMARY KEY,
     bot_id TEXT NOT NULL,
@@ -358,6 +364,7 @@ export class BotStore {
     this.transaction(() => {
       this.unbind(threadId);
       this.db.prepare("DELETE FROM thread_chains WHERE thread_id = ?").run(threadId);
+      this.db.prepare("DELETE FROM pending_letters WHERE to_thread = ?").run(threadId);
     });
   }
 

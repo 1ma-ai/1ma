@@ -17,7 +17,7 @@ import {
 } from "./src/contract.js";
 import { BotsError } from "./src/errors.js";
 import { botInstructions } from "./src/instructions.js";
-import { routeLetter, startOwnerExchange } from "./src/letters.js";
+import { acceptDelivery, letterTokens, routeLetter, startOwnerExchange } from "./src/letters.js";
 import {
   CHAIN_LETTERS_DEFAULT,
   HOUR_MS,
@@ -282,6 +282,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
                 fromThreadId: ctx.threadId,
                 number: route.letterNumber,
                 limit: limits.chainLetters,
+                token: route.token,
                 text: input.text,
               }),
             },
@@ -303,15 +304,43 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     },
   });
 
+  // A message is accepted into a turn either through the dispatch hook or,
+  // when the owner presses Send now on a queued row (which skips the hook),
+  // through message.dispatched. Both paths do the same, and repeating it is
+  // harmless: tokens are claimed once and an owner exchange starts empty.
+  const accepted = (args: {
+    threadId: string;
+    fromOwner: boolean;
+    texts: readonly string[];
+    joinsRunningTurn: boolean;
+  }) => {
+    if (store.botOfThread(args.threadId) === null) return;
+    if (args.fromOwner) startOwnerExchange(store, args.threadId, now());
+    acceptDelivery(store, args.threadId, letterTokens(args.texts), args.joinsRunningTurn);
+    reopen(args.threadId);
+  };
+  const textsOf = (blocks: ReadonlyArray<{ type: string; text?: string }>) =>
+    blocks.flatMap((block) =>
+      block.type === "text" && block.text !== undefined ? [block.text] : [],
+    );
+
   bb.experimental_hooks.on("message.dispatch", (ctx) => {
-    const threadId = ctx.thread.id;
-    if (store.botOfThread(threadId) !== null) {
-      if (ctx.initiator === "user" && ctx.senderThreadId === null)
-        startOwnerExchange(store, threadId, now());
-      reopen(threadId);
-    }
+    accepted({
+      threadId: ctx.thread.id,
+      fromOwner: ctx.initiator === "user" && ctx.senderThreadId === null,
+      texts: [ctx.input.text, ...textsOf(ctx.input.blocks)],
+      joinsRunningTurn: ctx.attempt === "join-turn",
+    });
     return { action: "proceed" };
   });
+  bb.events.on("message.dispatched", ({ entry }) =>
+    accepted({
+      threadId: entry.threadId,
+      fromOwner: entry.initiator === "user" && entry.senderThreadId === null,
+      texts: textsOf(entry.content),
+      joinsRunningTurn: false,
+    }),
+  );
 
   bb.events.on("interaction.pending", ({ thread }) => reopen(thread.id));
   bb.events.on("thread.failed", ({ thread }) => reopen(thread.id));
@@ -435,9 +464,16 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       changed();
       return { ok: true as const };
     },
-    "bots.v1.setCompleted": ({ threadId, completed }) => {
+    "bots.v1.setCompleted": async ({ threadId, completed }) => {
       if (store.botOfThread(threadId) === null) {
         throw new BotsError("not_found", agentText.notABot);
+      }
+      if (completed) {
+        const pending = await bb.sdk.threads.interactions.list({ threadId });
+        const thread = await bb.sdk.threads.get({ threadId });
+        if (pending.length > 0 || thread.status === "error") {
+          throw new BotsError("conflict", agentText.needsOwner);
+        }
       }
       store.setCompleted(threadId, completed);
       changed();
