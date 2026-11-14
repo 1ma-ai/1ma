@@ -12,6 +12,16 @@ const PLUGIN = "1ma-superagent";
 const ghFixtures = path.join(root, "github.json");
 const fakeGhDir = path.resolve(import.meta.dirname, "fake-gh");
 const REMOTE = "https://github.com/example/app.git";
+const journal = path.join(root, "journal.jsonl");
+const HEAD_A = "a".repeat(40);
+const HEAD_B = "b".repeat(40);
+const HEAD_C = "c".repeat(40);
+let github = {};
+
+function setGithub(routes) {
+  github = { ...github, ...routes };
+  writeFileSync(ghFixtures, JSON.stringify(github));
+}
 const REPOS = JSON.stringify([
   { repo: "example/app", accounts: { mac: ["mac-bot"], linux: ["linux-bot"] } },
 ]);
@@ -33,6 +43,10 @@ function claim(number, branch) {
 }
 
 writeFileSync(ghFixtures, JSON.stringify({}));
+writeFileSync(
+  journal,
+  `${JSON.stringify({ author: "release-train", repo: "example/app", attempt: "t1", event: "merged", final_sha: HEAD_B })}\n`,
+);
 
 const control = new Server({
   name: "control",
@@ -92,6 +106,9 @@ describe("1ma-superagent on two 1ma servers", () => {
     );
     chats.control = await spawnPendingChat(control, controlProject, "control chat");
     chats.executor = await spawnPendingChat(executor, executorProject, "executor chat");
+    chats.bot = await spawnPendingChat(control, controlProject, "main bot");
+    control.bb(["plugin", "config", PLUGIN, "set", "mainBotThreadId", chats.bot]);
+    control.bb(["plugin", "config", PLUGIN, "set", "trainJournalPath", journal]);
   });
 
   after(async () => {
@@ -112,17 +129,14 @@ describe("1ma-superagent on two 1ma servers", () => {
   });
 
   it("links a PR claimed by a chat on the executor server and refuses a claim from the wrong server", async () => {
-    writeFileSync(
-      ghFixtures,
-      JSON.stringify({
-        "/repos/example/app/pulls": [
-          apiPull(7, "linux-bot", "feature/seven"),
-          apiPull(8, "linux-bot", "feature/eight"),
-        ],
-        "/repos/example/app/pulls/7": apiPull(7, "linux-bot", "feature/seven"),
-        "/repos/example/app/pulls/8": apiPull(8, "linux-bot", "feature/eight"),
-      }),
-    );
+    setGithub({
+      "/repos/example/app/pulls": [
+        apiPull(7, "linux-bot", "feature/seven"),
+        apiPull(8, "linux-bot", "feature/eight"),
+      ],
+      "/repos/example/app/pulls/7": apiPull(7, "linux-bot", "feature/seven"),
+      "/repos/example/app/pulls/8": apiPull(8, "linux-bot", "feature/eight"),
+    });
     await executor.api("PATCH", `/threads/${chats.executor}/plugin-metadata`, {
       pluginId: PLUGIN,
       set: claim(7, "feature/seven"),
@@ -154,6 +168,44 @@ describe("1ma-superagent on two 1ma servers", () => {
       work.pullRequests.map((pr) => pr.number),
       [7],
     );
+  });
+
+  it("asks the owner in the bot chat about a commit in main the train did not write, without a model turn", async () => {
+    setGithub({ "/repos/example/app/commits": [{ sha: HEAD_A }] });
+    await waitFor("main baseline", 180_000, async () => {
+      const list = await control.rpc(PLUGIN, "work.v1.list", {});
+      return list.releases.some((row) => row.mainHead === HEAD_A);
+    });
+    setGithub({ "/repos/example/app/commits": [{ sha: HEAD_B }] });
+    await waitFor("train merge seen", 180_000, async () => {
+      const list = await control.rpc(PLUGIN, "work.v1.list", {});
+      return list.releases.some((row) => row.mainHead === HEAD_B && row.state === "ok");
+    });
+    setGithub({ "/repos/example/app/commits": [{ sha: HEAD_C }] });
+    const card = await waitFor("bypass card in the bot chat", 180_000, async () => {
+      const pending = await control.api("GET", `/threads/${chats.bot}/interactions`);
+      return pending.find(
+        (interaction) =>
+          interaction.status === "pending" &&
+          interaction.payload?.data?.title === "Коммит в main мимо поезда: example/app",
+      );
+    });
+    assert.equal(card.origin.pluginId, PLUGIN);
+    const option = card.payload.data.options[0];
+    assert.equal(option.recommended, true);
+    const answer = { value: { token: card.payload.data.token, optionId: option.id } };
+    await control.api("POST", `/threads/${chats.bot}/interactions/${card.id}/respond`, answer);
+    await assert.rejects(
+      control.api("POST", `/threads/${chats.bot}/interactions/${card.id}/respond`, answer),
+      /→ (409|400)/,
+    );
+    const waiting = await waitFor("question answered", 60_000, async () => {
+      const result = await control.rpc(PLUGIN, "work.v1.waiting", null);
+      return result.questions.every((question) => question.kind !== "main_bypass") ? result : null;
+    });
+    assert.ok(waiting);
+    const bot = await control.api("GET", `/threads/${chats.bot}`);
+    assert.equal(bot.status, "pending", "answering a card must not start the bot's model");
   });
 
   it("shows the executor server as not seen while it is down", async () => {
