@@ -120,6 +120,21 @@ async function waitCard(label, match, timeout = PASS) {
   });
 }
 
+async function clearCards() {
+  const clear = async (round) => {
+    if (round >= 10) return;
+    const [card] = await pendingCards();
+    if (card === undefined) return;
+    const ids = card.payload.data.options.map((option) => option.id);
+    const choice = ["no", "ok", "wait"].find((id) => ids.includes(id));
+    if (choice === undefined) return;
+    await respond(card, choice).catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    await clear(round + 1);
+  };
+  await clear(0);
+}
+
 async function spawnedOnExecutor() {
   const threads = await executor.api(
     "GET",
@@ -275,6 +290,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
   });
 
   it("shows the executor's result once as a card, starts no bot turn and acts on nothing in it", async () => {
+    await clearCards();
     const turnsBefore = await turnsDone(control, ids.bot);
     const actionsBefore = await knownActions();
     const card = await waitCard(
@@ -295,6 +311,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
   });
 
   it("finds a chat whose creation answer was lost and creates no second one", async () => {
+    await clearCards();
     proxy.setMode({ kind: "drop-response", once: true });
     const actionId = await proposeAndConfirm("[stub:reply lost answer task]", "lost answer");
     const bound = await waitFor("lost-answer action bound", PASS, async () => {
@@ -309,6 +326,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
   });
 
   it("does not retry a request that is applied after the first empty read, and binds it later", async () => {
+    await clearCards();
     proxy.setMode({ kind: "forward-later", once: true, delayMs: 75_000 });
     const actionId = await proposeAndConfirm("[stub:reply late task]", "late task");
     await waitFor("unknown", PASS, async () => (await action(actionId))?.state === "unknown");
@@ -332,6 +350,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
   });
 
   it("binds neither of two chats carrying one label, asks the owner, and keeps the card through a bot turn", async () => {
+    await clearCards();
     proxy.setMode({ kind: "swallow", once: true });
     const actionId = await proposeAndConfirm("[stub:reply swallowed task]", "two chats");
     await waitFor("unknown", PASS, async () => (await action(actionId))?.state === "unknown");
@@ -366,6 +385,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
   });
 
   it("keeps one card open at a time and counts the others", async () => {
+    await clearCards();
     const known = await knownActions();
     await sayToBot(startCall("[stub:reply queued one]", "queued one"));
     await sayToBot(startCall("[stub:reply queued two]", "queued two"));
@@ -385,6 +405,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
   });
 
   it("runs an action exactly once when the control server restarts between the answer and the send", async () => {
+    await clearCards();
     proxy.setMode({ kind: "delay", once: true, delayMs: 60_000 });
     const actionId = await proposeAndConfirm("[stub:reply restart task]", "restart task");
     await waitFor("spawn request in flight", 60_000, async () =>
@@ -405,6 +426,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
   });
 
   it("shows the machine as the reason a new chat waits behind the executor's concurrency limit", async () => {
+    await clearCards();
     executor.bb(["concurrency-limit", "global", "0"]);
     const actionId = await proposeAndConfirm("[stub:reply held task]", "held task");
     const bound = await waitFor("held action bound", PASS, async () => {
