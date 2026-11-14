@@ -1,0 +1,52 @@
+name: Superagent end-to-end
+
+on:
+  pull_request:
+    paths:
+      - "plugins/1ma-superagent/**"
+      - "e2e/superagent/**"
+      - ".github/workflows/superagent-e2e.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: superagent-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Two 1ma servers with the superagent plugin
+    if: github.event_name != 'pull_request' || github.head_ref == 'superagent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Choose the scratch directory
+        run: echo "E2E_ROOT=$RUNNER_TEMP/superagent-e2e" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build the plugin
+        run: pnpm --filter bb-plugin-1ma-superagent run build
+      - name: Install the pinned 1ma server package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node e2e/superagent/install-server.mjs
+      - name: Run the end-to-end tests
+        run: node --test --test-concurrency=1 --test-timeout=900000 e2e/superagent/superagent.test.mjs
+      - name: Server logs
+        if: always()
+        run: |
+          for log in "$E2E_ROOT"/*.log; do
+            [ -f "$log" ] || continue
+            echo "::group::$log"
+            tail -n 300 "$log"
+            echo "::endgroup::"
+          done

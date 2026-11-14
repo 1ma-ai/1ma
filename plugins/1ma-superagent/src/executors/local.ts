@@ -1,0 +1,151 @@
+import type { PluginBbSdk } from "@get-bb/plugin-sdk";
+import type {
+  EnvironmentSummary,
+  Executor,
+  ObservationResult,
+  ProjectSummary,
+  ServerSnapshot,
+  ThreadSummary,
+} from "../observation.js";
+import { RESULT_TEXT_LIMIT, outcomeFromTurn } from "../observation.js";
+import { type PagingLimits, DEFAULT_LIMITS, collectOnce, collectPages } from "./paging.js";
+import { METADATA_BATCH, chunks, combineSnapshot, toThreadSummary } from "./snapshot.js";
+import { PLUGIN_ID } from "./remote-http.js";
+
+export function createLocalExecutor(
+  sdk: PluginBbSdk,
+  limits: PagingLimits = DEFAULT_LIMITS,
+  now: () => number = Date.now,
+): Executor {
+  return {
+    serverId: "mac",
+    async snapshot(signal): Promise<ObservationResult<ServerSnapshot>> {
+      const observedAt = now();
+      const [threads, environments, projects] = await Promise.all([
+        collectPages<ThreadSummary>(
+          async (offset, limit, pageSignal) =>
+            (
+              await sdk.threads.list({
+                archived: false,
+                includeHidden: true,
+                limit,
+                offset,
+                signal: pageSignal,
+              })
+            ).map(toThreadSummary),
+          limits,
+          signal,
+        ),
+        collectPages<EnvironmentSummary>(
+          async (offset, limit, pageSignal) =>
+            (await sdk.environments.list({ limit, offset, signal: pageSignal })).map((env) => ({
+              environmentId: env.id,
+              projectId: env.projectId,
+              branch: env.branchName,
+            })),
+          limits,
+          signal,
+        ),
+        collectOnce<ProjectSummary>(
+          async (pageSignal) =>
+            (await sdk.projects.list({ signal: pageSignal })).map((project) => ({
+              projectId: project.id,
+              gitRemoteUrl: project.gitRemoteUrl,
+            })),
+          limits,
+          signal,
+        ),
+      ]);
+      return combineSnapshot(observedAt, threads, environments, projects);
+    },
+    async readMetadata(threadIds, signal) {
+      const rows = await Promise.all(
+        chunks(threadIds, METADATA_BATCH).map(
+          async (batch) =>
+            (
+              await sdk.threads.experimental_listPluginMetadata({
+                threadIds: [...batch],
+                signal: AbortSignal.any([signal, AbortSignal.timeout(limits.pageTimeoutMs)]),
+              })
+            ).threads,
+        ),
+      );
+      return rows.flat().map((row) => ({ threadId: row.threadId, metadata: row.metadata }));
+    },
+    async projectRemote(projectId, signal) {
+      return (await sdk.projects.get({ projectId, signal })).gitRemoteUrl;
+    },
+    async spawn(request, signal) {
+      const thread = await sdk.threads.spawn({
+        projectId: request.projectId,
+        providerId: request.providerId,
+        model: request.model,
+        title: request.title,
+        prompt: request.prompt,
+        environment: { type: "project-default" },
+        pluginMetadata: { spawn: { ...request.label } },
+      });
+      void signal;
+      return { threadId: thread.id };
+    },
+    async findSpawned(signal) {
+      const listed = await collectPages(
+        async (offset, limit, pageSignal) =>
+          sdk.threads.list({
+            originPluginId: PLUGIN_ID,
+            includeHidden: true,
+            limit,
+            offset,
+            signal: pageSignal,
+          }),
+        limits,
+        signal,
+      );
+      if (listed.completeness !== "complete")
+        throw new Error(`spawned chats: ${listed.error ?? listed.completeness}`);
+      return this.readMetadata(
+        listed.items.map((thread) => thread.id),
+        signal,
+      );
+    },
+    async clearQueueAndStop(threadId, signal) {
+      const queued = await sdk.threads.queuedMessages.list({ threadId, signal });
+      await Promise.all(
+        queued.map((message) =>
+          sdk.threads.queuedMessages.delete({ threadId, queuedMessageId: message.id }),
+        ),
+      );
+      await sdk.threads.stop({ threadId });
+    },
+    async taskOutcome(threadId, signal) {
+      const question = (await sdk.threads.interactions.list({ threadId, signal })).find(
+        (interaction) => interaction.status === "pending",
+      );
+      if (question !== undefined) return { kind: "question", key: question.id, text: null };
+      const [turn] = await sdk.threads.events.list({
+        threadId,
+        types: ["turn/completed"],
+        order: "desc",
+        limit: "1",
+        signal,
+      });
+      if (turn === undefined || turn.type !== "turn/completed") return null;
+      const kind = outcomeFromTurn(turn.data.status);
+      if (kind === null) return null;
+      const output =
+        kind === "done" ? (await sdk.threads.output({ threadId, signal })).output : null;
+      return {
+        kind,
+        key: turn.id,
+        text: output === null ? null : output.slice(0, RESULT_TEXT_LIMIT),
+      };
+    },
+    async threadModel(threadId, signal) {
+      const options = await sdk.threads.defaultExecutionOptions({
+        threadId,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(limits.pageTimeoutMs)]),
+      });
+      return options?.model ?? null;
+    },
+  };
+}
