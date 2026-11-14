@@ -22,6 +22,10 @@
     {
       "name": "1ma-auto-updates",
       "source": "./plugins/1ma-auto-updates"
+    },
+    {
+      "name": "1ma-bots",
+      "source": "./plugins/1ma-bots"
     }
   ]
 }
