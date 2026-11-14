@@ -14,8 +14,8 @@ server has not been seen.
 
 ## Settings
 
-- **Server role**: `control` keeps the record; `executor` only lets its chats
-  claim pull requests.
+- **Server role**: `executor` by default, which only lets its chats claim
+  pull requests; choose `control` on the one server that keeps the record.
 - **Executor server URL**: the other 1ma server, empty while there is none.
 - **Main bot chat**: the pinned chat that acts as the main bot.
 - **Watch servers every minute**: on by default.

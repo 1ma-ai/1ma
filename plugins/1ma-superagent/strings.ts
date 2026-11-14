@@ -1,7 +1,7 @@
 export const strings = {
   roleLabel: "Server role",
   roleDescription:
-    "control: this server keeps the work record and watches both servers. executor: this server only lets its chats claim pull requests.",
+    "control: this server keeps the work record and watches both servers. executor (the default): this server only lets its chats claim pull requests. Choose control on exactly one server.",
   linuxServerUrlLabel: "Executor server URL",
   linuxServerUrlDescription:
     "Address of the other 1ma server, for example http://192.0.2.10:38886. Leave empty while there is no second server.",

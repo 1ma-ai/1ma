@@ -39,7 +39,7 @@ describe("1ma-superagent on two 1ma servers", () => {
     executor.start();
     await Promise.all([control.waitReady(), executor.waitReady()]);
     for (const server of [control, executor]) server.bb(["plugin", "install", pluginDir, "--yes"]);
-    executor.bb(["plugin", "config", PLUGIN, "set", "role", "executor"]);
+    control.bb(["plugin", "config", PLUGIN, "set", "role", "control"]);
     control.bb(["plugin", "config", PLUGIN, "set", "linuxServerUrl", executor.url]);
     const controlProject = await control.createProject(
       "control-app",

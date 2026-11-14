@@ -31,7 +31,7 @@ export function defineSettings(bb: BbPluginApi) {
       label: strings.roleLabel,
       description: strings.roleDescription,
       options: [...ROLES],
-      default: "control",
+      default: "executor",
     },
     linuxServerUrl: {
       type: "string",
@@ -69,7 +69,7 @@ export function toConfig(values: {
   mainBotThreadId: string;
   passEnabled: boolean;
 }): Config {
-  const role: Role = values.role === "executor" ? "executor" : "control";
+  const role: Role = values.role === "control" ? "control" : "executor";
   return {
     role,
     linuxServerUrl: values.linuxServerUrl === "" ? null : values.linuxServerUrl.replace(/\/$/, ""),

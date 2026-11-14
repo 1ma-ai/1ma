@@ -2,7 +2,7 @@ import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/tes
 import { describe, expect, it } from "vitest";
 import type { Executor, ServerId } from "./src/observation.js";
 import { snapshot, threadSummary } from "./src/test-helpers.js";
-import { PASS_SCHEDULE_NAME, createPlugin } from "./server.js";
+import { PASS_SCHEDULE_NAME, STARTUP_SERVICE_NAME, createPlugin } from "./server.js";
 
 function fakeExecutor(serverId: ServerId, threads: string[], calls: ServerId[]): Executor {
   return {
@@ -16,7 +16,10 @@ function fakeExecutor(serverId: ServerId, threads: string[], calls: ServerId[]):
 
 async function setup(settings: Record<string, string | boolean> = {}) {
   const calls: ServerId[] = [];
-  const { bb, harness } = createFakePluginHost({ pluginId: "1ma-superagent", settings });
+  const { bb, harness } = createFakePluginHost({
+    pluginId: "1ma-superagent",
+    settings: { role: "control", ...settings },
+  });
   await createPlugin({
     executors: () => [
       fakeExecutor("mac", ["thr_mac"], calls),
@@ -56,6 +59,26 @@ describe("1ma-superagent server", () => {
     await harness.lifecycle.dispose();
   });
 
+  it("runs no pass, not even the startup one, until the server is set to control", async () => {
+    const calls: ServerId[] = [];
+    const { bb, harness } = createFakePluginHost({ pluginId: "1ma-superagent" });
+    await createPlugin({ executors: () => [fakeExecutor("mac", ["thr_mac"], calls)] })(bb);
+    const startup = harness.behavior.runService(STARTUP_SERVICE_NAME);
+    await harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    await harness.behavior.emitThreadEvent("thread.created", {
+      thread: makeThreadResponse({ id: "thr_mac" }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toEqual([]);
+    expect(await harness.behavior.callRpc("work.v1.list", {})).toMatchObject({
+      works: [],
+      servers: [],
+    });
+    startup.controller.abort();
+    await startup.done;
+    await harness.lifecycle.dispose();
+  });
+
   it("does not run the scheduled pass when watching is turned off", async () => {
     const { harness, calls } = await setup({ passEnabled: false });
     await harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
@@ -90,7 +113,7 @@ describe("default executors", () => {
   it("watches this server through the SDK and marks an unreachable second server as not seen", async () => {
     const { bb, harness } = createFakePluginHost({
       pluginId: "1ma-superagent",
-      settings: { linuxServerUrl: "http://127.0.0.1:9" },
+      settings: { role: "control", linuxServerUrl: "http://127.0.0.1:9" },
       sdk: {
         threads: { list: async () => [makeThreadResponse({ id: "thr_local" })] },
         environments: { list: async () => [] },
