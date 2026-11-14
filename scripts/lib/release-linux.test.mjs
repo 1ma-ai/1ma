@@ -151,6 +151,43 @@ describe("deploying", () => {
     assert.deepEqual(fake.calls, []);
   });
 
+  test("a plugin built into the app is never touched, not even with --replace-managed", () => {
+    const lines = [];
+    const fake = fakeBb({
+      sources: { "1ma-theme": "builtin:1ma-theme", "1ma-brand": onServer["1ma-brand"] },
+    });
+    const blocked = deployPlugins({
+      entries,
+      replaceManaged: true,
+      bb: fake.bb,
+      log: (line) => lines.push(line),
+    });
+    assert.deepEqual(blocked, []);
+    assert.deepEqual(fake.calls, ["install /release/plugins/1ma-brand"]);
+    assert.ok(lines.includes("1ma-theme: built into the app, comes with its updates; left alone"));
+  });
+
+  test("each install from the release is marked with the repository and commit first", () => {
+    const marked = [];
+    const fake = fakeBb({ sources: onServer });
+    deployPlugins({
+      entries,
+      replaceManaged: false,
+      bb: fake.bb,
+      log: () => {},
+      mark: (directory) => {
+        marked.push(directory);
+        fake.calls.push(`mark ${directory}`);
+      },
+    });
+    assert.deepEqual(fake.calls, [
+      "mark /release/plugins/1ma-theme",
+      "install /release/plugins/1ma-theme",
+      "mark /release/plugins/1ma-brand",
+      "install /release/plugins/1ma-brand",
+    ]);
+  });
+
   test("managed installs are left alone without --replace-managed", () => {
     const fake = fakeBb({
       sources: {
