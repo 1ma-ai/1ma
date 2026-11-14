@@ -1,4 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { createLocalExecutor } from "./src/executors/local.js";
+import { createRemoteHttpExecutor } from "./src/executors/remote-http.js";
 import type { Executor } from "./src/observation.js";
 import { runPass } from "./src/pass.js";
 import { FULL_SCOPE, PassRunner, threadScope } from "./src/pass-runner.js";
@@ -15,6 +17,12 @@ export interface SuperagentOptions {
   readonly executors?: (config: Config, bb: BbPluginApi) => readonly Executor[];
 }
 
+export function defaultExecutors(config: Config, bb: BbPluginApi): readonly Executor[] {
+  const local = createLocalExecutor(bb.sdk);
+  if (config.linuxServerUrl === null) return [local];
+  return [local, createRemoteHttpExecutor({ serverId: "linux", baseUrl: config.linuxServerUrl })];
+}
+
 export function createPlugin(options: SuperagentOptions = {}) {
   return async function plugin(bb: BbPluginApi): Promise<void> {
     const settings = defineSettings(bb);
@@ -29,7 +37,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
     bb.rpc.register(workRpcContract, workRpcHandlers(store));
 
     const lifecycle = new AbortController();
-    const executorsFor = options.executors ?? (() => []);
+    const executorsFor = options.executors ?? defaultExecutors;
     const runner = new PassRunner(
       (scope) =>
         runPass(

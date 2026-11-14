@@ -85,3 +85,32 @@ describe("1ma-superagent server", () => {
     await harness.lifecycle.dispose();
   });
 });
+
+describe("default executors", () => {
+  it("watches this server through the SDK and marks an unreachable second server as not seen", async () => {
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "1ma-superagent",
+      settings: { linuxServerUrl: "http://127.0.0.1:9" },
+      sdk: {
+        threads: { list: async () => [makeThreadResponse({ id: "thr_local" })] },
+        environments: { list: async () => [] },
+        projects: { list: async () => [] },
+      },
+    });
+    await createPlugin()(bb);
+    await harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    const result = await harness.behavior.callRpc("work.v1.list", {});
+    expect(result).toMatchObject({
+      works: [
+        expect.objectContaining({
+          source: { kind: "owner-chat", serverId: "mac", threadId: "thr_local" },
+        }),
+      ],
+      servers: [
+        expect.objectContaining({ id: "linux", completeness: "failed", lastSeenAt: null }),
+        expect.objectContaining({ id: "mac", completeness: "complete" }),
+      ],
+    });
+    await harness.lifecycle.dispose();
+  });
+});
