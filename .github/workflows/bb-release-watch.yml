@@ -5,9 +5,17 @@ on:
     # Daily: notice a new bb-app release within a day, not after a pile of them.
     - cron: "30 5 * * *"
   workflow_dispatch:
+    inputs:
+      trial_tag:
+        description: "Try the 1ma patches on this bb desktop tag even if it is not the latest (for checking the trial itself)"
+        required: false
+        default: ""
 
+# A trial pushes one branch that changes only desktop/upstream.json and starts
+# the Desktop workflows on it; the release accepts builds of main only.
 permissions:
-  contents: read
+  contents: write
+  actions: write
   issues: write
 
 jobs:
@@ -25,6 +33,8 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - id: versions
+        env:
+          TRIAL_TAG: ${{ inputs.trial_tag }}
         run: |
           set -euo pipefail
           pinned=$(node -p "require('./package.json').devDependencies['bb-app']")
@@ -32,13 +42,16 @@ jobs:
           desktop_pinned=$(node -p "require('./desktop/upstream.json').tag")
           desktop_latest=$(git ls-remote --tags --sort=-v:refname "$(node -p "require('./desktop/upstream.json').repository")" 'desktop-v*' \
             | grep -v '\^{}' | sed 's|.*refs/tags/||' | grep -E '^desktop-v[0-9]+\.[0-9]+\.[0-9]+$' | sed -n 1p)
+          trial="${TRIAL_TAG:-}"
+          if [[ -z "$trial" && "$desktop_latest" != "$desktop_pinned" ]]; then trial="$desktop_latest"; fi
           {
             echo "pinned=$pinned"
             echo "latest=$latest"
             echo "desktop_pinned=$desktop_pinned"
             echo "desktop_latest=$desktop_latest"
+            echo "trial=$trial"
           } >> "$GITHUB_OUTPUT"
-          echo "bb-app pinned=$pinned latest=$latest; desktop pinned=$desktop_pinned latest=$desktop_latest"
+          echo "bb-app pinned=$pinned latest=$latest; desktop pinned=$desktop_pinned latest=$desktop_latest; trial=${trial:-none}"
       - name: Nothing new
         if: steps.versions.outputs.pinned == steps.versions.outputs.latest && steps.versions.outputs.desktop_pinned == steps.versions.outputs.desktop_latest
         run: echo "bb-app ${{ steps.versions.outputs.pinned }} and bb ${{ steps.versions.outputs.desktop_pinned }} are still the latest releases"
@@ -53,8 +66,43 @@ jobs:
           pnpm run test
           pnpm run build
           pnpm run check:git-install
+      - name: Try the 1ma patches on the new bb release
+        id: trial
+        if: steps.versions.outputs.trial != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.versions.outputs.trial }}
+        run: |
+          set -euo pipefail
+          repository=$(node -p "require('./desktop/upstream.json').repository")
+          [[ "$TAG" =~ ^desktop-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$TAG is not a bb desktop release tag"; exit 1; }
+          # An annotated tag lists the commit it points at as <tag>^{}.
+          commit=$(git ls-remote "$repository" "refs/tags/$TAG^{}" | cut -f1)
+          [[ -n "$commit" ]] || commit=$(git ls-remote "$repository" "refs/tags/$TAG" | cut -f1)
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve $TAG in $repository"; exit 1; }
+          branch="bb-trial/$TAG"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          if gh api "repos/$GITHUB_REPOSITORY/branches/$branch" --silent 2>/dev/null; then
+            echo "$branch already exists; its runs hold the result"
+            echo "started=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/heads/$branch" -f "sha=$GITHUB_SHA" --silent
+          current=$(gh api "repos/$GITHUB_REPOSITORY/contents/desktop/upstream.json?ref=$branch" --jq .sha)
+          content=$(jq --arg tag "$TAG" --arg commit "$commit" '.tag = $tag | .commit = $commit' desktop/upstream.json | base64 -w0)
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/desktop/upstream.json" \
+            -f "message=Trial: the 1ma patches on bb $TAG (not for main)" \
+            -f "content=$content" -f "sha=$current" -f "branch=$branch" --silent
+          # Pushes made with this token start no workflows; dispatches do. The tests
+          # run without the rebrand, so new bb strings cannot stop them; the Desktop
+          # workflow checks the patches and the rebrand inventory and builds.
+          gh workflow run desktop.yml --ref "$branch"
+          gh workflow run desktop-tests.yml --ref "$branch" -f rebrand=false
+          echo "started=true" >> "$GITHUB_OUTPUT"
+          echo "trial of $TAG ($commit) started on $branch"
       - name: Open or update the tracking issue
-        if: steps.versions.outputs.pinned != steps.versions.outputs.latest || steps.versions.outputs.desktop_pinned != steps.versions.outputs.desktop_latest
+        if: steps.versions.outputs.pinned != steps.versions.outputs.latest || steps.versions.outputs.desktop_pinned != steps.versions.outputs.desktop_latest || steps.trial.outputs.started == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           LATEST: ${{ steps.versions.outputs.latest }}
@@ -62,19 +110,27 @@ jobs:
           DESKTOP_LATEST: ${{ steps.versions.outputs.desktop_latest }}
           DESKTOP_PINNED: ${{ steps.versions.outputs.desktop_pinned }}
           RESULT: ${{ steps.check.outcome }}
+          TRIAL: ${{ steps.versions.outputs.trial }}
+          TRIAL_BRANCH: ${{ steps.trial.outputs.branch }}
         run: |
           set -euo pipefail
-          title="bb release: bb-app $LATEST, desktop $DESKTOP_LATEST (pinned $PINNED, $DESKTOP_PINNED)"
+          title="bb release: bb-app $LATEST, desktop ${TRIAL:-$DESKTOP_LATEST} (pinned $PINNED, $DESKTOP_PINNED)"
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           # The backticks are Markdown code spans in the issue body, not command substitutions.
           # shellcheck disable=SC2016
-          body=$(printf '%s\n\n%s\n\n%s' \
+          trial_line="1ma Desktop: no trial (the pinned desktop tag is the latest)."
+          if [[ -n "${TRIAL_BRANCH:-}" ]]; then
+            trial_line="1ma Desktop trial of **$TRIAL** on branch \`$TRIAL_BRANCH\`: the Desktop workflow there shows whether the patches apply and which bb strings the rebrand inventory gained or lost, and builds; Desktop bb tests there run bb's suite with the patches, without the rebrand. Runs: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions?query=branch%3A${TRIAL_BRANCH//\//%2F}"
+          fi
+          body=$(printf '%s\n\n%s\n\n%s\n\n%s' \
             "New bb release: bb-app **$LATEST** (we pin **$PINNED**), desktop tag **$DESKTOP_LATEST** (1ma Desktop pins **$DESKTOP_PINNED**). Plugin checks against the new bb-app: **${RESULT:-not run}**. Run: $run_url" \
+            "$trial_line" \
             'Plugins: bump `devDependencies.bb-app`, re-sync forked plugins with their UPSTREAM.md, run `pnpm run check` and `pnpm run build`, tag releases.' \
-            '1ma Desktop: move `desktop/upstream.json` to the new desktop tag, rebase the patch series in a prepared tree and export it again (desktop/README.md).')
+            '1ma Desktop: move `desktop/upstream.json` to the new desktop tag, rebase the patch series in a prepared tree and export it again (desktop/README.md); delete the trial branch afterwards.')
+          # One issue per pair of releases; a later run of the same pair adds nothing new.
           number=$(gh issue list --search "\"$title\" in:title" --state open --json number --jq '.[0].number // empty')
           if [ -n "$number" ]; then
-            gh issue comment "$number" --body "$body"
+            echo "issue #$number already tracks $title"
           else
             gh issue create --title "$title" --body "$body" --label bb-upstream || gh issue create --title "$title" --body "$body"
           fi
