@@ -190,14 +190,16 @@ describe("1ma-superagent bot actions with a model turn", () => {
       "exec-app",
       path.join(root, "repos/exec-app"),
     );
-    ids.bot = await spawnChat(control, home, "Main bot", "[stub:reply never sent]", {
+    ids.bot = await spawnChat(control, home, "Main bot", "[stub:reply hello]", {
       pending: true,
     });
     control.bb(["plugin", "config", PLUGIN, "set", "mainBotThreadId", ids.bot]);
     const [queued] = await control.api("GET", `/threads/${ids.bot}/queued-messages`);
-    if (queued !== undefined)
-      await control.api("DELETE", `/threads/${ids.bot}/queued-messages/${queued.id}`);
-    await sayToBot("[stub:reply hello]");
+    await control.api("PATCH", `/threads/${ids.bot}/queued-messages/${queued.id}`, {
+      expectedUpdatedAt: queued.updatedAt,
+      sendAt: null,
+    });
+    await waitFor("bot's first turn", 120_000, async () => (await turnsDone(control, ids.bot)) > 0);
   });
 
   after(async () => {
