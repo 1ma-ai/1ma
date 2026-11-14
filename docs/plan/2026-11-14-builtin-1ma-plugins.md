@@ -140,7 +140,7 @@ bb с его согласия). Это описание идёт на ревью
   `turbo run topo --filter=@bb/plugin-build` (генерируемые файлы, без
   которых `prepare-bundled` не работает), затем для каждого плагина —
   отслеживаемые git файлы, зависимости через `pnpm deploy --prod
-  --frozen-lockfile` из lockfile 1ma (pnpm, закреплённый в 1ma, через
+--frozen-lockfile` из lockfile 1ma (pnpm, закреплённый в 1ma, через
   corepack), `prepare-bundled` bb и файлы из `files`.
 - **Проверка типов в сборке Linux.** Сборка Desktop прогоняет `typecheck`
   сервера bb и плагинов bb вместе с серией: тесты bb идут без проверки типов,
