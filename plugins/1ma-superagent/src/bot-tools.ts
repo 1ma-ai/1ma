@@ -20,6 +20,7 @@ export interface BotReadSource {
       lastError: string | null;
     }>;
     github: { at: number; problems: string[] } | null;
+    releases: Array<{ repo: string; mainHead: string; state: string; detail: string | null }>;
   }>;
   waiting(): Promise<{
     works: WorkDto[];
@@ -116,6 +117,12 @@ export function registerBotReadTools(
           kind: question.kind,
           title: question.title,
           state: question.state,
+        })),
+        main: list.releases.map((row) => ({
+          repo: row.repo,
+          head: row.mainHead.slice(0, 12),
+          state: row.state,
+          detail: row.detail,
         })),
         botTasks: source.botTasks().map((task) => ({ ...task, updatedAt: iso(task.updatedAt) })),
         unlinkedPullRequests: pulls.pullRequests

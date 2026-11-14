@@ -5,7 +5,17 @@ export const GH_PATH =
   /^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(pulls(\/\d+)?|commits)(\?[A-Za-z0-9_=&.%-]*)?$/;
 export const GH_OUTPUT_LIMIT = 4 * 1024 * 1024;
 
+export const JOURNAL_TAIL_BYTES = 2 * 1024 * 1024;
+
 export const hostContract = defineRpcContract({
+  readJournal: {
+    experimental_retryable: true,
+    input: z.object({ path: z.string().regex(/^\/.+\.jsonl$/) }).strict(),
+    output: z.discriminatedUnion("status", [
+      z.object({ status: z.literal("ok"), text: z.string(), truncated: z.boolean() }).strict(),
+      z.object({ status: z.literal("error"), message: z.string() }).strict(),
+    ]),
+  },
   ghApi: {
     experimental_retryable: true,
     input: z.object({ path: z.string().regex(GH_PATH) }).strict(),

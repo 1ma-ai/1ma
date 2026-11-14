@@ -68,6 +68,9 @@ function setup(options: {
       if (found === undefined) throw new Error(`no ${repo}#${number}`);
       return found;
     },
+    async mainHead() {
+      throw new Error("not used");
+    },
     async recentPulls(_repo, since) {
       reads.push(`recent ${since}`);
       return {

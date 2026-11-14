@@ -95,4 +95,14 @@ export const strings = {
       : `Чат ${chat} закончил ход. Ниже его последнее сообщение, обрезанное до 600 символов, как есть.`,
   resultAffected: "Изменения, если они были, — в чате исполнителя и его PR.",
   resultRecommendation: (chat: string) => `Откройте ${chat}, чтобы ответить или продолжить.`,
+  trainJournalPathLabel: "Release train journal",
+  trainJournalPathDescription:
+    "Absolute path on this server's machine to the release train's journal.jsonl. Empty turns the check of main off.",
+  bypassTitle: (repo: string) => `Коммит в main мимо поезда: ${repo}`,
+  bypassObserved: (repo: string, sha: string) =>
+    `main в ${repo} теперь указывает на ${sha.slice(0, 12)}. В журнале поезда нет ни записи merged, ни намерения записи с этим коммитом.`,
+  bypassAffected:
+    "main изменён без поезда: проверки итогового дерева и выкладки этот коммит не проходил.",
+  bypassRecommendation: "Посмотрите, кто записал коммит, и при необходимости откатите его.",
+  bypassAck: "Понятно, разберусь",
 } as const;

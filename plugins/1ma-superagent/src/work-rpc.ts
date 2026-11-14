@@ -77,6 +77,15 @@ export const workRpcContract = defineRpcContract({
       works: z.array(workSchema),
       servers: z.array(serverSchema),
       github: githubSchema,
+      releases: z.array(
+        z.object({
+          repo: z.string(),
+          mainHead: z.string(),
+          state: z.enum(["ok", "needs_reconcile", "bypass", "unknown"]),
+          detail: z.string().nullable(),
+          checkedAt: z.number(),
+        }),
+      ),
       nextOffset: z.number().int().nullable(),
     }),
   },
@@ -158,6 +167,13 @@ export function workRpcHandlers(
   store: Store,
   prStore: PrStore,
   questions: QuestionStore,
+  releases: () => Array<{
+    repo: string;
+    lastHead: string;
+    state: "ok" | "needs_reconcile" | "bypass" | "unknown";
+    detail: string | null;
+    checkedAt: number;
+  }>,
   github: () => Promise<GitHubPassState | null>,
 ) {
   const toDto = (row: WorkRow) => toWorkDto(row, prStore);
@@ -178,6 +194,13 @@ export function workRpcHandlers(
         works: rows.slice(0, limit).map(toDto),
         servers: store.servers().map(serverDto),
         github: await githubDto(),
+        releases: releases().map((row) => ({
+          repo: row.repo,
+          mainHead: row.lastHead,
+          state: row.state,
+          detail: row.detail,
+          checkedAt: row.checkedAt,
+        })),
         nextOffset: rows.length > limit ? offset + limit : null,
       };
     },

@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
+import { open } from "node:fs/promises";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
-import { GH_OUTPUT_LIMIT, hostContract } from "./src/host-contract.js";
+import { GH_OUTPUT_LIMIT, JOURNAL_TAIL_BYTES, hostContract } from "./src/host-contract.js";
 
 const GH_TIMEOUT_MS = 20_000;
 
@@ -30,9 +31,36 @@ function ghApi(
   });
 }
 
+async function readJournalTail(
+  path: string,
+): Promise<
+  { status: "ok"; text: string; truncated: boolean } | { status: "error"; message: string }
+> {
+  try {
+    const file = await open(path, "r");
+    try {
+      const { size } = await file.stat();
+      const start = Math.max(0, size - JOURNAL_TAIL_BYTES);
+      const buffer = Buffer.alloc(size - start);
+      await file.read(buffer, 0, buffer.length, start);
+      const text = buffer.toString("utf8");
+      return {
+        status: "ok",
+        text: start === 0 ? text : text.slice(text.indexOf("\n") + 1),
+        truncated: start > 0,
+      };
+    } finally {
+      await file.close();
+    }
+  } catch (error) {
+    return { status: "error", message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
     ghApi: async ({ path }, context) => ghApi(path, context.signal),
+    readJournal: async ({ path }) => readJournalTail(path),
   },
 });

@@ -110,4 +110,11 @@ export const MIGRATIONS: string[] = [
     question_id TEXT,
     created_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE main_watch (
+    repo TEXT PRIMARY KEY,
+    last_head TEXT NOT NULL,
+    state TEXT NOT NULL,
+    detail TEXT,
+    checked_at INTEGER NOT NULL
+  )`,
 ];

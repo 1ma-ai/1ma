@@ -23,6 +23,7 @@ import {
 } from "./src/action-runner.js";
 import { ActionStore } from "./src/actions.js";
 import { QuestionDispatcher } from "./src/dispatcher.js";
+import { BYPASS_KIND, type ReadJournal, mainWatchRows, runMainWatch } from "./src/main-watch.js";
 import { RESULT_KIND, runReports } from "./src/reports.js";
 import { START_TOOL, registerStartTool } from "./src/start-tool.js";
 import { UNLINKED_KIND, askAboutUnlinked, unlinkedKind } from "./src/kinds/unlinked-pr.js";
@@ -44,18 +45,43 @@ export const GITHUB_STATE_KEY = "github-pass";
 export interface SuperagentOptions {
   readonly executors?: (config: Config, bb: BbPluginApi) => readonly Executor[];
   readonly gh?: (bb: BbPluginApi) => GhApi;
+  readonly readJournal?: (bb: BbPluginApi) => ReadJournal;
 }
 
-export function hostGh(bb: BbPluginApi): GhApi {
-  const host = bb.hosts.experimental_client({ contract: hostContract });
+function primaryHost(bb: BbPluginApi): (signal: AbortSignal) => Promise<string | null> {
   let hostId: string | null = null;
+  return async (signal) => {
+    if (hostId === null) hostId = (await bb.sdk.system.config({ signal })).primaryHostId;
+    return hostId;
+  };
+}
+
+type HostClient = ReturnType<typeof hostClient>;
+
+function hostClient(bb: BbPluginApi) {
+  return bb.hosts.experimental_client({ contract: hostContract });
+}
+
+export function hostJournal(bb: BbPluginApi, host: HostClient): ReadJournal {
+  const hostId = primaryHost(bb);
   return async (path, signal) => {
-    if (hostId === null) {
-      hostId = (await bb.sdk.system.config({ signal })).primaryHostId;
-      if (hostId === null)
-        return { status: "error", message: "this server has no primary machine to run gh on" };
-    }
-    return host.call("ghApi", { path }, { hostId, signal });
+    const id = await hostId(signal);
+    if (id === null)
+      return {
+        status: "error",
+        message: "this server has no primary machine to read the journal on",
+      };
+    return host.call("readJournal", { path }, { hostId: id, signal });
+  };
+}
+
+export function hostGh(bb: BbPluginApi, host: HostClient): GhApi {
+  const hostId = primaryHost(bb);
+  return async (path, signal) => {
+    const id = await hostId(signal);
+    if (id === null)
+      return { status: "error", message: "this server has no primary machine to run gh on" };
+    return host.call("ghApi", { path }, { hostId: id, signal });
   };
 }
 
@@ -85,7 +111,8 @@ export function createPlugin(options: SuperagentOptions = {}) {
     const store = new Store(db);
     const prStore = new PrStore(db);
     const policy = () => repoPolicy(config.repos, config.excludedRepos);
-    const gh = (options.gh ?? hostGh)(bb);
+    const host = hostClient(bb);
+    const gh = options.gh?.(bb) ?? hostGh(bb, host);
     const github: GitHubReader = createGitHubReader(gh);
     const questions = new QuestionStore(db);
     const actions = new ActionStore(db);
@@ -97,11 +124,14 @@ export function createPlugin(options: SuperagentOptions = {}) {
       [AMBIGUOUS_KIND, ambiguousKind()],
       [NOTICE_KIND, noticeKind()],
       [RESULT_KIND, noticeKind()],
+      [BYPASS_KIND, noticeKind()],
     ]);
+    const readJournal = options.readJournal?.(bb) ?? hostJournal(bb, host);
     const handlers = workRpcHandlers(
       store,
       prStore,
       questions,
+      () => mainWatchRows(db),
       async () => (await bb.storage.kv.get<GitHubPassState>(GITHUB_STATE_KEY)) ?? null,
     );
     bb.rpc.register(workRpcContract, handlers);
@@ -140,6 +170,17 @@ export function createPlugin(options: SuperagentOptions = {}) {
                 signal: lifecycle.signal,
                 warn: (message) => bb.log.warn(message),
               });
+              const journalProblems = await runMainWatch({
+                db,
+                github,
+                readJournal,
+                journalPath: config.trainJournalPath,
+                policy: policy(),
+                questions,
+                now,
+                signal: lifecycle.signal,
+              });
+              for (const problem of journalProblems) bb.log.warn(problem);
               await runReports({
                 db,
                 store,

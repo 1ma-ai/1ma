@@ -57,6 +57,7 @@ export interface GitHubReader {
     since: number,
     signal: AbortSignal,
   ): Promise<{ pulls: PullRequest[]; complete: boolean }>;
+  mainHead(repo: string, signal: AbortSignal): Promise<string>;
 }
 
 export const RECENT_PAGE_SIZE = 50;
@@ -83,6 +84,15 @@ export function createGitHubReader(gh: GhApi): GitHubReader {
   return {
     async pull(repo, number, signal) {
       return toPullRequest(await getJson(`/repos/${repo}/pulls/${number}`, pullSchema, signal));
+    },
+    async mainHead(repo, signal) {
+      const [head] = await getJson(
+        `/repos/${repo}/commits?sha=main&per_page=1`,
+        z.array(z.object({ sha: z.string().regex(/^[0-9a-f]{40}$/) })),
+        signal,
+      );
+      if (head === undefined) throw new GitHubError(`${repo} has no commits on main`);
+      return head.sha;
     },
     async recentPulls(repo, since, signal) {
       const collect = async (
