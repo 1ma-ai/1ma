@@ -448,7 +448,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
       return state.waiting === 2;
     });
     const waiting = await control.rpc(PLUGIN, "work.v1.waiting", null);
-    assert.equal(waiting.questions.filter((question) => question.kind === "start_chat").length, 2);
+    assert.equal(waiting.questions.filter((question) => question.kind === "start_chat").length, 3);
     await respond(card, "no");
     const second = await waitCard(
       "second of two",
