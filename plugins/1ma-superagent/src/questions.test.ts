@@ -7,6 +7,7 @@ import {
   type AnswerOutcome,
   type Card,
   type QuestionKind,
+  QUESTION_TIMEOUT_MS,
   QuestionStore,
   questionPayloadSchema,
 } from "./questions.js";
@@ -218,5 +219,45 @@ describe("question dispatcher", () => {
     expect(pending()).toHaveLength(1);
     expect(store.answer(id, token, "no", kindsOf(answers), 1_600)).toBe("rejected");
     expect(answers).toEqual([{ subject: "first", optionId: "yes" }]);
+  });
+
+  it("neither accepts nor reopens a card after its deadline", async () => {
+    const { makeDispatcher, ask, pending, harness, answers, store, settle } = setup();
+    const id = ask("first");
+    if (id === null) throw new Error("not asked");
+    makeDispatcher().dispatch();
+    const first = pending()[0];
+    if (first === undefined) throw new Error("no card");
+    const late = 1_000 + QUESTION_TIMEOUT_MS;
+    expect(store.answer(id, payloadOf(first).token, "yes", kindsOf(answers), late)).toBe("stale");
+    expect(store.latest("first")?.state).toBe("expired");
+    expect(store.next(late)).toBeNull();
+    harness.behavior.cancelInteraction(first.id);
+    await settle();
+    expect(answers).toEqual([]);
+  });
+
+  it("closes a card that timed out instead of opening it again", async () => {
+    const { ask, store, settle } = setup();
+    ask("first");
+    const opened: number[] = [];
+    const dispatcher = new QuestionDispatcher({
+      requestInput: async (request) => {
+        opened.push(request.timeoutMs ?? 0);
+        return { outcome: "cancelled", reason: "timeout" };
+      },
+      warn: () => {},
+      background: inPlace,
+      store,
+      kinds: new Map(),
+      chat: () => CHAT,
+      now: () => 1_000,
+      onAnswered: () => {},
+      signal: new AbortController().signal,
+    });
+    dispatcher.dispatch();
+    await settle();
+    expect(opened).toEqual([QUESTION_TIMEOUT_MS]);
+    expect(store.latest("first")?.state).toBe("expired");
   });
 });

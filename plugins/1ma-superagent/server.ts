@@ -120,7 +120,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
     const actions = new ActionStore(db);
     const claimant = `gen_${randomUUID()}`;
     const kinds = new Map<string, QuestionKind>([
-      [UNLINKED_KIND, unlinkedKind(prStore)],
+      [UNLINKED_KIND, unlinkedKind(prStore, store)],
       [START_KIND, startKind(actions)],
       [UNKNOWN_KIND, unknownKind(actions)],
       [AMBIGUOUS_KIND, ambiguousKind()],

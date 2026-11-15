@@ -23,6 +23,7 @@ export interface QuestionRow {
   answer: string | null;
   remindAt: number | null;
   createdAt: number;
+  expiresAt: number;
 }
 
 interface RawQuestion {
@@ -39,6 +40,7 @@ interface RawQuestion {
   answer: string | null;
   remind_at: number | null;
   created_at: number;
+  expires_at: number | null;
 }
 
 const STATES: readonly QuestionState[] = [
@@ -67,6 +69,7 @@ function toRow(raw: RawQuestion): QuestionRow {
     answer: raw.answer,
     remindAt: raw.remind_at,
     createdAt: raw.created_at,
+    expiresAt: raw.expires_at ?? raw.created_at + QUESTION_TIMEOUT_MS,
   };
 }
 
@@ -81,7 +84,7 @@ export interface AskInput {
 
 export interface QuestionKind {
   currentVersion(subject: string): string | null;
-  onAnswer(question: QuestionRow, optionId: string, now: number): void;
+  onAnswer(question: QuestionRow, optionId: string, now: number): void | "stale";
 }
 
 export class QuestionStore {
@@ -96,8 +99,8 @@ export class QuestionStore {
     const id = `q_${randomUUID()}`;
     const result = this.#db
       .prepare(
-        `INSERT INTO questions (id, key, kind, chat_thread_id, subject, expected_version, card, priority, state, created_at)
-         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'queued', ?)
+        `INSERT INTO questions (id, key, kind, chat_thread_id, subject, expected_version, card, priority, state, created_at, expires_at)
+         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'queued', ?, ?)
          ON CONFLICT DO NOTHING`,
       )
       .run(
@@ -109,6 +112,7 @@ export class QuestionStore {
         JSON.stringify(card),
         input.priority,
         now,
+        now + QUESTION_TIMEOUT_MS,
       );
     return result.changes === 1 ? id : null;
   }
@@ -152,6 +156,12 @@ export class QuestionStore {
   }
 
   next(now: number): QuestionRow | null {
+    this.#db
+      .prepare(
+        `UPDATE questions SET state = 'expired' WHERE state IN ('queued', 'open')
+         AND COALESCE(expires_at, created_at + ?) <= ?`,
+      )
+      .run(QUESTION_TIMEOUT_MS, now);
     const raw = this.#db
       .prepare(
         `SELECT * FROM questions WHERE state IN ('queued', 'open') AND (remind_at IS NULL OR remind_at <= ?)
@@ -200,9 +210,19 @@ export class QuestionStore {
       if (question === null || question.state !== "open" || question.token !== token)
         return "unknown";
       if (!question.card.options.some((option) => option.id === optionId)) return "rejected";
+      if (question.expiresAt <= now) {
+        this.#db.prepare(`UPDATE questions SET state = 'expired' WHERE id = ?`).run(id);
+        return "stale";
+      }
       const kind = kinds.get(question.kind);
       if (kind === undefined) return "rejected";
       if (kind.currentVersion(question.subject) !== question.expectedVersion) {
+        this.#db
+          .prepare(`UPDATE questions SET state = 'stale', answered_at = ? WHERE id = ?`)
+          .run(now, id);
+        return "stale";
+      }
+      if (kind.onAnswer(question, optionId, now) === "stale") {
         this.#db
           .prepare(`UPDATE questions SET state = 'stale', answered_at = ? WHERE id = ?`)
           .run(now, id);
@@ -213,7 +233,6 @@ export class QuestionStore {
           `UPDATE questions SET state = 'answered', answer = ?, answered_at = ? WHERE id = ?`,
         )
         .run(optionId, now, id);
-      kind.onAnswer(question, optionId, now);
       return "applied";
     });
     return apply();

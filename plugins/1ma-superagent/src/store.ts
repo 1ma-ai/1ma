@@ -271,6 +271,24 @@ export class Store {
       .run(reason, now, serverId, threadId, reason);
   }
 
+  chatSeen(
+    serverId: ServerId,
+    threadId: string,
+  ): { state: WorkState; observedAt: number; remoteUrl: string | null } | null {
+    const row = this.#db
+      .prepare(
+        `SELECT w.state, t.observed_at, t.repo FROM works w
+         JOIN threads_seen t ON t.server_id = w.server_id AND t.thread_id = w.thread_id
+         WHERE w.server_id = ? AND w.thread_id = ?`,
+      )
+      .get(serverId, threadId) as
+      | { state: string; observed_at: number; repo: string | null }
+      | undefined;
+    return row === undefined
+      ? null
+      : { state: toWorkState(row.state), observedAt: row.observed_at, remoteUrl: row.repo };
+  }
+
   threadStatus(serverId: ServerId, threadId: string): WorkState | null {
     const row = this.#db
       .prepare(`SELECT state FROM works WHERE server_id = ? AND thread_id = ?`)

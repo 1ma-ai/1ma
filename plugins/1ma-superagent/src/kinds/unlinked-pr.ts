@@ -1,10 +1,13 @@
 import { strings } from "../../strings.js";
 import type { PrLinkRow, PrStore } from "../pr-store.js";
 import type { Card, QuestionKind, QuestionStore } from "../questions.js";
+import { repoFromRemoteUrl } from "../github/names.js";
 import type { RepoPolicy } from "../repos.js";
+import type { Store } from "../store.js";
 
 export const UNLINKED_KIND = "unlinked_pr";
 export const UNLINKED_GRACE_MS = 10 * 60 * 1000;
+export const FRESH_MS = 10 * 60 * 1000;
 const LEAVE = "leave";
 
 function subject(link: PrLinkRow): string {
@@ -12,7 +15,7 @@ function subject(link: PrLinkRow): string {
 }
 
 function version(link: PrLinkRow): string {
-  return `${link.headSha}|${link.linkKind ?? "none"}|${link.deliveryServerId ?? ""}:${link.deliveryThreadId ?? ""}|${link.branchHint ?? ""}`;
+  return `${link.headSha}|${link.prState}|${link.linkKind ?? "none"}|${link.deliveryServerId ?? ""}:${link.deliveryThreadId ?? ""}|${link.branchHint ?? ""}`;
 }
 
 function parseSubject(value: string): { repo: string; number: number } | null {
@@ -88,23 +91,32 @@ export function askAboutUnlinked(
   }
 }
 
-export function unlinkedKind(prStore: PrStore): QuestionKind {
+export function unlinkedKind(prStore: PrStore, store: Store): QuestionKind {
   return {
     currentVersion(value) {
       const ref = parseSubject(value);
       const link = ref === null ? null : prStore.get(ref.repo, ref.number);
       return link === null ? null : version(link);
     },
-    onAnswer(question, optionId) {
+    onAnswer(question, optionId, now) {
       if (optionId === LEAVE) return;
       const ref = parseSubject(question.subject);
       const link = ref === null ? null : prStore.get(ref.repo, ref.number);
-      if (ref === null || link === null) return;
+      if (ref === null || link === null) return "stale";
+      if (link.prState !== "open" || now - link.observedAt > FRESH_MS) return "stale";
       const index = Number.parseInt(optionId.replace("link", ""), 10);
       const chat = candidates(link)[index];
       const match = chat === undefined ? null : /^(mac|linux):(thr_[a-z0-9]+)$/.exec(chat);
-      if (match?.[1] !== "mac" && match?.[1] !== "linux") return;
-      if (match[2] === undefined) return;
+      if (match?.[1] !== "mac" && match?.[1] !== "linux") return "stale";
+      if (match[2] === undefined) return "stale";
+      const seen = store.chatSeen(match[1], match[2]);
+      if (
+        seen === null ||
+        seen.state === "closed" ||
+        now - seen.observedAt > FRESH_MS ||
+        repoFromRemoteUrl(seen.remoteUrl) !== link.repo
+      )
+        return "stale";
       prStore.setManualLink(ref.repo, ref.number, match[1], match[2]);
     },
   };

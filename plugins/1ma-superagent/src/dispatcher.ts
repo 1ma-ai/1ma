@@ -57,7 +57,7 @@ export class QuestionDispatcher {
             rendererId: QUESTION_RENDERER,
             title: question.card.title,
             payload,
-            timeoutMs: QUESTION_TIMEOUT_MS,
+            timeoutMs: Math.max(1, Math.min(QUESTION_TIMEOUT_MS, question.expiresAt - now)),
             presentation: {
               label: { pending: question.card.title, completed: question.card.title },
             },
@@ -94,6 +94,8 @@ export class QuestionDispatcher {
             this.#deps.onAnswered(outcome);
           } else if (result.reason === "user") {
             this.#deps.store.closeAs(question.id, token, "canceled");
+          } else if (result.reason === "timeout") {
+            this.#deps.store.closeAs(question.id, token, "expired");
           } else {
             this.#deps.store.requeue(question.id, token, null);
           }
