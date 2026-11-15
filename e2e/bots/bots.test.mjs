@@ -307,9 +307,7 @@ describe("1ma-sidebar with the bots block", () => {
         const botName = page.locator(`[data-bot-id="${fixture.visible.id}"] span.font-medium`, {
           hasText: "Visual Bot",
         });
-        const rowTitle = page.locator(
-          `a[data-sidebar-thread-id="${fixture.plain}"] .bb-thread-title`,
-        );
+        const rowTitle = page.locator(".bb-thread-title", { hasText: "Regular thread" });
         const [nameFont, titleFont] = await Promise.all([fontOf(botName), fontOf(rowTitle)]);
         assert.ok(nameFont.length > 0);
         assert.equal(nameFont, titleFont, "a bot name uses the font of a thread row title");
