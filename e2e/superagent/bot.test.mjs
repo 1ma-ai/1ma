@@ -125,8 +125,8 @@ async function clearCards() {
     if (round >= 10) return;
     const [card] = await pendingCards();
     if (card === undefined) return;
-    const ids = card.payload.data.options.map((option) => option.id);
-    const choice = ["no", "ok", "wait"].find((id) => ids.includes(id));
+    const offered = new Set(card.payload.data.options.map((option) => option.id));
+    const choice = ["no", "ok", "wait"].find((id) => offered.has(id));
     if (choice === undefined) return;
     await respond(card, choice).catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 2_000));
@@ -237,20 +237,21 @@ describe("1ma-superagent bot actions with a model turn", () => {
     } catch (error) {
       lines.push(`== work.v1.list failed: ${error.message}`);
     }
-    for (const method of ["work.v1.actions", "work.v1.waiting"]) {
-      try {
-        lines.push(
-          `== ${method}`,
-          JSON.stringify(
-            await control.rpc(PLUGIN, method, method === "work.v1.waiting" ? null : {}),
-            null,
-            1,
-          ),
-        );
-      } catch (error) {
-        lines.push(`== ${method} failed: ${error.message}`);
-      }
-    }
+    const reads = await Promise.all(
+      ["work.v1.actions", "work.v1.waiting"].map(async (method) => {
+        try {
+          const result = await control.rpc(
+            PLUGIN,
+            method,
+            method === "work.v1.waiting" ? null : {},
+          );
+          return [`== ${method}`, JSON.stringify(result, null, 1)];
+        } catch (error) {
+          return [`== ${method} failed: ${error.message}`];
+        }
+      }),
+    );
+    lines.push(...reads.flat());
     writeFileSync(path.join(root, "diagnostics.log"), lines.join("\n"));
     await Promise.all([control.stop(), executor.stop()]);
     await proxy.close();
@@ -268,9 +269,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
     );
     const proposal = await newestAction(known);
     assert.equal(proposal.state, "proposed");
-    const toolResult = stubRecords()
-      .filter((entry) => entry.kind === "tool")
-      .at(-1);
+    const toolResult = stubRecords().findLast((entry) => entry.kind === "tool");
     assert.match(
       toolResult?.output ?? "",
       /^Proposed as act_/,
