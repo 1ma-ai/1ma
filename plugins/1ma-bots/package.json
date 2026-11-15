@@ -4,6 +4,10 @@
   "private": true,
   "description": "Боты 1ma: сущность бота с инструкциями, памятью, областями работы и своими чатами.",
   "license": "MIT",
+  "files": [
+    "skills",
+    "PLUGIN_OVERVIEW.md"
+  ],
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
