@@ -16,7 +16,7 @@ its tests to it and drops its copy.
   logs, started, stopped and restarted by name), `waitFor`.
 - `stub-acp-agent.mjs`: an ACP agent driven by commands in the message text:
   `[stub:reply text]`, `[stub:wait seconds]`, `[stub:fail text]`,
-  `[stub:call tool {json}]` (calls a tool through bb's MCP bridge). It records
+  `[stub:call tool {json}]` (calls a tool through bb's MCP bridge), `[stub:ask title]` (asks for approval and waits for the owner). It records
   every prompt, tool list and tool result as JSON lines in `$E2E_STUB_LOG`.
   `Server.registerStubAgent(log)` registers it as provider `acp-stub`; name the
   model `acp-default` explicitly.

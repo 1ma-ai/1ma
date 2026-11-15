@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { Fleet, STUB_MODEL, STUB_PROVIDER, requireEnv, waitFor } from "../lib/servers.mjs";
 
@@ -41,7 +42,7 @@ export async function createBot(name, fields = {}) {
   return bot;
 }
 
-export async function startConversation(bot, text, projectId = projects.alpha) {
+export async function startConversation(bot, text, projectId = projects.alpha, more = {}) {
   const { threadId } = await rpc("bots.v1.startThread", {
     botId: bot.id,
     request: {
@@ -49,6 +50,7 @@ export async function startConversation(bot, text, projectId = projects.alpha) {
       providerId: STUB_PROVIDER,
       model: STUB_MODEL,
       environment: { type: "project-default" },
+      ...more,
       input: [{ type: "text", text, mentions: [] }],
     },
   });
@@ -122,4 +124,42 @@ export function diagnose(extra = {}) {
     null,
     1,
   );
+}
+
+function pluginDatabase() {
+  const walk = (dir) =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return walk(full);
+      return /\.(db|sqlite3?)$/.test(entry.name) ? [full] : [];
+    });
+  for (const file of walk(server.dataDir)) {
+    const db = new DatabaseSync(file, { readOnly: true });
+    const found = db
+      .prepare("SELECT name FROM sqlite_master WHERE name = 'thread_chains'")
+      .get();
+    if (found !== undefined) return db;
+    db.close();
+  }
+  throw new Error(`no 1ma-bots database under ${server.dataDir}`);
+}
+
+// The exchange a conversation belongs to and the letters waiting for it, read
+// from the plugin's own tables: the contract does not expose them.
+export function exchangeOf(threadId) {
+  const db = pluginDatabase();
+  try {
+    const chain = db
+      .prepare(
+        `SELECT chains.id AS id, chains.letters AS letters FROM thread_chains
+         JOIN chains ON chains.id = thread_chains.chain_id WHERE thread_chains.thread_id = ?`,
+      )
+      .get(threadId);
+    const waiting = db
+      .prepare("SELECT COUNT(*) AS n FROM pending_letters WHERE to_thread = ?")
+      .get(threadId);
+    return { chain: chain ?? null, waiting: waiting.n };
+  } finally {
+    db.close();
+  }
 }

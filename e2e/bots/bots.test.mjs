@@ -5,6 +5,7 @@ import {
   BOTS,
   completedOf,
   diagnose,
+  exchangeOf,
   createBot,
   fleet,
   projects,
@@ -87,20 +88,12 @@ describe("1ma-bots on a real server", () => {
 
   it("refuses to mark a conversation done while a question waits, and allows it after the answer", async () => {
     const bot = await createBot("Asker", { capabilities: ["dev"] });
-    const question = {
-      questions: [
-        {
-          question: "Which color should the button be?",
-          header: "Color",
-          multiSelect: false,
-          options: [
-            { label: "Red", description: "A red button" },
-            { label: "Blue", description: "A blue button" },
-          ],
-        },
-      ],
-    };
-    const threadId = await startConversation(bot, stubCall("AskUserQuestion", question));
+    const threadId = await startConversation(
+      bot,
+      "[stub:ask Run the build]",
+      projects.alpha,
+      { permissionMode: "accept-edits" },
+    );
     const card = await waitFor("the pending question", 60 * SECOND, async () => {
       const cards = await server.api("GET", `/threads/${threadId}/interactions`);
       return cards.find((candidate) => candidate.status === "pending") ?? null;
@@ -114,8 +107,9 @@ describe("1ma-bots on a real server", () => {
     );
     assert.equal(await completedOf(bot.id, threadId), false);
 
-    await server.api("POST", `/threads/${threadId}/interactions/${card.id}/respond`, {
-      value: { answers: { q0: { selected: ["q0o1"] } } },
+    await server.api("POST", `/threads/${threadId}/interactions/${card.id}/resolve`, {
+      decision: "allow_once",
+      grantedPermissions: null,
     });
     await waitTurns(threadId, 1);
     await waitStatus(threadId, "idle");
@@ -182,6 +176,14 @@ describe("1ma-bots on a real server", () => {
       const queued = await server.api("GET", `/threads/${brunoThread}/queued-messages`);
       return queued.length === 1;
     });
+    const waiting = exchangeOf(brunoThread);
+    assert.deepEqual(
+      waiting,
+      { chain: own.chain, waiting: 1 },
+      "a queued letter leaves Bruno's exchange alone",
+    );
+    const alicesExchange = exchangeOf(aliceThread).chain;
+    assert.ok(alicesExchange && alicesExchange.id !== own.chain.id);
     const observed = {
       queued: await server.api("GET", `/threads/${brunoThread}/queued-messages`),
       status: (await thread(brunoThread)).status,
@@ -195,22 +197,17 @@ describe("1ma-bots on a real server", () => {
       `Bruno's turn is still in his own exchange while Alice's letter waits in the queue\n${diagnose(observed)}`,
     );
 
-    await waitFor(
+    const again = await waitFor(
       "the dispatched letter to make Bruno write again",
       180 * SECOND,
-      async () =>
-        letters()
-          .slice(before)
-          .filter((entry) => entry.output?.includes("for Alice")).length >= 2,
+      async () => (lettersToAlice(known).length >= 2 ? lettersToAlice(known) : null),
     );
-    const again = letters()
-      .slice(before)
-      .filter((entry) => entry.output?.includes("for Alice"));
     assert.match(
       again[1].output,
       /^Letter 2\//,
       "after dispatch Bruno's next letter continues Alice's exchange",
     );
+    assert.equal(exchangeOf(brunoThread).chain?.id, alicesExchange.id);
   });
 });
 

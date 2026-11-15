@@ -12,6 +12,34 @@ const record = (entry) => {
 const send = (message) =>
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const sessions = new Map();
+const asked = new Map();
+let nextAsk = 1;
+
+// An approval card on the thread, the way a real agent asks before a command:
+// the turn stays open until the owner decides.
+function askPermission(sessionId, title) {
+  const id = `stub-ask-${nextAsk++}`;
+  const answer = new Promise((resolve) => asked.set(id, resolve));
+  send({
+    id,
+    method: "session/request_permission",
+    params: {
+      sessionId,
+      toolCall: {
+        toolCallId: `stub-call-${id}`,
+        title,
+        kind: "execute",
+        status: "pending",
+        rawInput: { command: title },
+      },
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "reject", name: "Reject", kind: "reject_once" },
+      ],
+    },
+  });
+  return answer;
+}
 let nextSession = 1;
 
 function startMcp(server) {
@@ -88,12 +116,17 @@ async function handlePrompt(message) {
   const reply = /\[stub:reply ([^\]]*)\]/s.exec(text);
   const wait = /\[stub:wait (\d+)\]/.exec(text);
   const fail = /\[stub:fail ([^\]]*)\]/.exec(text);
+  const ask = /\[stub:ask ([^\]]*)\]/.exec(text);
   if (wait !== null) await sleep(Number(wait[1]) * 1000);
   if (fail !== null) {
     send({ id: message.id, error: { code: -32603, message: fail[1] } });
     return;
   }
-  if (call !== null) {
+  if (ask !== null) {
+    const outcome = await askPermission(sessionId, ask[1]);
+    record({ kind: "asked", title: ask[1], outcome });
+    say(sessionId, `asked ${ask[1]}: ${outcome?.outcome ?? "none"}`);
+  } else if (call !== null) {
     if (session?.mcp === undefined) {
       say(sessionId, "no tools");
     } else {
@@ -170,7 +203,11 @@ createInterface({ input: process.stdin, terminal: false }).on("line", (line) => 
   } catch {
     return;
   }
-  if (message.method === undefined) return;
+  if (message.method === undefined) {
+    asked.get(message.id)?.(message.result?.outcome);
+    asked.delete(message.id);
+    return;
+  }
   void handle(message);
 });
 process.stdin.on("close", () => {
