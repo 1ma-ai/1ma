@@ -31,6 +31,7 @@ const pullRequestSchema = z.object({
     problem: z.string().nullable(),
     branchHint: z.array(z.string()),
     basis: z.enum(["claimed by the chat", "set by the owner"]).nullable(),
+    confirmedAt: z.number().nullable(),
   }),
   provenance: z.literal("unknown"),
   chatModels: z.object({
@@ -166,6 +167,7 @@ export function toPullRequestDto(link: PrLinkRow, prStore: PrStore): PullRequest
           : link.linkKind === "manual"
             ? "set by the owner"
             : null,
+      confirmedAt: link.linkConfirmedAt,
     },
     provenance: "unknown",
     chatModels: {

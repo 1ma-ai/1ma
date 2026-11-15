@@ -143,6 +143,7 @@ describe("main bot tools", () => {
         problem: hostile,
         branchHint: [hostile],
         basis: null,
+        confirmedAt: null,
       },
       provenance: "unknown",
       chatModels: {

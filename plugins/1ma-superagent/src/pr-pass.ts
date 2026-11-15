@@ -42,6 +42,7 @@ async function collectClaims(
   problems: string[],
 ) {
   const candidates = new Map<string, Candidate[]>();
+  const read = new Set<string>();
   await Promise.all(
     [...deps.executors.values()].map(async (executor) => {
       if ((deps.observed.get(executor.serverId) ?? "failed") === "failed") return;
@@ -56,6 +57,7 @@ async function collectClaims(
         problems.push(`${executor.serverId} claims: ${describeError(error)}`);
         return;
       }
+      for (const id of ids) read.add(`${executor.serverId}:${id}`);
       const byId = new Map(
         threads.map((thread) => [`${thread.serverId}:${thread.threadId}`, thread]),
       );
@@ -73,7 +75,7 @@ async function collectClaims(
       }
     }),
   );
-  return candidates;
+  return { candidates, read };
 }
 
 export function decideLink(
@@ -157,7 +159,7 @@ export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] 
       if (isWatchedRepo(deps.policy, repo)) threads.push({ ...thread, serverId, repo });
     }
   }
-  const candidates = await collectClaims(deps, threads, problems);
+  const { candidates, read } = await collectClaims(deps, threads, problems);
   const repos = [...deps.policy.connected.keys()];
   const pullsByRepo = await Promise.all(
     repos.map(async (repo) => {
@@ -170,11 +172,18 @@ export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] 
   );
   const modelReads: Array<Promise<void>> = [];
   for (const pull of pullsByRepo.flat()) {
-    const decision = decideLink(
+    const decided = decideLink(
       deps.policy,
       pull,
       candidates.get(key(pull.repo, pull.number)) ?? [],
     );
+    const current = deps.prStore.get(pull.repo, pull.number);
+    const unobserved =
+      current?.linkKind === "claim" &&
+      current.deliveryThreadId !== null &&
+      !read.has(`${current.deliveryServerId}:${current.deliveryThreadId}`);
+    const decision: LinkDecision =
+      decided.kind === "none" && unobserved ? { kind: "kept" } : decided;
     deps.prStore.record(pull, decision, branchHint(threads, pull), deps.now);
     const link = deps.prStore.get(pull.repo, pull.number);
     if (link?.linkKind !== "claim" || pull.state !== "open" || link.deliveryServerId === null)

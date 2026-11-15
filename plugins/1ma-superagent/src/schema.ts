@@ -117,4 +117,5 @@ export const MIGRATIONS: string[] = [
     detail TEXT,
     checked_at INTEGER NOT NULL
   )`,
+  `ALTER TABLE pr_links ADD COLUMN link_confirmed_at INTEGER`,
 ];

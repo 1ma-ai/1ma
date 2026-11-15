@@ -15,6 +15,7 @@ export interface PrLinkRow {
   deliveryServerId: ServerId | null;
   deliveryThreadId: string | null;
   linkKind: "claim" | "manual" | null;
+  linkConfirmedAt: number | null;
   claimProblem: string | null;
   branchHint: string | null;
   provenanceGap: boolean;
@@ -34,6 +35,7 @@ interface RawLink {
   delivery_server_id: string | null;
   delivery_thread_id: string | null;
   link_kind: string | null;
+  link_confirmed_at: number | null;
   claim_problem: string | null;
   branch_hint: string | null;
   provenance_gap: number;
@@ -67,6 +69,7 @@ function toLink(raw: RawLink): PrLinkRow {
     deliveryServerId: server,
     deliveryThreadId: raw.delivery_thread_id,
     linkKind: kind,
+    linkConfirmedAt: raw.link_confirmed_at,
     claimProblem: raw.claim_problem,
     branchHint: raw.branch_hint,
     provenanceGap: raw.provenance_gap === 1,
@@ -77,6 +80,7 @@ function toLink(raw: RawLink): PrLinkRow {
 
 export type LinkDecision =
   | { kind: "claim"; serverId: ServerId; threadId: string }
+  | { kind: "kept" }
   | { kind: "none"; problem: string | null };
 
 export class PrStore {
@@ -150,24 +154,27 @@ export class PrStore {
   record(pull: PullRequest, decision: LinkDecision, branchHint: string | null, now: number): void {
     const current = this.get(pull.repo, pull.number);
     const manual = current?.linkKind === "manual";
+    const kept = decision.kind === "kept" && current?.linkKind === "claim";
     const delivery =
-      manual || decision.kind !== "claim"
-        ? {
-            server: manual ? current.deliveryServerId : null,
-            thread: manual ? current.deliveryThreadId : null,
-          }
-        : { server: decision.serverId, thread: decision.threadId };
+      manual || kept
+        ? { server: current.deliveryServerId, thread: current.deliveryThreadId }
+        : decision.kind === "claim"
+          ? { server: decision.serverId, thread: decision.threadId }
+          : { server: null, thread: null };
+    const confirmedAt =
+      decision.kind === "claim" && !manual ? now : kept ? current.linkConfirmedAt : null;
     this.#db
       .prepare(
         `INSERT INTO pr_links (repo, number, head_repo, head_ref, head_sha, author, pr_state, pr_updated_at,
-           delivery_server_id, delivery_thread_id, link_kind, claim_problem, claim_checked_at, branch_hint,
-           observed_at, unlinked_since)
+           delivery_server_id, delivery_thread_id, link_kind, link_confirmed_at, claim_problem, claim_checked_at,
+           branch_hint, observed_at, unlinked_since)
          VALUES (@repo, @number, @headRepo, @headRef, @headSha, @author, @state, @updatedAt, @server, @thread,
-           @kind, @problem, @now, @hint, @now, CASE WHEN @thread IS NULL THEN @now ELSE NULL END)
+           @kind, @confirmedAt, @problem, @now, @hint, @now, CASE WHEN @thread IS NULL THEN @now ELSE NULL END)
          ON CONFLICT (repo, number) DO UPDATE SET
            head_repo = @headRepo, head_ref = @headRef, head_sha = @headSha, author = @author,
            pr_state = @state, pr_updated_at = @updatedAt, delivery_server_id = @server,
-           delivery_thread_id = @thread, link_kind = @kind, claim_problem = @problem,
+           delivery_thread_id = @thread, link_kind = @kind, link_confirmed_at = @confirmedAt,
+           claim_problem = @problem,
            claim_checked_at = @now, branch_hint = @hint, observed_at = @now,
            unlinked_since = CASE WHEN @thread IS NULL THEN COALESCE(pr_links.unlinked_since, @now) ELSE NULL END`,
       )
@@ -182,7 +189,8 @@ export class PrStore {
         updatedAt: pull.updatedAt,
         server: delivery.server,
         thread: delivery.thread,
-        kind: manual ? "manual" : decision.kind === "claim" ? "claim" : null,
+        kind: manual ? "manual" : decision.kind === "claim" || kept ? "claim" : null,
+        confirmedAt,
         problem: decision.kind === "none" ? decision.problem : null,
         hint: branchHint,
         now,

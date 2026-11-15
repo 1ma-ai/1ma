@@ -81,9 +81,11 @@ function setup(options: {
       };
     },
   };
+  const failing = new Set<ServerId>();
   const executor = (serverId: ServerId): Executor =>
     fakeExecutor(serverId, {
       async readMetadata(threadIds): Promise<ThreadMetadataRow[]> {
+        if (failing.has(serverId)) throw new Error("metadata batch 2 failed");
         return threadIds
           .filter((threadId) => options.metadata?.[threadId] !== undefined)
           .map((threadId) => ({ threadId, metadata: options.metadata?.[threadId] }));
@@ -109,7 +111,14 @@ function setup(options: {
       now,
       signal: new AbortController().signal,
     });
-  return { db, prStore, run, reads };
+  const archive = (serverId: ServerId) =>
+    store.applySnapshot(
+      serverId,
+      { threads: [], environments: [], projects: [] },
+      { observedAt: 2, completeness: "complete" },
+      null,
+    );
+  return { db, store, prStore, run, reads, failing, archive, metadata: options.metadata };
 }
 
 describe("runPrPass", () => {
@@ -166,6 +175,55 @@ describe("runPrPass", () => {
       basis: "claimed by the chat",
       complete: true,
       models: [{ providerId: "claude-code", model: "model-after" }],
+    });
+  });
+
+  describe("keeps a link it cannot see this pass", () => {
+    const linked = () =>
+      setup({
+        threads: { mac: [], linux: [{ id: "thr_linux", branch: "feature/7" }] },
+        metadata: { thr_linux: claimsOf(7) },
+        pulls: [pull(7)],
+      });
+    const expectKept = (prStore: PrStore) =>
+      expect(prStore.get("example/app", 7)).toMatchObject({
+        linkKind: "claim",
+        deliveryThreadId: "thr_linux",
+        linkConfirmedAt: 10_000,
+      });
+
+    it("when its chat was archived", async () => {
+      const t = linked();
+      await t.run(10_000);
+      t.archive("linux");
+      await t.run(20_000);
+      expectKept(t.prStore);
+    });
+
+    it("when its server did not answer", async () => {
+      const t = linked();
+      await t.run(10_000);
+      await t.run(20_000, { linux: "failed" });
+      expectKept(t.prStore);
+    });
+
+    it("when reading the chats' metadata partly failed", async () => {
+      const t = linked();
+      await t.run(10_000);
+      t.failing.add("linux");
+      await t.run(20_000);
+      expectKept(t.prStore);
+    });
+
+    it("and drops it once its chat was read without the claim", async () => {
+      const t = linked();
+      await t.run(10_000);
+      if (t.metadata !== undefined) t.metadata.thr_linux = { claims: [] };
+      await t.run(20_000);
+      expect(t.prStore.get("example/app", 7)).toMatchObject({
+        linkKind: null,
+        deliveryThreadId: null,
+      });
     });
   });
 
