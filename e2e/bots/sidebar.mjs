@@ -83,3 +83,29 @@ export async function waitDrawn(page, locator, label) {
     throw new Error(`${label}: ${error.message}\npage text: ${text.slice(0, 2000)}`);
   }
 }
+
+const topOf = async (locator) => {
+  const box = await locator.first().boundingBox();
+  if (box === null) throw new Error(`not drawn: ${locator}`);
+  return box.y;
+};
+
+// The sidebar draws groups as a flat column: a header, then its rows. A row
+// belongs to the last header drawn above it.
+export async function groupsOf(page, headers, threadIds) {
+  const tops = Object.fromEntries(
+    await Promise.all(
+      headers.map(async (name) => [name, await topOf(page.getByText(name, { exact: true }))]),
+    ),
+  );
+  const rows = await Promise.all(
+    threadIds.map(async (id) => [id, await topOf(threadLink(page, id))]),
+  );
+  const ordered = Object.entries(tops).toSorted(([, a], [, b]) => a - b);
+  return {
+    order: ordered.map(([name]) => name),
+    groupOf: Object.fromEntries(
+      rows.map(([id, top]) => [id, ordered.findLast(([, headerTop]) => headerTop < top)?.[0] ?? null]),
+    ),
+  };
+}

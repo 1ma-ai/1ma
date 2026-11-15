@@ -28,14 +28,13 @@ import {
   launch,
   openApp,
   screenshot,
-  sectionIds,
+  groupsOf,
   selectSidebar,
   threadLink,
   waitDrawn,
 } from "./sidebar.mjs";
 
 const SECOND = 1000;
-const projectSection = (projectId) => `[data-sidebar-section-id="project:${projectId}"]`;
 async function counts(page, places) {
   const entries = await Promise.all(
     Object.entries(places).map(async ([name, [scope, threadId]]) => [
@@ -271,44 +270,33 @@ describe("1ma-sidebar with the bots block", () => {
         await threadLink(page, fixture.v1).waitFor({ timeout: 30 * SECOND });
         await screenshot(page, `sidebar-${theme}`);
 
-        const sections = await sectionIds(page);
-        const bots = sections.find((section) => section.id === "1ma-bots");
-        assert.ok(bots, `the bots block is drawn; sections: ${JSON.stringify(sections)}`);
-        const projectTops = sections
-          .filter((section) => section.id?.startsWith("project:"))
-          .map((section) => section.top);
-        assert.ok(projectTops.length >= 2, `both projects are drawn: ${JSON.stringify(sections)}`);
-        assert.ok(bots.top < Math.min(...projectTops), "the bots block is above the first project");
         assert.equal(
           await page.evaluate(() => document.documentElement.classList.contains("dark")),
           theme === "dark",
           "the theme the screenshot shows",
         );
 
+        const layout = await groupsOf(
+          page,
+          ["Bots", "Alpha", "Beta"],
+          [fixture.v1, fixture.v2, fixture.plain, fixture.h1],
+        );
+        assert.deepEqual(layout.order, ["Bots", "Alpha", "Beta"], "the bots block is on top");
+        assert.deepEqual(layout.groupOf, {
+          [fixture.v1]: "Bots",
+          [fixture.v2]: "Bots",
+          [fixture.plain]: "Alpha",
+          [fixture.h1]: "Beta",
+        });
         const botScope = `[data-bot-id="${fixture.visible.id}"]`;
-        const alpha = projectSection(projects.alpha);
-        const beta = projectSection(projects.beta);
         assert.deepEqual(
           await counts(page, {
             v1InBot: [botScope, fixture.v1],
             v2InBot: [botScope, fixture.v2],
-            v1InProject: [alpha, fixture.v1],
-            v2InProject: [alpha, fixture.v2],
             v1Drawn: ["body", fixture.v1],
             v2Drawn: ["body", fixture.v2],
-            plainInProject: [alpha, fixture.plain],
-            hiddenBotConversationInProject: [beta, fixture.h1],
           }),
-          {
-            v1InBot: 1,
-            v2InBot: 1,
-            v1InProject: 0,
-            v2InProject: 0,
-            v1Drawn: 1,
-            v2Drawn: 1,
-            plainInProject: 1,
-            hiddenBotConversationInProject: 1,
-          },
+          { v1InBot: 1, v2InBot: 1, v1Drawn: 1, v2Drawn: 1 },
         );
         assert.equal(
           await page.getByText("Hidden Bot", { exact: true }).count(),
@@ -342,14 +330,17 @@ describe("1ma-sidebar with the bots block", () => {
           threadLink(page, id).waitFor({ timeout: 30 * SECOND }),
         ),
       );
-      assert.deepEqual(
-        await counts(page, {
-          v1InProject: [projectSection(projects.alpha), fixture.v1],
-          v2InProject: [projectSection(projects.alpha), fixture.v2],
-          h1InProject: [projectSection(projects.beta), fixture.h1],
-        }),
-        { v1InProject: 1, v2InProject: 1, h1InProject: 1 },
+      const layout = await groupsOf(
+        page,
+        ["Alpha", "Beta"],
+        [fixture.v1, fixture.v2, fixture.plain, fixture.h1],
       );
+      assert.deepEqual(layout.groupOf, {
+        [fixture.v1]: "Alpha",
+        [fixture.v2]: "Alpha",
+        [fixture.plain]: "Alpha",
+        [fixture.h1]: "Beta",
+      });
       await screenshot(page, "sidebar-bots-disabled");
       assert.equal(await page.locator('[data-sidebar-section-id="1ma-bots"]').count(), 0);
       assert.equal(await page.locator("[data-bot-id]").count(), 0);
