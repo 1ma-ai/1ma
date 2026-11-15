@@ -4,6 +4,7 @@ import type { GitHubReader, PullRequest } from "./github/reader.js";
 import type { Completeness, Executor, ServerId, ThreadMetadataRow } from "./observation.js";
 import { runPrPass } from "./pr-pass.js";
 import { PrStore } from "./pr-store.js";
+import { toPullRequestDto } from "./work-rpc.js";
 import { repoPolicy } from "./repos.js";
 import { MIGRATIONS } from "./schema.js";
 import { Store } from "./store.js";
@@ -24,13 +25,14 @@ function pull(number: number, overrides: Partial<PullRequest> = {}): PullRequest
     headRepo: "example/app",
     headRef: `feature/${number}`,
     headSha: `sha${number}`,
+    createdAt: 0,
     updatedAt: 5_000,
     ...overrides,
   };
 }
 
-function claimsOf(number: number, branch = `feature/${number}`) {
-  return { claims: [{ repo: "example/app", number, branch, claimedAt: 1 }] };
+function claimsOf(number: number, branch = `feature/${number}`, claimedAt = 1) {
+  return { claims: [{ repo: "example/app", number, branch, claimedAt }] };
 }
 
 function setup(options: {
@@ -129,7 +131,7 @@ describe("runPrPass", () => {
       branchHint: "mac:thr_mac,linux:thr_linux",
       provenanceGap: false,
     });
-    expect(prStore.provenance("example/app", 7)).toEqual([
+    expect(prStore.chatModels("example/app", 7)).toEqual([
       {
         providerId: "claude-code",
         model: "claude-opus-5-5",
@@ -137,6 +139,47 @@ describe("runPrPass", () => {
         lastSeenAt: 10_000,
       },
     ]);
+  });
+
+  it("delivers to the one chat on a shared branch that claimed a PR, and never calls its model the provenance", async () => {
+    const models: Record<string, string> = { thr_b: "model-before" };
+    const { prStore, run } = setup({
+      threads: {
+        mac: [
+          { id: "thr_a", branch: "feature/7" },
+          { id: "thr_b", branch: "feature/7" },
+        ],
+        linux: [],
+      },
+      metadata: { thr_b: claimsOf(7) },
+      pulls: [pull(7, { author: "mac-bot" })],
+      models,
+    });
+    models.thr_b = "model-after";
+    await run(10_000);
+    const link = prStore.get("example/app", 7);
+    expect(link).toMatchObject({ linkKind: "claim", deliveryThreadId: "thr_b" });
+    const dto = link === null ? null : toPullRequestDto(link, prStore);
+    expect(dto?.link.basis).toBe("claimed by the chat");
+    expect(dto?.provenance).toBe("unknown");
+    expect(dto?.chatModels).toEqual({
+      basis: "claimed by the chat",
+      complete: true,
+      models: [{ providerId: "claude-code", model: "model-after" }],
+    });
+  });
+
+  it("refuses a claim made before the pull request was opened", async () => {
+    const { prStore, run } = setup({
+      threads: { mac: [{ id: "thr_a", branch: "feature/7" }], linux: [] },
+      metadata: { thr_a: claimsOf(7, "feature/7", 100) },
+      pulls: [pull(7, { author: "mac-bot", createdAt: 200 })],
+    });
+    await run(10_000);
+    expect(prStore.get("example/app", 7)).toMatchObject({
+      linkKind: null,
+      claimProblem: "the claim is older than the pull request",
+    });
   });
 
   it("leaves a PR on a shared branch unlinked when no chat claimed it", async () => {
@@ -199,7 +242,7 @@ describe("runPrPass", () => {
       deliveryServerId: "mac",
       deliveryThreadId: "thr_a",
     });
-    expect(prStore.provenance("example/app", 7)).toEqual([]);
+    expect(prStore.chatModels("example/app", 7)).toEqual([]);
   });
 
   it("marks a gap in provenance when the delivery server was not observed", async () => {

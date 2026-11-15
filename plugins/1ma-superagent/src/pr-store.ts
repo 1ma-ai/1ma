@@ -40,7 +40,7 @@ interface RawLink {
   observed_at: number;
 }
 
-export interface ProvenanceRow {
+export interface ChatModelRow {
   providerId: string;
   model: string;
   firstSeenAt: number;
@@ -187,7 +187,7 @@ export class PrStore {
     return changes === 1;
   }
 
-  observeProvenance(
+  observeChatModel(
     repo: string,
     number: number,
     providerId: string,
@@ -203,13 +203,13 @@ export class PrStore {
       .run(repo, number, providerId, model, now, now);
   }
 
-  markProvenanceGap(repo: string, number: number): void {
+  markChatModelGap(repo: string, number: number): void {
     this.#db
       .prepare(`UPDATE pr_links SET provenance_gap = 1 WHERE repo = ? AND number = ?`)
       .run(repo, number);
   }
 
-  provenance(repo: string, number: number): ProvenanceRow[] {
+  chatModels(repo: string, number: number): ChatModelRow[] {
     const rows = this.#db
       .prepare(
         `SELECT provider_id, model, first_seen_at, last_seen_at FROM pr_provenance

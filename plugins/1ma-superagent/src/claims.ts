@@ -71,6 +71,9 @@ export function checkClaim(
       problem: `the pull request author is not a GitHub account of the ${chat.serverId} server`,
     };
   }
+  if (claim.claimedAt < pull.createdAt) {
+    return { ok: false, problem: "the claim is older than the pull request" };
+  }
   if (claim.branch === null || claim.branch !== pull.headRef) {
     return {
       ok: false,

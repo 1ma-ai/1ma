@@ -45,15 +45,11 @@ export function botPullRequest(pr: PullRequestDto) {
     pr: `${pr.repo}#${pr.number}`,
     state: pr.state,
     headSha: pr.headSha.slice(0, 12),
-    link: pr.link.kind === null ? "unlinked" : pr.link.kind,
+    link: pr.link.kind === null ? "unlinked" : pr.link.kind === "claim" ? "claimed" : "manual",
     chat: pr.link.threadId === null ? null : `${pr.link.serverId}:${pr.link.threadId}`,
     linkProblem: pr.link.problem,
-    provenance: pr.provenance.known
-      ? {
-          complete: pr.provenance.complete,
-          models: pr.provenance.models.map((model) => `${model.providerId}/${model.model}`),
-        }
-      : "unknown",
+    provenance: pr.provenance,
+    chatModelsClaimed: pr.chatModels.models.map((model) => `${model.providerId}/${model.model}`),
   };
 }
 

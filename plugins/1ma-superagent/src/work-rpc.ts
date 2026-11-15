@@ -30,9 +30,11 @@ const pullRequestSchema = z.object({
     threadId: z.string().nullable(),
     problem: z.string().nullable(),
     branchHint: z.array(z.string()),
+    basis: z.enum(["claimed by the chat", "set by the owner"]).nullable(),
   }),
-  provenance: z.object({
-    known: z.boolean(),
+  provenance: z.literal("unknown"),
+  chatModels: z.object({
+    basis: z.literal("claimed by the chat"),
     complete: z.boolean(),
     models: z.array(z.object({ providerId: z.string(), model: z.string() })),
   }),
@@ -144,7 +146,7 @@ export const workRpcContract = defineRpcContract({
 });
 
 export function toPullRequestDto(link: PrLinkRow, prStore: PrStore): PullRequestDto {
-  const models = link.linkKind === "claim" ? prStore.provenance(link.repo, link.number) : [];
+  const models = link.linkKind === "claim" ? prStore.chatModels(link.repo, link.number) : [];
   return {
     repo: link.repo,
     number: link.number,
@@ -158,10 +160,17 @@ export function toPullRequestDto(link: PrLinkRow, prStore: PrStore): PullRequest
       threadId: link.deliveryThreadId,
       problem: link.claimProblem,
       branchHint: link.branchHint === null ? [] : link.branchHint.split(","),
+      basis:
+        link.linkKind === "claim"
+          ? "claimed by the chat"
+          : link.linkKind === "manual"
+            ? "set by the owner"
+            : null,
     },
-    provenance: {
-      known: link.linkKind === "claim" && models.length > 0,
-      complete: link.linkKind === "claim" && models.length > 0 && !link.provenanceGap,
+    provenance: "unknown",
+    chatModels: {
+      basis: "claimed by the chat",
+      complete: models.length > 0 && !link.provenanceGap,
       models: models.map((row) => ({ providerId: row.providerId, model: row.model })),
     },
     observedAt: link.observedAt,

@@ -22,6 +22,7 @@ function setup(author = "mac-bot", hint: string | null = "mac:thr_a") {
       headRepo: "example/app",
       headRef: "feature/x",
       headSha: "abc",
+      createdAt: 0,
       updatedAt: 1,
     },
     { kind: "none", problem: null },

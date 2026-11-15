@@ -12,6 +12,7 @@ const pullSchema = z.object({
   number: z.number().int().positive(),
   state: z.enum(["open", "closed"]),
   merged_at: z.string().nullable().optional(),
+  created_at: z.string(),
   updated_at: z.string(),
   user: z.object({ login: z.string() }).nullable(),
   head: z.object({
@@ -30,6 +31,7 @@ export interface PullRequest {
   readonly headRepo: string | null;
   readonly headRef: string;
   readonly headSha: string;
+  readonly createdAt: number;
   readonly updatedAt: number;
 }
 
@@ -49,6 +51,7 @@ function toPullRequest(raw: z.infer<typeof pullSchema>): PullRequest {
     headRepo: raw.head.repo?.full_name.toLowerCase() ?? null,
     headRef: raw.head.ref,
     headSha: raw.head.sha,
+    createdAt: Date.parse(raw.created_at),
     updatedAt: Date.parse(raw.updated_at),
   };
 }

@@ -26,11 +26,14 @@ const REPOS = JSON.stringify([
   { repo: "example/app", accounts: { mac: ["mac-bot"], linux: ["linux-bot"] } },
 ]);
 
+const PULLS_OPENED_AT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
 function apiPull(number, author, ref) {
   return {
     number,
     state: "open",
     merged_at: null,
+    created_at: PULLS_OPENED_AT,
     updated_at: new Date().toISOString(),
     user: { login: author },
     head: { ref, sha: `sha${number}`, repo: { full_name: "example/app" } },

@@ -168,7 +168,7 @@ export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] 
       return pullsOfRepo(deps, github, repo, claimed, problems);
     }),
   );
-  const provenanceReads: Array<Promise<void>> = [];
+  const modelReads: Array<Promise<void>> = [];
   for (const pull of pullsByRepo.flat()) {
     const decision = decideLink(
       deps.policy,
@@ -191,15 +191,15 @@ export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] 
       thread === undefined ||
       deps.observed.get(serverId) === "failed"
     ) {
-      deps.prStore.markProvenanceGap(pull.repo, pull.number);
+      deps.prStore.markChatModelGap(pull.repo, pull.number);
       continue;
     }
-    provenanceReads.push(
+    modelReads.push(
       executor.threadModel(threadId, deps.signal).then(
         (model) => {
-          if (model === null) deps.prStore.markProvenanceGap(pull.repo, pull.number);
+          if (model === null) deps.prStore.markChatModelGap(pull.repo, pull.number);
           else
-            deps.prStore.observeProvenance(
+            deps.prStore.observeChatModel(
               pull.repo,
               pull.number,
               thread.providerId,
@@ -208,12 +208,12 @@ export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] 
             );
         },
         (error: unknown) => {
-          deps.prStore.markProvenanceGap(pull.repo, pull.number);
+          deps.prStore.markChatModelGap(pull.repo, pull.number);
           problems.push(`${serverId}:${threadId} model: ${describeError(error)}`);
         },
       ),
     );
   }
-  await Promise.all(provenanceReads);
+  await Promise.all(modelReads);
   return { problems };
 }

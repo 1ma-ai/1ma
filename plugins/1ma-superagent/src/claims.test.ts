@@ -19,6 +19,7 @@ const pull: PullRequest = {
   headRepo: "example/app",
   headRef: "feature/x",
   headSha: "abc",
+  createdAt: 0,
   updatedAt: 1,
 };
 

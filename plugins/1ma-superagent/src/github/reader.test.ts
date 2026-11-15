@@ -6,6 +6,7 @@ function apiPull(number: number, updatedAt: string, overrides: Record<string, un
     number,
     state: "open",
     merged_at: null,
+    created_at: "2026-11-01T00:00:00Z",
     updated_at: updatedAt,
     user: { login: "Mac-Bot" },
     head: { ref: `feature/${number}`, sha: `sha${number}`, repo: { full_name: "Example/App" } },
@@ -30,6 +31,7 @@ describe("GitHub reader", () => {
       headRepo: "example/app",
       headRef: "feature/3",
       headSha: "sha3",
+      createdAt: Date.parse("2026-11-01T00:00:00Z"),
       updatedAt: Date.parse("2026-11-14T10:00:00Z"),
     });
   });
