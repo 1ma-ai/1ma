@@ -23,6 +23,7 @@ export interface DispatcherDeps {
   readonly now: () => number;
   readonly onAnswered: (outcome: AnswerOutcome) => void;
   readonly signal: AbortSignal;
+  readonly changed?: () => void;
 }
 
 export class QuestionDispatcher {
@@ -38,7 +39,9 @@ export class QuestionDispatcher {
   }
 
   dispatch(): void {
-    if (this.#live !== null || this.#deps.signal.aborted) return;
+    if (this.#deps.signal.aborted) return;
+    this.#deps.changed?.();
+    if (this.#live !== null) return;
     const chat = this.#deps.chat();
     if (chat === null) return;
     const now = this.#deps.now();

@@ -238,12 +238,15 @@ export class QuestionStore {
     return apply();
   }
 
-  cardState(id: string, token: string): { open: boolean; decided: string | null } {
+  cardState(id: string, token: string): { open: boolean; decided: string | null; waiting: number } {
+    const waiting = this.waiting().filter((question) => question.id !== id).length;
     const question = this.get(id);
-    if (question === null || question.token !== token) return { open: false, decided: null };
+    if (question === null || question.token !== token)
+      return { open: false, decided: null, waiting };
     return {
       open: question.state === "open",
       decided: question.state === "answered" ? question.answer : null,
+      waiting,
     };
   }
 }

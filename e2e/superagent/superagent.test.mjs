@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { Server, requireEnv, waitFor } from "./servers.mjs";
@@ -10,6 +10,7 @@ const packageDir = path.join(root, "server-package");
 const PLUGIN = "1ma-superagent";
 
 const ghFixtures = path.join(root, "github.json");
+const ghLog = path.join(root, "gh-calls.log");
 const fakeGhDir = path.resolve(import.meta.dirname, "fake-gh");
 const REMOTE = "https://github.com/example/app.git";
 const journal = path.join(root, "journal.jsonl");
@@ -60,6 +61,7 @@ const control = new Server({
   env: {
     PATH: `${fakeGhDir}${path.delimiter}${process.env.PATH ?? ""}`,
     E2E_GH_FIXTURES: ghFixtures,
+    E2E_GH_LOG: ghLog,
   },
 });
 const executor = new Server({ name: "executor", port: 39887, daemonPort: 39897, root, packageDir });
@@ -240,5 +242,16 @@ describe("1ma-superagent on two 1ma servers", () => {
     const list = await executor.rpc(PLUGIN, "work.v1.list", {});
     assert.deepEqual(list.works, []);
     assert.deepEqual(list.servers, []);
+  });
+
+  it("asks gh only for GET reads of pull requests and commits", () => {
+    const calls = readFileSync(ghLog, "utf8")
+      .split("\n")
+      .filter((line) => line !== "");
+    assert.ok(calls.length > 0, "gh was called");
+    assert.deepEqual(
+      calls.filter((line) => line.startsWith("REJECTED")),
+      [],
+    );
   });
 });

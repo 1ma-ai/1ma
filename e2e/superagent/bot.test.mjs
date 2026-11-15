@@ -12,6 +12,10 @@ const stubPath = path.resolve(import.meta.dirname, "stub-acp-agent.mjs");
 const fakeGhDir = path.resolve(import.meta.dirname, "fake-gh");
 const stubLog = path.join(root, "stub.log");
 const ghFixtures = path.join(root, "github.json");
+const ghLog = path.join(root, "gh-calls.log");
+const REPOS = JSON.stringify([{ repo: "example/app", accounts: { linux: ["linux-bot"] } }]);
+const FIRST_PROMPT =
+  "[stub:reply создай чат на linux и вызови sa_start_chat]\n  второй абзац  с  пробелами \n\tи табуляцией ";
 const PLUGIN = "1ma-superagent";
 const PROVIDER = "acp-stub";
 const MODEL = "acp-default";
@@ -26,6 +30,7 @@ const control = new Server({
   env: {
     PATH: `${fakeGhDir}${path.delimiter}${process.env.PATH ?? ""}`,
     E2E_GH_FIXTURES: ghFixtures,
+    E2E_GH_LOG: ghLog,
   },
 });
 const executor = new Server({
@@ -214,6 +219,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
     for (const server of [control, executor]) {
       server.bb(["plugin", "install", pluginDir, "--yes"]);
       server.bb(["plugin", "config", "provider-acp", "set", "customAgents", agents]);
+      server.bb(["plugin", "config", PLUGIN, "set", "repos", REPOS]);
     }
     control.bb(["plugin", "config", PLUGIN, "set", "role", "control"]);
     control.bb(["plugin", "config", PLUGIN, "set", "linuxServerUrl", proxy.url]);
@@ -221,6 +227,11 @@ describe("1ma-superagent bot actions with a model turn", () => {
     ids.executorProject = await executor.createProject(
       "exec-app",
       path.join(root, "repos/exec-app"),
+    );
+    ids.claimProject = await executor.createProject(
+      "exec-claims",
+      path.join(root, "repos/exec-claims"),
+      "https://github.com/example/app.git",
     );
     ids.excludableProject = await executor.createProject(
       "exec-excludable",
@@ -286,9 +297,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
       "the bot's session lists sa_start_chat",
     );
     const known = await knownActions();
-    await sayToBot(
-      startCall("[stub:reply создай чат на linux и вызови sa_start_chat]", "first task"),
-    );
+    await sayToBot(startCall(FIRST_PROMPT, "first task"));
     const proposal = await newestAction(known);
     assert.equal(proposal.state, "proposed");
     const toolResult = stubRecords().findLast((entry) => entry.kind === "tool");
@@ -306,6 +315,9 @@ describe("1ma-superagent bot actions with a model turn", () => {
       return current?.state === "bound" ? current : null;
     });
     ids.firstTask = bound.threadId;
+    await waitFor("the executor received the task", 120_000, async () =>
+      stubRecords().some((entry) => entry.kind === "prompt" && entry.parts?.includes(FIRST_PROMPT)),
+    );
     assert.deepEqual(
       (await spawnedOnExecutor()).map((row) => row.threadId),
       [bound.threadId],
@@ -334,6 +346,13 @@ describe("1ma-superagent bot actions with a model turn", () => {
     );
     assert.equal(await turnsDone(control, ids.bot), turnsBefore, "the bot's model did not run");
     assert.deepEqual(await knownActions(), actionsBefore, "no new action from the executor's text");
+    const marker = "[stub:reply the turn after a result card]";
+    await sayToBot(marker);
+    const next = stubRecords().findLast(
+      (entry) => entry.kind === "prompt" && entry.text.includes(marker),
+    );
+    assert.ok(next, "the bot's next turn reached the agent");
+    assert.ok(!next.text.includes("создай чат"), "the executor's text is not in the bot's input");
   });
 
   it("finds a chat whose creation answer was lost and creates no second one", async () => {
@@ -420,6 +439,13 @@ describe("1ma-superagent bot actions with a model turn", () => {
     });
     const card = await waitCard("first of two", (data) => data.quote === "[stub:reply queued one]");
     assert.equal((await pendingCards()).length, 1, "one card open in the chat");
+    assert.equal(card.payload.data.waiting, 1, "the card counts the one behind it");
+    const { questionId, token } = card.payload.data;
+    await sayToBot(startCall("[stub:reply queued three]", "queued three"));
+    await waitFor("the card counts the third", 60_000, async () => {
+      const state = await control.rpc(PLUGIN, "questions.v1.state", { questionId, token });
+      return state.waiting === 2;
+    });
     const waiting = await control.rpc(PLUGIN, "work.v1.waiting", null);
     assert.equal(waiting.questions.filter((question) => question.kind === "start_chat").length, 2);
     await respond(card, "no");
@@ -428,6 +454,62 @@ describe("1ma-superagent bot actions with a model turn", () => {
       (data) => data.quote === "[stub:reply queued two]",
     );
     await respond(second, "no");
+    const third = await waitCard(
+      "third of three",
+      (data) => data.quote === "[stub:reply queued three]",
+    );
+    await respond(third, "no");
+  });
+
+  it("links a PR that a Linux chat claimed through its own tool call", async () => {
+    await clearCards();
+    const pull = {
+      number: 41,
+      state: "open",
+      merged_at: null,
+      created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      updated_at: new Date().toISOString(),
+      user: { login: "linux-bot" },
+      head: { ref: null, sha: "a".repeat(40), repo: { full_name: "example/app" } },
+      base: { repo: { full_name: "example/app" } },
+    };
+    const chat = await spawnChat(
+      executor,
+      ids.claimProject,
+      "claimer",
+      '[stub:call sa_claim_pr {"url":"https://github.com/example/app/pull/41"}]',
+    );
+    const claimed = await waitFor("the claim tool ran", 120_000, async () =>
+      stubRecords().find((entry) => entry.kind === "tool" && entry.name === "sa_claim_pr"),
+    );
+    assert.match(claimed.output ?? "", /^Claimed example\/app#41/);
+    const { threads } = await executor.api("POST", "/threads/plugin-metadata", {
+      pluginId: PLUGIN,
+      threadIds: [chat],
+    });
+    const branch = threads[0]?.metadata?.claims?.[0]?.branch;
+    assert.equal(typeof branch, "string", "the claim recorded the chat's branch");
+    pull.head.ref = branch;
+    writeFileSync(
+      ghFixtures,
+      JSON.stringify({ "/repos/example/app/pulls": [pull], "/repos/example/app/pulls/41": pull }),
+    );
+    const linked = await waitFor("the PR is linked to the claiming chat", PASS, async () => {
+      const { pullRequests } = await control.rpc(PLUGIN, "work.v1.pullRequests", {});
+      const pr = pullRequests.find((candidate) => candidate.number === 41);
+      return pr?.link.kind === "claim" ? pr : null;
+    });
+    assert.deepEqual(
+      { serverId: linked.link.serverId, threadId: linked.link.threadId, basis: linked.link.basis },
+      { serverId: "linux", threadId: chat, basis: "claimed by the chat" },
+    );
+    assert.equal(linked.provenance, "unknown");
+    const calls = readFileSync(ghLog, "utf8").split("\n");
+    assert.ok(calls.some((line) => line.startsWith("/repos/example/app/pulls")));
+    assert.deepEqual(
+      calls.filter((line) => line.startsWith("REJECTED")),
+      [],
+    );
   });
 
   it("runs an action exactly once when the control server restarts between the answer and the send", async () => {

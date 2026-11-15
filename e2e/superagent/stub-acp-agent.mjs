@@ -78,11 +78,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function handlePrompt(message) {
   const { sessionId, prompt } = message.params;
-  const text = (prompt ?? [])
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join("\n");
-  record({ kind: "prompt", sessionId, text });
+  const parts = (prompt ?? []).filter((part) => part.type === "text").map((part) => part.text);
+  const text = parts.join("\n");
+  record({ kind: "prompt", sessionId, text, parts });
   const session = sessions.get(sessionId);
   const call = /\[stub:call (\S+) (\{.*\})\]/s.exec(text);
   const reply = /\[stub:reply ([^\]]*)\]/s.exec(text);

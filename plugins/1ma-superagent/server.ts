@@ -23,7 +23,7 @@ import {
 } from "./src/action-runner.js";
 import { ActionStore } from "./src/actions.js";
 import { createBackground } from "./src/background.js";
-import { questionRpcContract } from "./src/card.js";
+import { QUESTIONS_TAG, questionRpcContract } from "./src/card.js";
 import { QuestionDispatcher } from "./src/dispatcher.js";
 import {
   BYPASS_KIND,
@@ -163,6 +163,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
       now: Date.now,
       onAnswered: () => afterAnswer(),
       signal: lifecycle.signal,
+      changed: () => bb.rpc.experimental_invalidate([QUESTIONS_TAG]),
     });
     const executorsFor = options.executors ?? defaultExecutors;
     const runner = new PassRunner(
@@ -257,6 +258,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
       "questions.v1.decide": ({ questionId, token, optionId }) => {
         const outcome = questions.answer(questionId, token, optionId, kinds, Date.now());
         if (outcome === "applied") afterAnswer();
+        bb.rpc.experimental_invalidate([QUESTIONS_TAG]);
         return { outcome };
       },
       "questions.v1.state": ({ questionId, token }) => questions.cardState(questionId, token),

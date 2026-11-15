@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
+  experimental_useRpcQuery,
   type PluginPendingInteractionProps,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
@@ -14,29 +15,28 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [decided, setDecided] = useState<string | null>(null);
+  const closing = useRef(false);
   const parsed = questionPayloadSchema.safeParse(interaction.payload);
   const questionId = parsed.success ? parsed.data.questionId : null;
   const token = parsed.success ? parsed.data.token : null;
 
+  const state = experimental_useRpcQuery({
+    contract: questionRpcContract,
+    method: "questions.v1.state",
+    input: { questionId: questionId ?? "", token: token ?? "" },
+    enabled: questionId !== null && token !== null,
+  }).data;
+
   useEffect(() => {
-    if (questionId === null || token === null) return;
-    let live = true;
-    rpc.call("questions.v1.state", { questionId, token }).then(
-      (state) => {
-        if (!live) return;
-        if (state.decided !== null) {
-          setDecided(state.decided);
-          void submit({ token, optionId: state.decided }).catch(() => {});
-        } else if (!state.open) {
-          void cancel().catch(() => {});
-        }
-      },
-      () => {},
-    );
-    return () => {
-      live = false;
-    };
-  }, [questionId, token]);
+    if (state === undefined || token === null || closing.current) return;
+    closing.current = state.decided !== null || !state.open;
+    if (state.decided !== null) {
+      setDecided(state.decided);
+      void submit({ token, optionId: state.decided }).catch(() => {});
+    } else if (!state.open) {
+      void cancel().catch(() => {});
+    }
+  }, [state?.decided, state?.open, token]);
 
   if (!parsed.success) {
     return (
@@ -54,13 +54,19 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
   }
   const card = parsed.data;
   const choose = (optionId: string) => {
+    if (closing.current) return;
     setBusy(true);
     setProblem(null);
     rpc
       .call("questions.v1.decide", { questionId: card.questionId, token: card.token, optionId })
       .then(async ({ outcome }) => {
-        if (RECORDED.has(outcome)) await submit({ token: card.token, optionId });
-        else setProblem(strings.cardNotRecorded);
+        if (!RECORDED.has(outcome)) {
+          setProblem(strings.cardNotRecorded);
+          return;
+        }
+        if (closing.current) return;
+        closing.current = true;
+        await submit({ token: card.token, optionId });
       })
       .catch(() => setProblem(strings.cardNotRecorded))
       .finally(() => setBusy(false));
@@ -105,8 +111,10 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
         <p className="text-xs text-muted-foreground">{strings.cardDecided(decidedLabel)}</p>
       )}
       {problem === null ? null : <p className="text-xs text-destructive">{problem}</p>}
-      {card.waiting > 0 ? (
-        <p className="text-xs text-muted-foreground">{strings.moreWaiting(card.waiting)}</p>
+      {(state?.waiting ?? card.waiting) > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          {strings.moreWaiting(state?.waiting ?? card.waiting)}
+        </p>
       ) : null}
     </div>
   );

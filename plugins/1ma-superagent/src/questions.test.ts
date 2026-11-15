@@ -288,4 +288,16 @@ describe("question dispatcher", () => {
     await settle();
     expect(store.get(id)).toMatchObject({ state: "open", token });
   });
+
+  it("counts the questions still waiting behind an open card as the queue changes", () => {
+    const { makeDispatcher, ask, pending, store } = setup();
+    const id = ask("first");
+    if (id === null) throw new Error("not asked");
+    makeDispatcher().dispatch();
+    const { token, waiting } = payloadOf(pending()[0] ?? { payload: null });
+    expect(waiting).toBe(0);
+    ask("second");
+    ask("third");
+    expect(store.cardState(id, token).waiting).toBe(2);
+  });
 });

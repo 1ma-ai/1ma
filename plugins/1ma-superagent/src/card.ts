@@ -34,6 +34,8 @@ export const answerSchema = z.object({ token: z.string(), optionId: z.string() }
 export const ANSWER_OUTCOMES = ["applied", "recorded", "stale", "unknown", "rejected"] as const;
 export type AnswerOutcome = (typeof ANSWER_OUTCOMES)[number];
 
+export const QUESTIONS_TAG = "questions";
+
 export const questionRpcContract = {
   "questions.v1.decide": {
     input: z
@@ -47,6 +49,13 @@ export const questionRpcContract = {
   },
   "questions.v1.state": {
     input: z.object({ questionId: z.string().max(80), token: z.string().max(80) }).strict(),
-    output: z.object({ open: z.boolean(), decided: z.string().nullable() }).strict(),
+    output: z
+      .object({
+        open: z.boolean(),
+        decided: z.string().nullable(),
+        waiting: z.number().int().min(0),
+      })
+      .strict(),
+    tags: () => [QUESTIONS_TAG],
   },
 } satisfies Record<string, PluginRpcMethodContract>;
