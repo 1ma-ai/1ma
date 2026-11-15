@@ -19,21 +19,23 @@
 - `bot-threads.ts` — какие чаты уходят из проектов: чаты видимых ботов с
   потомками; чаты скрытого бота остаются в проектах.
 - `server.ts` — настройка «Show bots» и однократный перенос настроек
-  штатного списка (`thread-list` → `listPreferences`) при первом чтении.
+  штатного списка (`thread-list` → `listPreferences`): при загрузке до
+  переноса старых `sidebar.*`, иначе при первом чтении; уже сохранённые
+  ключи не перезаписываются.
 - `bots-rpc.ts` — часть контракта `bots.v1` плагина `1ma-bots`, которую
   читает панель.
 
 ## Точки подключения в файлах bb
 
-| Файл                                                         | Правка                                                                          |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------- |
-| `package.json`                                               | имя `bb-plugin-1ma-sidebar`, описание, `engines`                                |
-| `app.tsx`                                                    | заголовок слота «1ma Sidebar»                                                   |
-| `server.ts`                                                  | `register1maSidebar(bb, store)`; `copyBuiltInPreferences()` в `listPreferences` |
-| `app/model/use-sidebar-data.ts`                              | `useWithoutBotThreads(...)` вокруг `experimental_useSidebarThreads`             |
-| `app/list/ProjectList.tsx`                                   | `<BotsBlock … />` после `<SidebarDraftPresenceSync />`                          |
-| `shared/preferences.ts`, `app/rows/ThreadRow.tsx` и их тесты | ключи `1ma-sidebar/move`, `1ma-sidebar/customizeRowActions`                     |
-| `skills/1ma-sidebar/SKILL.md`                                | имя навыка `1ma-sidebar`, команда `bb 1ma-sidebar`                              |
-| `vitest.config.ts`                                           | `maxWorkers: 2`, имя проекта                                                    |
-| `tsconfig.json`                                              | `1ma/**` в `include`                                                            |
-| `PLUGIN_OVERVIEW.md`                                         | описание плагина 1ma                                                            |
+| Файл                                                         | Правка                                                                                                                         |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `package.json`                                               | имя `bb-plugin-1ma-sidebar`, описание, `engines`                                                                               |
+| `app.tsx`                                                    | заголовок слота «1ma Sidebar»                                                                                                  |
+| `server.ts`                                                  | `register1maSidebar(bb, { write, stored })`; `copyBuiltInPreferences()` перед `migrateFromUiPreferences` и в `listPreferences` |
+| `app/model/use-sidebar-data.ts`                              | `useWithoutBotThreads(...)` вокруг `experimental_useSidebarThreads`                                                            |
+| `app/list/ProjectList.tsx`                                   | `<BotsBlock … />` после `<SidebarDraftPresenceSync />`                                                                         |
+| `shared/preferences.ts`, `app/rows/ThreadRow.tsx` и их тесты | ключи `1ma-sidebar/move`, `1ma-sidebar/customizeRowActions`                                                                    |
+| `skills/1ma-sidebar/SKILL.md`                                | имя навыка `1ma-sidebar`, команда `bb 1ma-sidebar`                                                                             |
+| `vitest.config.ts`                                           | `maxWorkers: 2`, имя проекта                                                                                                   |
+| `tsconfig.json`                                              | `1ma/**` в `include`                                                                                                           |
+| `PLUGIN_OVERVIEW.md`                                         | описание плагина 1ma                                                                                                           |

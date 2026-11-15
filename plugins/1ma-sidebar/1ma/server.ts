@@ -12,6 +12,8 @@ const COPIED_KV_KEY = "1ma/copied-built-in-preferences";
 
 interface PreferenceWriter {
   write(key: PreferenceKey, value: unknown, origin: string | null): Promise<unknown>;
+  /** The value stored in this plugin for the key, undefined when none. */
+  stored(key: PreferenceKey): Promise<unknown>;
 }
 
 export function register1maSidebar(bb: BbPluginApi, store: PreferenceWriter) {
@@ -24,8 +26,11 @@ export function register1maSidebar(bb: BbPluginApi, store: PreferenceWriter) {
     },
   });
 
-  // Copies the owner's layout from the built-in thread list once, the first
-  // time the app reads preferences: by then every plugin has loaded.
+  // Copies the owner's layout from the built-in thread list once. It is tried
+  // at load, before bb's migration of old sidebar.* settings, so the built-in
+  // list's newer values come first; if the built-in list is not loaded yet,
+  // again on the first read from the app. Keys already stored here are never
+  // overwritten.
   let pending: Promise<void> | null = null;
   const copyBuiltInPreferences = () => {
     pending ??= copyOnce(bb, store).catch((error: unknown) => {
@@ -61,6 +66,7 @@ async function copyOnce(bb: BbPluginApi, store: PreferenceWriter): Promise<void>
       ) {
         continue;
       }
+      if ((await store.stored(key)) !== undefined) continue;
       await store.write(key, value, null);
       copied.push(key);
     }

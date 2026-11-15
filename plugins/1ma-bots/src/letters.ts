@@ -108,7 +108,6 @@ export function routeLetter(
     db.prepare(
       "INSERT INTO pending_letters (token, chain_id, to_thread, created_at) VALUES (?, ?, ?, ?)",
     ).run(token, chainId, toThreadId, args.now);
-    store.setCompleted(toThreadId, false);
     return {
       chainId,
       token,

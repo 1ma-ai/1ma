@@ -130,3 +130,23 @@ describe("the bots block", () => {
     await screen.findByText("Banner draft");
   });
 });
+
+describe("Codex review of stage 2: a bot with only done conversations", () => {
+  it("still opens its list, and Done reaches the conversation", async () => {
+    render({
+      bots: () => ({
+        bots: [
+          {
+            ...marketer(),
+            threads: [{ threadId: "thr_bot", startedFromBot: true, completed: true }],
+          },
+        ],
+      }),
+    });
+    await screen.findByText("Marketer");
+    expect(screen.queryByText("Creatives")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Marketer: 0 conversations" }));
+    fireEvent.click(await screen.findByText(strings.done(1)));
+    await screen.findByText("Creatives");
+  });
+});

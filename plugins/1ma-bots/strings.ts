@@ -124,6 +124,9 @@ export const agentText = {
   sent: (name: string, threadId: string, number: number, limit: number) =>
     `Letter ${number}/${limit} queued for ${name} in conversation ${threadId}. Delivery means it was accepted, not answered.`,
   notABot: "This conversation does not belong to a bot.",
+  noSuchThread: "There is no such conversation.",
+  notAssignable:
+    "Only a top-level conversation that is not archived can be assigned to a bot; its child conversations follow it.",
   needsOwner:
     "This conversation is waiting for the owner (a question or an error), so it cannot be marked done.",
 } as const;

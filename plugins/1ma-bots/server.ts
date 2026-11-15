@@ -268,8 +268,9 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       changed();
       const from = store.get(route.fromBotId);
       const to = store.get(route.toBotId);
+      let delivery: string;
       try {
-        await bb.sdk.threads.send({
+        ({ delivery } = await bb.sdk.threads.send({
           threadId: route.toThreadId,
           senderThreadId: ctx.threadId,
           mode: "queue-if-active",
@@ -288,7 +289,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
               }),
             },
           ],
-        });
+        }));
       } catch (error) {
         store.record({
           botId: route.fromBotId,
@@ -300,6 +301,14 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
           },
         });
         throw error;
+      }
+      if (delivery === "sent") {
+        accepted({
+          threadId: route.toThreadId,
+          fromOwner: false,
+          texts: [`<<<letter ${route.token}`],
+          joinsRunningTurn: false,
+        });
       }
       return agentText.sent(to.name, route.toThreadId, route.letterNumber, limits.chainLetters);
     },
@@ -325,18 +334,18 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       block.type === "text" && block.text !== undefined ? [block.text] : [],
     );
 
-  // bb applies its own waits (a busy thread) after this hook, so a message
-  // that meets a running turn is not accepted yet: it waits in the queue and
-  // is accepted by message.dispatched when it leaves it.
+  // A letter is accepted only once bb confirms it reached a turn: send()
+  // answers "sent" (handled in bot_message), or a queued row leaves the
+  // queue (message.dispatched). The dispatch hook cannot know: other plugins'
+  // hooks and bb's own waits are decided after it.
+  // The owner's own message on an idle conversation starts a new exchange
+  // here already: no turn runs there, so nothing can write a letter before
+  // it is dispatched, and reopening it follows the owner's action.
   bb.experimental_hooks.on("message.dispatch", (ctx) => {
-    const meetsRunningTurn = ctx.attempt === "start-turn" && BUSY_STATUSES.has(ctx.thread.status);
-    if (meetsRunningTurn) return { action: "proceed" };
-    accepted({
-      threadId: ctx.thread.id,
-      fromOwner: ctx.initiator === "user" && ctx.senderThreadId === null,
-      texts: [ctx.input.text, ...textsOf(ctx.input.blocks)],
-      joinsRunningTurn: ctx.attempt === "join-turn",
-    });
+    const fromOwner = ctx.initiator === "user" && ctx.senderThreadId === null;
+    if (fromOwner && !BUSY_STATUSES.has(ctx.thread.status)) {
+      accepted({ threadId: ctx.thread.id, fromOwner, texts: [], joinsRunningTurn: false });
+    }
     return { action: "proceed" };
   });
   bb.events.on("message.dispatched", ({ entry }) =>
@@ -385,6 +394,21 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       }
     }
   });
+
+  // The same rule as the Assign to bot menu, enforced where it is written:
+  // only an existing, top-level, unarchived conversation joins a bot.
+  const requireAssignable = async (threadId: string) => {
+    let thread: Awaited<ReturnType<typeof bb.sdk.threads.get>>;
+    try {
+      thread = await bb.sdk.threads.get({ threadId });
+    } catch {
+      throw new BotsError("not_found", agentText.noSuchThread);
+    }
+    if (thread.deletedAt !== null) throw new BotsError("not_found", agentText.noSuchThread);
+    if (thread.parentThreadId !== null || thread.archivedAt !== null) {
+      throw new BotsError("invalid", agentText.notAssignable);
+    }
+  };
 
   const startIn = async (botId: string, create: (token: string) => Promise<{ id: string }>) => {
     // A failed create keeps its token: the thread may exist anyway, and its
@@ -441,7 +465,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       changed();
       return { ok: true as const };
     },
-    "bots.v1.assign": ({ threadId, botId, place }, ctx) => {
+    "bots.v1.assign": async ({ threadId, botId, place }, ctx) => {
+      if (botId !== null) {
+        store.get(botId);
+        await requireAssignable(threadId);
+      }
       const previous = store.botOfThread(threadId);
       if (botId === null) {
         store.unbind(threadId);

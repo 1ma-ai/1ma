@@ -517,7 +517,11 @@ function placeAt(positions: readonly number[], place: "first" | "after-first" | 
 
 function requireSameSet(given: readonly string[], actual: readonly string[]): void {
   const wanted = new Set(actual);
-  if (given.length !== wanted.size || !given.every((id) => wanted.has(id))) {
+  if (
+    given.length !== wanted.size ||
+    new Set(given).size !== given.length ||
+    !given.every((id) => wanted.has(id))
+  ) {
     throw new BotsError("invalid", "Pass the complete current list in its new order");
   }
 }

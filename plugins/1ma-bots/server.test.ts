@@ -20,18 +20,20 @@ interface SentLetter {
 function setup(settings: Record<string, number> = {}) {
   const delivery = { immediate: true, queued: [] as SentLetter[] };
   // Stands in for bb starting the recipient's turn with the queued letter.
+  // Stands in for bb taking a queued letter out of the queue into a turn.
   const deliver = (letter: SentLetter) =>
-    host.harness.registrations.hooks["message.dispatch"]!(
-      makeMessageDispatchHookContext({
-        thread: { id: letter.threadId },
+    host.harness.behavior.emitThreadEvent("message.dispatched", {
+      entry: makeQueueEntry({
+        threadId: letter.threadId,
         initiator: "agent",
         senderThreadId: letter.senderThreadId ?? null,
-        input: {
-          text: letter.input.map((block) => block.text).join("\n"),
-          blocks: letter.input as never,
-        },
+        content: letter.input.map((block) => ({
+          type: "text",
+          text: block.text,
+          mentions: [],
+        })) as never,
       }),
-    );
+    });
   let clock = START;
   let nextThread = 100;
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
@@ -49,8 +51,8 @@ function setup(settings: Record<string, number> = {}) {
               block.type === "text" ? [{ type: "text", text: block.text }] : [],
             ),
           };
-          if (delivery.immediate) await deliver(letter);
-          else delivery.queued.push(letter);
+          if (delivery.immediate) return { delivery: "sent" };
+          delivery.queued.push(letter);
           return { delivery: "queued" };
         },
         spawn: async () => ({ id: `thr_new${nextThread++}` }),
@@ -652,5 +654,72 @@ describe("end-to-end finding: a letter meets a running turn", () => {
       }),
     });
     expect(await t.letter("thr_b", a.id)).toContain("Letter 2/3");
+  });
+});
+
+describe("Codex review of stage 2", () => {
+  it("a letter another hook holds back changes neither the exchange nor done until it leaves the queue", async () => {
+    const t = setup({ chainLetters: 3 });
+    const a = await t.create("Alpha");
+    const b = await t.create("Beta");
+    await t.assign("thr_a", a.id);
+    await t.assign("thr_b", b.id);
+    await t.assign("thr_b2", b.id);
+    await t.dispatch("thr_a", "user", null);
+    await t.dispatch("thr_b2", "user", null);
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_b2", completed: true });
+    t.delivery.immediate = false;
+    await t.letter("thr_a", b.id, "thr_b2");
+    const queued = t.delivery.queued[0]!;
+    await t.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: { id: "thr_b2", status: "idle" },
+        attempt: "start-turn",
+        initiator: "agent",
+        senderThreadId: "thr_a",
+        input: { text: queued.input[0]!.text, blocks: queued.input as never },
+      }),
+    );
+    const doneOf = async () =>
+      (await t.list()).bots
+        .find((bot) => bot.id === b.id)!
+        .threads.find((thread) => thread.threadId === "thr_b2")!.completed;
+    expect(await doneOf()).toBe(true);
+    t.delivery.immediate = true;
+    expect(await t.letter("thr_b2", a.id)).toContain("Letter 1/3");
+    await t.deliver(queued);
+    expect(await doneOf()).toBe(false);
+    expect(await t.letter("thr_b2", a.id)).toContain("Letter 2/3");
+  });
+
+  it("Assign to bot refuses a missing, child or archived conversation and leaves the bot as it was", async () => {
+    const t = setup();
+    const bot = await t.create("Marketer");
+    await t.assign("thr_ok", bot.id);
+    t.threads.set("thr_child", makeThreadResponse({ id: "thr_child", parentThreadId: "thr_ok" }));
+    t.threads.set("thr_old", makeThreadResponse({ id: "thr_old", archivedAt: START }));
+    t.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
+      const thread = t.threads.get(threadId);
+      if (thread === undefined && threadId === "thr_missing") throw new Error("not found");
+      return thread ?? makeThreadResponse({ id: threadId });
+    });
+    await expect(t.assign("thr_missing", bot.id)).rejects.toThrow(/no such conversation/);
+    await expect(t.assign("thr_child", bot.id)).rejects.toThrow(/top-level/);
+    await expect(t.assign("thr_old", bot.id)).rejects.toThrow(/top-level/);
+    expect((await t.list()).bots[0]!.threads.map((thread) => thread.threadId)).toEqual(["thr_ok"]);
+  });
+
+  it("reordering refuses a repeated id and keeps the order", async () => {
+    const t = setup();
+    const bot = await t.create("Marketer");
+    await t.assign("thr_1", bot.id);
+    await t.assign("thr_2", bot.id);
+    await expect(
+      t.rpc("bots.v1.reorderThreads", { botId: bot.id, threadIds: ["thr_1", "thr_1"] }),
+    ).rejects.toThrow(/complete current list/);
+    expect((await t.list()).bots[0]!.threads.map((thread) => thread.threadId)).toEqual([
+      "thr_1",
+      "thr_2",
+    ]);
   });
 });

@@ -76,3 +76,52 @@ describe("the owner's layout from the built-in thread list", () => {
     });
   });
 });
+
+describe("Codex review of stage 2: the first read never overwrites stored preferences", () => {
+  it("keeps a layout already stored in 1ma Sidebar", async () => {
+    let available = false;
+    const host = createFakePluginHost({
+      pluginId: "1ma-sidebar",
+      sdk: {
+        plugins: {
+          list: async () => ({ plugins: [{ id: "thread-list", enabled: true }] }),
+          callRpc: async () => {
+            if (!available) throw new Error("thread-list is not loaded yet");
+            return { preferences: { organizationMode: "machine", sortDirection: "ascending" } };
+          },
+        },
+        system: { uiPreferences: { list: async () => ({ preferences: {} }) } },
+      },
+    });
+    await plugin(host.bb);
+    await host.harness.behavior.callRpc("setPreference", {
+      key: "organizationMode",
+      value: "project",
+    });
+    available = true;
+    const { preferences } = await list(host);
+    expect(preferences.organizationMode).toBe("project");
+    expect(preferences.sortDirection).toBe("ascending");
+  });
+
+  it("at load, the built-in list's layout comes before bb's old sidebar settings", async () => {
+    const host = createFakePluginHost({
+      pluginId: "1ma-sidebar",
+      sdk: {
+        plugins: {
+          list: async () => ({ plugins: [{ id: "thread-list", enabled: true }] }),
+          callRpc: async () => ({ preferences: { organizationMode: "machine" } }),
+        },
+        system: {
+          uiPreferences: {
+            list: async () => ({
+              preferences: { "sidebar.organizationMode": { value: "project" } },
+            }),
+          },
+        },
+      },
+    });
+    await plugin(host.bb);
+    expect((await list(host)).preferences.organizationMode).toBe("machine");
+  });
+});

@@ -191,7 +191,7 @@ function BotRow({
         >
           <Icon name="Plus" className="size-3.5" />
         </Button>
-        {topLevel.length > 0 ? (
+        {topLevel.length > 0 || doneCount > 0 ? (
           <button
             type="button"
             className={`flex items-center gap-0.5 px-1 text-xs ${SIDEBAR_GROUP_TEXT_CLASS}`}
