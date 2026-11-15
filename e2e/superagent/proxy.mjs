@@ -14,6 +14,14 @@ function passHeaders(headers) {
   );
 }
 
+function parseBody(body) {
+  try {
+    return JSON.parse(body.toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
 export class FaultProxy {
   constructor(target) {
     this.target = new URL(target);
@@ -78,7 +86,12 @@ export class FaultProxy {
       const body = Buffer.concat(chunks);
       const mode = this.mode;
       const spawn = req.method === "POST" && req.url === "/api/v1/threads";
-      this.log.push({ method: req.method, url: req.url, mode: spawn ? mode.kind : "pass" });
+      this.log.push({
+        method: req.method,
+        url: req.url,
+        mode: spawn ? mode.kind : "pass",
+        body: spawn ? parseBody(body) : undefined,
+      });
       if (mode.kind === "refuse") {
         req.socket.destroy();
         return;

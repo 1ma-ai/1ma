@@ -46,6 +46,11 @@ export interface ThreadMetadataRow {
   readonly metadata: unknown;
 }
 
+export interface SpawnedThread extends ThreadMetadataRow {
+  readonly projectId: string;
+  readonly createdAt: number;
+}
+
 export interface Executor {
   readonly serverId: ServerId;
   snapshot(signal: AbortSignal): Promise<ObservationResult<ServerSnapshot>>;
@@ -53,7 +58,7 @@ export interface Executor {
   threadModel(threadId: string, signal: AbortSignal): Promise<string | null>;
   projectRemote(projectId: string, signal: AbortSignal): Promise<string | null>;
   spawn(request: SpawnRequest, signal: AbortSignal): Promise<{ threadId: string }>;
-  findSpawned(signal: AbortSignal): Promise<ThreadMetadataRow[]>;
+  findSpawned(signal: AbortSignal): Promise<SpawnedThread[]>;
   clearQueueAndStop(threadId: string, signal: AbortSignal): Promise<void>;
   taskOutcome(threadId: string, signal: AbortSignal): Promise<TaskOutcome | null>;
   queuedWaits(threadId: string, signal: AbortSignal): Promise<QueuedWait[]>;

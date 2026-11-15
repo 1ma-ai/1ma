@@ -148,6 +148,23 @@ async function spawnedOnExecutor() {
   return rows.map((row) => ({ threadId: row.threadId, label: row.metadata.spawn }));
 }
 
+function postsTitled(title) {
+  return proxy.spawnPosts().filter((entry) => entry.body?.title === title);
+}
+
+function nonceOf(title) {
+  const nonce = postsTitled(title)[0]?.body?.pluginMetadata?.spawn?.nonce;
+  assert.ok(typeof nonce === "string", `the spawn request for ${title} carries a label`);
+  return nonce;
+}
+
+async function copiesOf(title) {
+  const nonces = new Set(
+    postsTitled(title).map((entry) => entry.body?.pluginMetadata?.spawn?.nonce),
+  );
+  return (await spawnedOnExecutor()).filter((row) => nonces.has(row.label?.nonce));
+}
+
 async function action(actionId) {
   const { actions } = await control.rpc(PLUGIN, "work.v1.actions", {});
   return actions.find((candidate) => candidate.id === actionId);
@@ -327,11 +344,16 @@ describe("1ma-superagent bot actions with a model turn", () => {
       const current = await action(actionId);
       return current?.state === "bound" ? current : null;
     });
-    const matching = (await spawnedOnExecutor()).filter((row) => row.label?.actionId === actionId);
+    const matching = await copiesOf("lost answer");
     assert.deepEqual(
       matching.map((row) => row.threadId),
       [bound.threadId],
     );
+    const nonce = nonceOf("lost answer");
+    for (const method of ["work.v1.actions", "work.v1.list", "work.v1.waiting"]) {
+      const read = await control.rpc(PLUGIN, method, method === "work.v1.waiting" ? null : {});
+      assert.ok(!JSON.stringify(read).includes(nonce), `${method} does not reveal the label`);
+    }
   });
 
   it("does not retry a request that is applied after the first empty read, and binds it later", async () => {
@@ -339,23 +361,17 @@ describe("1ma-superagent bot actions with a model turn", () => {
     proxy.setMode({ kind: "forward-later", once: true, delayMs: 75_000 });
     const actionId = await proposeAndConfirm("[stub:reply late task]", "late task");
     await waitFor("unknown", PASS, async () => (await action(actionId))?.state === "unknown");
-    assert.equal(
-      (await spawnedOnExecutor()).filter((row) => row.label?.actionId === actionId).length,
-      0,
-    );
+    assert.equal((await copiesOf("late task")).length, 0);
     const bound = await waitFor("late action bound", PASS, async () => {
       const current = await action(actionId);
       return current?.state === "bound" ? current : null;
     });
-    const matching = (await spawnedOnExecutor()).filter((row) => row.label?.actionId === actionId);
+    const matching = await copiesOf("late task");
     assert.deepEqual(
       matching.map((row) => row.threadId),
       [bound.threadId],
     );
-    const posts = proxy.log.filter(
-      (entry) => entry.method === "POST" && entry.url === "/api/v1/threads",
-    );
-    assert.equal(posts.filter((entry) => entry.mode === "forward-later").length, 1);
+    assert.equal(postsTitled("late task").length, 1);
   });
 
   it("binds neither of two chats carrying one label, asks the owner, and keeps the card through a bot turn", async () => {
@@ -363,7 +379,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
     proxy.setMode({ kind: "swallow", once: true });
     const actionId = await proposeAndConfirm("[stub:reply swallowed task]", "two chats");
     await waitFor("unknown", PASS, async () => (await action(actionId))?.state === "unknown");
-    const current = await action(actionId);
+    const nonce = nonceOf("two chats");
     await Promise.all(
       ["duplicate one", "duplicate two"].map((title) =>
         executor.api("POST", "/threads", {
@@ -373,7 +389,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
           title,
           origin: "plugin",
           originPluginId: PLUGIN,
-          pluginMetadata: { spawn: { actionId, attempt: current.attempt } },
+          pluginMetadata: { spawn: { nonce } },
           environment: { type: "project-default" },
           sendAt: Date.now() + 7 * 24 * 3600 * 1000,
           input: [{ type: "text", text: "[stub:reply duplicate]" }],
@@ -428,11 +444,12 @@ describe("1ma-superagent bot actions with a model turn", () => {
       const current = await action(actionId);
       return current?.state === "bound" ? current : null;
     });
-    const matching = (await spawnedOnExecutor()).filter((row) => row.label?.actionId === actionId);
+    const matching = await copiesOf("restart task");
     assert.deepEqual(
       matching.map((row) => row.threadId),
       [bound.threadId],
     );
+    assert.equal(postsTitled("restart task").length, 1);
   });
 
   it("cancels a start whose project was excluded while its card was open", async () => {
@@ -455,10 +472,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
       control.bb(["plugin", "config", PLUGIN, "set", "excludedRepos", ""]);
     }
     assert.equal(proxy.spawnPosts().length, postsBefore);
-    const matching = (await spawnedOnExecutor()).filter(
-      (row) => row.label?.actionId === created.id,
-    );
-    assert.deepEqual(matching, []);
+    assert.deepEqual(postsTitled("excluded task"), []);
   });
 
   it("keeps a decision recorded before its card closed through a crash, and starts the chat once", async () => {
@@ -502,14 +516,12 @@ describe("1ma-superagent bot actions with a model turn", () => {
       const current = await action(created.id);
       return current?.state === "bound" ? current : null;
     });
-    const matching = (await spawnedOnExecutor()).filter(
-      (row) => row.label?.actionId === created.id,
-    );
+    const matching = await copiesOf("crash task");
     assert.deepEqual(
       matching.map((row) => row.threadId),
       [bound.threadId],
     );
-    assert.equal(proxy.spawnPosts().length, postsBefore + 1);
+    assert.equal(postsTitled("crash task").length, 1);
     const repeated = (await pendingCards()).filter(
       (pending) => pending.payload.data.quote === prompt,
     );

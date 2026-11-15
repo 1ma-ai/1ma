@@ -119,4 +119,5 @@ export const MIGRATIONS: string[] = [
   )`,
   `ALTER TABLE pr_links ADD COLUMN link_confirmed_at INTEGER`,
   `ALTER TABLE questions ADD COLUMN expires_at INTEGER`,
+  `ALTER TABLE actions ADD COLUMN label TEXT`,
 ];

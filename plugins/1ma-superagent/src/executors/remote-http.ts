@@ -14,6 +14,8 @@ import {
 import { type PagingLimits, DEFAULT_LIMITS, collectOnce, collectPages } from "./paging.js";
 import { METADATA_BATCH, chunks, combineSnapshot, toThreadSummary } from "./snapshot.js";
 
+const DEFINITE_REFUSALS = new Set([400, 401, 403, 404, 422]);
+
 const threadSchema = z.object({
   id: z.string().regex(/^thr_/),
   projectId: z.string(),
@@ -25,6 +27,7 @@ const threadSchema = z.object({
   visibility: z.enum(["visible", "hidden"]),
   parentThreadId: z.string().nullable(),
   originPluginId: z.string().nullable(),
+  createdAt: z.number(),
   updatedAt: z.number(),
   queuedWork: z.string(),
   hasPendingInteraction: z.boolean(),
@@ -221,9 +224,7 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
         if (
           error instanceof RemoteHttpError &&
           error.status !== null &&
-          error.status >= 400 &&
-          error.status < 500 &&
-          error.status !== 408
+          DEFINITE_REFUSALS.has(error.status)
         ) {
           throw new DefiniteSpawnFailure(error.message);
         }
@@ -243,10 +244,14 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
       );
       if (listed.completeness !== "complete")
         throw new Error(`spawned chats: ${listed.error ?? listed.completeness}`);
-      return this.readMetadata(
-        listed.items.map((thread) => thread.id),
-        signal,
-      );
+      const threads = new Map(listed.items.map((thread) => [thread.id, thread]));
+      const rows = await this.readMetadata([...threads.keys()], signal);
+      return rows.flatMap((row) => {
+        const thread = threads.get(row.threadId);
+        return thread === undefined
+          ? []
+          : [{ ...row, projectId: thread.projectId, createdAt: thread.createdAt }];
+      });
     },
     async clearQueueAndStop(threadId, signal) {
       const id = encodeURIComponent(threadId);

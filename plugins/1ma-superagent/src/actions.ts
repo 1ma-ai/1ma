@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { z } from "zod";
 import type { ServerId } from "./observation.js";
@@ -51,6 +51,7 @@ export interface ActionRow {
   remindAt: number | null;
   replacedBy: string | null;
   botThreadId: string | null;
+  label: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -69,6 +70,7 @@ interface RawAction {
   remind_at: number | null;
   replaced_by: string | null;
   bot_thread_id: string | null;
+  label: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -92,22 +94,22 @@ function toRow(raw: RawAction): ActionRow {
     remindAt: raw.remind_at,
     replacedBy: raw.replaced_by,
     botThreadId: raw.bot_thread_id,
+    label: raw.label ?? raw.id,
     createdAt: raw.created_at,
     updatedAt: raw.updated_at,
   };
 }
 
 export interface SpawnLabel {
-  readonly actionId: string;
-  readonly attempt: number;
+  readonly nonce: string;
 }
 
-export function labelOf(action: Pick<ActionRow, "id" | "attempt">): SpawnLabel {
-  return { actionId: action.id, attempt: action.attempt };
+export function labelOf(action: Pick<ActionRow, "label">): SpawnLabel {
+  return { nonce: action.label };
 }
 
 export const labelSchema = z.object({
-  spawn: z.object({ actionId: z.string(), attempt: z.number().int() }),
+  spawn: z.object({ nonce: z.string() }),
 });
 
 export class ActionStore {
@@ -127,8 +129,8 @@ export class ActionStore {
     const id = `act_${randomUUID()}`;
     this.#db
       .prepare(
-        `INSERT INTO actions (id, kind, params, server_id, attempt, state, bot_thread_id, created_at, updated_at)
-         VALUES (?, 'spawn_thread', ?, ?, ?, 'proposed', ?, ?, ?)`,
+        `INSERT INTO actions (id, kind, params, server_id, attempt, state, bot_thread_id, label, created_at, updated_at)
+         VALUES (?, 'spawn_thread', ?, ?, ?, 'proposed', ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -136,6 +138,7 @@ export class ActionStore {
         serverId,
         attempt,
         botThreadId,
+        `lbl_${randomBytes(16).toString("hex")}`,
         now,
         now,
       );

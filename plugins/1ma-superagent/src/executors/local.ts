@@ -103,10 +103,14 @@ export function createLocalExecutor(
       );
       if (listed.completeness !== "complete")
         throw new Error(`spawned chats: ${listed.error ?? listed.completeness}`);
-      return this.readMetadata(
-        listed.items.map((thread) => thread.id),
-        signal,
-      );
+      const threads = new Map(listed.items.map((thread) => [thread.id, thread]));
+      const rows = await this.readMetadata([...threads.keys()], signal);
+      return rows.flatMap((row) => {
+        const thread = threads.get(row.threadId);
+        return thread === undefined
+          ? []
+          : [{ ...row, projectId: thread.projectId, createdAt: thread.createdAt }];
+      });
     },
     async clearQueueAndStop(threadId, signal) {
       const queued = await sdk.threads.queuedMessages.list({ threadId, signal });

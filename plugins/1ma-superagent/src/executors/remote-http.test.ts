@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PagingLimits } from "./paging.js";
+import { DefiniteSpawnFailure } from "../observation.js";
 import { type Fetch, createRemoteHttpExecutor } from "./remote-http.js";
 
 const limits: PagingLimits = {
@@ -21,6 +22,7 @@ function apiThread(id: string, overrides: Record<string, unknown> = {}) {
     visibility: "visible",
     parentThreadId: null,
     originPluginId: null,
+    createdAt: 1,
     updatedAt: 5,
     runtime: { displayStatus: "idle" },
     queuedWork: "none",
@@ -192,5 +194,38 @@ describe("remote-http time limits", () => {
     await expect(executor.queuedWaits("thr_t", signal)).rejects.toBeDefined();
     await expect(executor.projectRemote("proj_x", signal)).rejects.toBeDefined();
     await expect(executor.clearQueueAndStop("thr_t", signal)).rejects.toBeDefined();
+  });
+
+  it("treats only refusals that prove nothing was written as final, every other answer as unknown", async () => {
+    const outcome = async (status: number) => {
+      const server = fakeServer({
+        "/api/v1/threads": () => new Response("refused", { status }),
+      });
+      const executor = createRemoteHttpExecutor({
+        serverId: "linux",
+        baseUrl: "http://linux.test",
+        fetch: server.fetch,
+        limits,
+      });
+      return executor
+        .spawn(
+          {
+            projectId: "proj_app",
+            providerId: "claude-code",
+            model: "m",
+            prompt: "p",
+            title: "t",
+            label: { nonce: "lbl_x" },
+          },
+          new AbortController().signal,
+        )
+        .then(
+          () => "bound",
+          (error: unknown) => (error instanceof DefiniteSpawnFailure ? "failed" : "unknown"),
+        );
+    };
+    for (const status of [400, 401, 403, 404, 422]) expect(await outcome(status)).toBe("failed");
+    for (const status of [408, 409, 425, 429, 500, 502])
+      expect(await outcome(status)).toBe("unknown");
   });
 });

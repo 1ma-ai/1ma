@@ -7,7 +7,7 @@ import {
   DefiniteSpawnFailure,
   type Executor,
   type ServerId,
-  type ThreadMetadataRow,
+  type SpawnedThread,
 } from "./observation.js";
 import type { Card, QuestionKind, QuestionStore } from "./questions.js";
 import { type RepoPolicy, isExcludedRepo } from "./repos.js";
@@ -15,6 +15,7 @@ import { type RepoPolicy, isExcludedRepo } from "./repos.js";
 export const UNKNOWN_AFTER_MS = 10 * 60 * 1000;
 export const WAIT_MS = 30 * 60 * 1000;
 export const LATE_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const CLOCK_SKEW_MS = 2 * 60 * 1000;
 export const START_KIND = "start_chat";
 export const UNKNOWN_KIND = "unknown_spawn";
 export const AMBIGUOUS_KIND = "ambiguous_spawn";
@@ -185,14 +186,16 @@ async function send(deps: ActionDeps, action: ActionRow): Promise<void> {
   }
 }
 
-function matching(rows: readonly ThreadMetadataRow[], action: ActionRow): string[] {
+function matching(rows: readonly SpawnedThread[], action: ActionRow): string[] {
   return rows
     .filter((row) => {
       const parsed = labelSchema.safeParse(row.metadata);
       return (
         parsed.success &&
-        parsed.data.spawn.actionId === action.id &&
-        parsed.data.spawn.attempt === action.attempt
+        parsed.data.spawn.nonce === action.label &&
+        row.projectId === action.params.projectId &&
+        action.sentAt !== null &&
+        row.createdAt >= action.sentAt - CLOCK_SKEW_MS
       );
     })
     .map((row) => row.threadId);
@@ -218,7 +221,7 @@ export async function runActions(deps: ActionDeps): Promise<void> {
           (action.threadId === null && deps.now() - action.sentAt < LATE_WINDOW_MS)),
     );
   const servers = new Set([...unknown, ...late].map((action) => action.serverId));
-  const spawned = new Map<ServerId, ThreadMetadataRow[]>();
+  const spawned = new Map<ServerId, SpawnedThread[]>();
   await Promise.all(
     [...servers].map(async (serverId) => {
       const executor = deps.executors.get(serverId);

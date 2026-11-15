@@ -12,6 +12,7 @@ import {
   DefiniteSpawnFailure,
   type Executor,
   type SpawnRequest,
+  type SpawnedThread,
   type ThreadMetadataRow,
 } from "./observation.js";
 import { QuestionStore } from "./questions.js";
@@ -35,7 +36,7 @@ function setup() {
   const questions = new QuestionStore(db);
   let clock = 1_000_000;
   const spawned: SpawnRequest[] = [];
-  const existing: ThreadMetadataRow[] = [];
+  const existing: Array<ThreadMetadataRow & Partial<SpawnedThread>> = [];
   const stopped: string[] = [];
   const stopping = { failures: 0 };
   const target = { remote: "https://github.com/example/app.git", excluded: [] as string[] };
@@ -49,7 +50,8 @@ function setup() {
       spawned.push(request);
       return spawnBehavior(request);
     },
-    findSpawned: async () => [...existing],
+    findSpawned: async () =>
+      existing.map((row) => ({ projectId: "proj_app", createdAt: clock, ...row })),
     projectRemote: async () => target.remote,
     clearQueueAndStop: async (threadId) => {
       if (stopping.failures > 0) {
@@ -101,6 +103,35 @@ function setup() {
 }
 
 describe("spawn actions", () => {
+  it("binds a lost answer only to a chat with its secret label, in its project, created after the send", async () => {
+    const t = setup();
+    const id = t.confirmed();
+    t.setSpawn(async () => {
+      throw new TypeError("fetch failed: other side closed");
+    });
+    await t.run();
+    const action = t.actions.get(id);
+    if (action === null || action.sentAt === null) throw new Error("not sent");
+    t.existing.push(
+      { threadId: "thr_by_id", metadata: { spawn: { actionId: id, attempt: action.attempt } } },
+      {
+        threadId: "thr_other_project",
+        metadata: { spawn: { nonce: action.label } },
+        projectId: "proj_other",
+      },
+      {
+        threadId: "thr_before",
+        metadata: { spawn: { nonce: action.label } },
+        createdAt: action.sentAt - 10 * 60 * 1000,
+      },
+    );
+    await t.run();
+    expect(t.actions.get(id)?.state).toBe("unknown");
+    t.existing.push({ threadId: "thr_real", metadata: { spawn: { nonce: action.label } } });
+    await t.run();
+    expect(t.actions.get(id)).toMatchObject({ state: "bound", threadId: "thr_real" });
+  });
+
   it("cancels a confirmed start whose project was excluded while its card was open", async () => {
     const t = setup();
     const id = t.confirmed();
@@ -278,7 +309,7 @@ describe("spawn actions", () => {
     t.actions.transition(id, ["unknown"], "canceled", t.now(), { result: "replaced" });
     t.existing.push({
       threadId: "thr_late",
-      metadata: { spawn: { actionId: id, attempt: action.attempt } },
+      metadata: { spawn: { nonce: action.label } },
     });
     t.stopping.failures = 1;
     await t.run();
