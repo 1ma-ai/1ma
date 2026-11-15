@@ -41,14 +41,16 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Build the plugins
-        run: |
-          pnpm --filter bb-plugin-1ma-bots run build
-          pnpm --filter bb-plugin-1ma-sidebar run build
       - name: Install the pinned 1ma server package
         env:
           GH_TOKEN: ${{ github.token }}
         run: node e2e/lib/install-server.mjs
+      - name: Build the plugins with the server's own bb
+        run: |
+          bb="$E2E_ROOT/server-package/node_modules/bb-app/dist/bb.js"
+          for plugin in 1ma-bots 1ma-sidebar; do
+            (cd "plugins/$plugin" && node "$bb" plugin build)
+          done
       - name: Install Chromium for Playwright
         run: |
           mkdir -p "$E2E_PLAYWRIGHT_DIR"
