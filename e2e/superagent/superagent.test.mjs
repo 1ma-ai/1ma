@@ -248,7 +248,10 @@ describe("1ma-superagent on two 1ma servers", () => {
     const calls = readFileSync(ghLog, "utf8")
       .split("\n")
       .filter((line) => line !== "");
-    assert.ok(calls.length > 0, "gh was called");
+    assert.ok(
+      calls.some((line) => line.startsWith("/repos/")),
+      "the plugin read GitHub through gh",
+    );
     assert.deepEqual(
       calls.filter((line) => line.startsWith("REJECTED")),
       [],

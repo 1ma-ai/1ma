@@ -439,8 +439,9 @@ describe("1ma-superagent bot actions with a model turn", () => {
     });
     const card = await waitCard("first of two", (data) => data.quote === "[stub:reply queued one]");
     assert.equal((await pendingCards()).length, 1, "one card open in the chat");
-    assert.equal(card.payload.data.waiting, 1, "the card counts the one behind it");
     const { questionId, token } = card.payload.data;
+    const counted = await control.rpc(PLUGIN, "questions.v1.state", { questionId, token });
+    assert.equal(counted.waiting, 1, "the card counts the one behind it");
     await sayToBot(startCall("[stub:reply queued three]", "queued three"));
     await waitFor("the card counts the third", 60_000, async () => {
       const state = await control.rpc(PLUGIN, "questions.v1.state", { questionId, token });

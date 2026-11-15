@@ -10,8 +10,9 @@ const readOnly =
   expected.every((arg, index) => args[index] === arg) &&
   /^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(pulls(\/\d+)?|commits)(\?[A-Za-z0-9_=&.%-]*)?$/.test(path);
 if (!readOnly || fixtures === undefined) {
+  const verdict = args[0] === "api" ? "REJECTED" : "NOT-API";
   if (process.env.E2E_GH_LOG !== undefined)
-    appendFileSync(process.env.E2E_GH_LOG, `REJECTED ${JSON.stringify(args)}\n`);
+    appendFileSync(process.env.E2E_GH_LOG, `${verdict} ${JSON.stringify(args)}\n`);
   process.stderr.write(`fake gh: unsupported call ${args.join(" ")}\n`);
   process.exit(2);
 }
