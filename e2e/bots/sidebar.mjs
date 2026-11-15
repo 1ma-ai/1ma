@@ -105,3 +105,14 @@ export async function groupsOf(page, headers, threadIds) {
     ),
   };
 }
+
+// Space between a group header and the last thread row drawn above it.
+export async function gapAbove(page, header) {
+  const top = await topOf(page.getByText(header, { exact: true }));
+  const bottoms = await page
+    .locator("[data-sidebar-thread-id]")
+    .evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().bottom));
+  const above = bottoms.filter((bottom) => bottom <= top);
+  if (above.length === 0) throw new Error(`no thread row above ${header}`);
+  return top - Math.max(...above);
+}

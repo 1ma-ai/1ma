@@ -25,6 +25,7 @@ import {
 import {
   expandBot,
   fontOf,
+  gapAbove,
   launch,
   openApp,
   screenshot,
@@ -279,6 +280,14 @@ describe("1ma-sidebar with the bots block", () => {
           [fixture.plain]: "Alpha",
           [fixture.h1]: "Beta",
         });
+        const [afterBots, betweenProjects] = await Promise.all([
+          gapAbove(page, "Alpha"),
+          gapAbove(page, "Beta"),
+        ]);
+        assert.ok(
+          Math.abs(afterBots - betweenProjects) <= 2,
+          `the bots block ends with the gap between project groups (${afterBots}px vs ${betweenProjects}px)`,
+        );
         const botScope = `[data-bot-id="${fixture.visible.id}"]`;
         assert.deepEqual(
           await counts(page, {

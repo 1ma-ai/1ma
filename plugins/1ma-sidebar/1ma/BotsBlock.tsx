@@ -41,38 +41,40 @@ export function BotsBlock({ selectedThreadId, onProjectSelect }: BotsBlockProps)
   const openBotsPage = () => navigation.actions.activate(panelId, { target: "current" });
   const visible = state.bots.filter((bot) => !bot.hidden);
   return (
-    <TopLevelSidebarSection
-      label={strings.title}
-      sectionId="1ma-bots"
-      collapseControl={{
-        isCollapsed: collapsed,
-        onToggleCollapsed: () => setCollapsed(!collapsed),
-      }}
-      actions={
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-5 w-5"
-          aria-label={strings.newBot}
-          onClick={openBotsPage}
-        >
-          <Icon name="Plus" className="size-3.5" />
-        </Button>
-      }
-    >
-      {state.status === "unavailable" ? (
-        <p className={`px-2 py-1 text-xs ${SIDEBAR_GROUP_TEXT_CLASS}`}>{strings.unavailable}</p>
-      ) : (
-        visible.map((bot) => (
-          <BotRow
-            key={bot.id}
-            bot={bot}
-            selectedThreadId={selectedThreadId}
-            onProjectSelect={onProjectSelect}
-          />
-        ))
-      )}
-    </TopLevelSidebarSection>
+    <div className="pb-4" data-1ma-bots-block="">
+      <TopLevelSidebarSection
+        label={strings.title}
+        sectionId="1ma-bots"
+        collapseControl={{
+          isCollapsed: collapsed,
+          onToggleCollapsed: () => setCollapsed(!collapsed),
+        }}
+        actions={
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-5 w-5"
+            aria-label={strings.newBot}
+            onClick={openBotsPage}
+          >
+            <Icon name="Plus" className="size-3.5" />
+          </Button>
+        }
+      >
+        {state.status === "unavailable" ? (
+          <p className={`px-2 py-1 text-xs ${SIDEBAR_GROUP_TEXT_CLASS}`}>{strings.unavailable}</p>
+        ) : (
+          visible.map((bot) => (
+            <BotRow
+              key={bot.id}
+              bot={bot}
+              selectedThreadId={selectedThreadId}
+              onProjectSelect={onProjectSelect}
+            />
+          ))
+        )}
+      </TopLevelSidebarSection>
+    </div>
   );
 }
 
