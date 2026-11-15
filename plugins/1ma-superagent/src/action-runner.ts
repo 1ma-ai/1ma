@@ -147,6 +147,7 @@ async function send(deps: ActionDeps, action: ActionRow): Promise<void> {
     deps.warn(`checking the target of ${action.id}: ${describeError(error)}`);
     return;
   }
+  if (deps.signal.aborted) return;
   if (changed !== null) {
     if (
       deps.actions.transition(action.id, ["confirmed"], "canceled", deps.now(), {
@@ -171,7 +172,7 @@ async function send(deps: ActionDeps, action: ActionRow): Promise<void> {
       );
     return;
   }
-  if (!deps.actions.claim(action.id, deps.claimant, deps.now())) return;
+  if (deps.signal.aborted || !deps.actions.claim(action.id, deps.claimant, deps.now())) return;
   try {
     const { threadId } = await executor.spawn(
       { ...action.params, label: labelOf(action) },
@@ -202,6 +203,7 @@ function matching(rows: readonly SpawnedThread[], action: ActionRow): string[] {
 }
 
 export async function runActions(deps: ActionDeps): Promise<void> {
+  if (deps.signal.aborted) return;
   for (const stale of deps.actions.inStates(["sending"])) {
     if (stale.claimedBy !== deps.claimant) {
       deps.actions.transition(stale.id, ["sending"], "unknown", deps.now(), {
@@ -210,6 +212,7 @@ export async function runActions(deps: ActionDeps): Promise<void> {
     }
   }
   await Promise.all(deps.actions.inStates(["confirmed"]).map((action) => send(deps, action)));
+  if (deps.signal.aborted) return;
 
   const unknown = deps.actions.inStates(["unknown"]);
   const late = deps.actions

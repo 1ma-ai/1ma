@@ -260,4 +260,32 @@ describe("question dispatcher", () => {
     expect(opened).toEqual([QUESTION_TIMEOUT_MS]);
     expect(store.latest("first")?.state).toBe("expired");
   });
+
+  it("writes nothing for a card whose answer arrives after the plugin was turned off", async () => {
+    const { ask, store, settle } = setup();
+    const id = ask("first");
+    if (id === null) throw new Error("not asked");
+    const lifecycle = new AbortController();
+    let answer: (value: { outcome: "cancelled"; reason: "plugin-disposed" }) => void = () => {};
+    const dispatcher = new QuestionDispatcher({
+      requestInput: () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      warn: () => {},
+      background: inPlace,
+      store,
+      kinds: new Map(),
+      chat: () => CHAT,
+      now: () => 1_000,
+      onAnswered: () => {},
+      signal: lifecycle.signal,
+    });
+    dispatcher.dispatch();
+    const token = store.get(id)?.token;
+    lifecycle.abort();
+    answer({ outcome: "cancelled", reason: "plugin-disposed" });
+    await settle();
+    expect(store.get(id)).toMatchObject({ state: "open", token });
+  });
 });

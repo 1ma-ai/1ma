@@ -75,11 +75,33 @@ describe("PassRunner", () => {
     );
     const first = runner.request(FULL_SCOPE);
     const pending = runner.request(FULL_SCOPE);
-    runner.dispose();
+    void runner.dispose();
     await pending;
     gate.resolve();
     await first;
     await runner.request(FULL_SCOPE);
     expect(calls).toBe(1);
+  });
+
+  it("finishes the running pass before dispose resolves", async () => {
+    const gate = deferred();
+    const finished: string[] = [];
+    const runner = new PassRunner(
+      async () => {
+        await gate.promise;
+        finished.push("pass wrote its result");
+      },
+      () => {},
+    );
+    void runner.request(FULL_SCOPE);
+    let disposed = false;
+    const disposal = runner.dispose().then(() => {
+      disposed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(disposed).toBe(false);
+    gate.resolve();
+    await disposal;
+    expect(finished).toEqual(["pass wrote its result"]);
   });
 });

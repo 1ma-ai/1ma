@@ -28,6 +28,7 @@ export class PassRunner {
   #pendingWaiters: Array<() => void> = [];
   #running = false;
   #disposed = false;
+  #current: Promise<void> = Promise.resolve();
 
   constructor(
     execute: (scope: PassScope) => Promise<void>,
@@ -45,17 +46,18 @@ export class PassRunner {
     const done = new Promise<void>((resolve) => this.#pendingWaiters.push(resolve));
     if (!this.#running) {
       this.#running = true;
-      void this.#background.run(() => this.#drain());
+      this.#current = this.#background.run(() => this.#drain());
     }
     return done;
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.#disposed = true;
     this.#pending = null;
     const waiters = this.#pendingWaiters;
     this.#pendingWaiters = [];
     for (const resolve of waiters) resolve();
+    await this.#current;
   }
 
   async #drain(): Promise<void> {

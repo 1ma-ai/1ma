@@ -77,6 +77,7 @@ export class QuestionDispatcher {
       .then(
         (result) => {
           this.#live = null;
+          if (this.#deps.signal.aborted) return;
           if (result.outcome === "submitted") {
             const parsed = answerSchema.safeParse(result.value);
             const outcome: AnswerOutcome =
@@ -103,6 +104,7 @@ export class QuestionDispatcher {
         },
         (error: unknown) => {
           this.#live = null;
+          if (this.#deps.signal.aborted) return;
           this.#deps.store.requeue(question.id, token, this.#deps.now() + RETRY_MS);
           this.#deps.warn(
             `could not open a question in ${chat}: ${error instanceof Error ? error.message : String(error)}`,

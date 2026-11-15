@@ -241,9 +241,9 @@ export function createPlugin(options: SuperagentOptions = {}) {
         bb.log.error(`pass failed: ${error instanceof Error ? error.message : String(error)}`),
       background,
     );
-    bb.onDispose(() => {
+    bb.onDispose(async () => {
       lifecycle.abort();
-      runner.dispose();
+      await runner.dispose();
     });
 
     const isControl = () => config.role === "control";

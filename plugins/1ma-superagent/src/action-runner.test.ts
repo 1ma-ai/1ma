@@ -62,7 +62,7 @@ function setup() {
     },
     queuedWaits: async () => [],
   });
-  const run = (claimant = "gen_a") =>
+  const run = (claimant = "gen_a", signal = new AbortController().signal) =>
     runActions({
       actions,
       questions,
@@ -74,7 +74,7 @@ function setup() {
       ),
       claimant,
       now: () => clock,
-      signal: new AbortController().signal,
+      signal,
       warn: () => {},
     });
   const confirmed = () => {
@@ -103,6 +103,32 @@ function setup() {
 }
 
 describe("spawn actions", () => {
+  it("starts no action from an instance that is being turned off, and keeps a request in flight as unknown", async () => {
+    const t = setup();
+    const id = t.confirmed();
+    const off = new AbortController();
+    off.abort();
+    await t.run("gen_old", off.signal);
+    expect(t.spawned).toEqual([]);
+    expect(t.actions.get(id)?.state).toBe("confirmed");
+
+    const inFlight = new AbortController();
+    t.setSpawn(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          t.existing.push({ threadId: "thr_maybe", metadata: { spawn: { ...request.label } } });
+          inFlight.signal.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        }),
+    );
+    const running = t.run("gen_old", inFlight.signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    inFlight.abort();
+    await running;
+    expect(t.actions.get(id)?.state).toBe("unknown");
+  });
+
   it("binds a lost answer only to a chat with its secret label, in its project, created after the send", async () => {
     const t = setup();
     const id = t.confirmed();
