@@ -21,17 +21,23 @@ The way back: an app from before 0014 deletes, with their settings, secrets
 and schedules, the rows whose source is a built-in it does not know, while bb
 deletes a plugin's data only on removal and installing a plugin keeps the
 data under its id. server/dist/one-ma-rollback.js, run with 1ma stopped,
-holds bb-app's runtime claim on the data folder (refusing while 1ma runs)
-and removes only the built-in 1ma rows in one transaction, saying which
-plugins to install again in the older version, which to turn off again and
-which the owner had removed; those installed again find their data.
+holds bb-app's runtime claim on the data folder (refusing while 1ma runs),
+writes <data>/backups/1ma-rollback.json and then removes only the built-in
+1ma rows in one transaction. It says for each plugin how it was installed
+before (the git tag, or the release commit for release-linux.mjs, from the
+database copy), whether to turn it off again or leave it out, and keeps
+those decisions when run again. While the plan is there, this version leaves
+the 1ma plugins out, so a start of it by habit cannot hand the older version
+rows to delete; once the older version has installed a 1ma plugin again, the
+plan is dropped and the database copy set aside for the next move. --cancel
+drops the plan to stay on this version.
 ---
  apps/server/package.json                      |   2 +-
- apps/server/src/one-ma-rollback.ts            |  41 +++
- .../src/services/plugins/one-ma-rollback.ts   | 106 +++++++
- .../services/plugins/plugin-registration.ts   | 130 ++++++++-
- .../services/plugins/plugin-service.test.ts   | 270 ++++++++++++++++++
- 5 files changed, 547 insertions(+), 2 deletions(-)
+ apps/server/src/one-ma-rollback.ts            |  52 +++
+ .../src/services/plugins/one-ma-rollback.ts   | 235 ++++++++++++++
+ .../services/plugins/plugin-registration.ts   | 158 ++++++++-
+ .../services/plugins/plugin-service.test.ts   | 306 ++++++++++++++++++
+ 5 files changed, 751 insertions(+), 2 deletions(-)
  create mode 100644 apps/server/src/one-ma-rollback.ts
  create mode 100644 apps/server/src/services/plugins/one-ma-rollback.ts
 
@@ -50,15 +56,16 @@ index ddd8d1d..65c1971 100644
      "clean": "rimraf dist",
 diff --git a/apps/server/src/one-ma-rollback.ts b/apps/server/src/one-ma-rollback.ts
 new file mode 100644
-index 0000000..fe83e44
+index 0000000..3960b82
 --- /dev/null
 +++ b/apps/server/src/one-ma-rollback.ts
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,52 @@
 +// Prepares this data for a 1ma from before the 1ma plugins were built in: with
 +// 1ma stopped, removes only the built-in 1ma plugin rows, keeping their
-+// settings and data (services/plugins/one-ma-rollback.ts).
++// settings and data, and says how to install them again
++// (services/plugins/one-ma-rollback.ts). --cancel drops a prepared way back.
 +//
-+//   node <server package>/server/dist/one-ma-rollback.js --data-dir <dir>
++//   node <server package>/server/dist/one-ma-rollback.js --data-dir <dir> [--cancel]
 +//
 +// The 1ma desktop app runs it with its own runtime: ELECTRON_RUN_AS_NODE=1.
 +import { existsSync } from "node:fs";
@@ -67,14 +74,24 @@ index 0000000..fe83e44
 +import { resolveDataDirDatabasePath } from "@bb/config/runtime";
 +import { createConnection } from "@bb/db";
 +import { ONE_MA_PLUGINS } from "./services/plugins/builtin-registry.js";
-+import { removeBuiltInOneMaPlugins } from "./services/plugins/one-ma-rollback.js";
++import { cancelOneMaRollback, prepareOneMaRollback } from "./services/plugins/one-ma-rollback.js";
 +
-+const { values } = parseArgs({ options: { "data-dir": { type: "string" } } });
++const { values } = parseArgs({
++  options: { "data-dir": { type: "string" }, cancel: { type: "boolean" } },
++});
 +if (values["data-dir"] === undefined) {
-+  console.error("usage: one-ma-rollback.js --data-dir <1ma data directory>");
++  console.error("usage: one-ma-rollback.js --data-dir <1ma data directory> [--cancel]");
 +  process.exit(2);
 +}
 +const dataDir = resolve(values["data-dir"]);
++if (values.cancel === true) {
++  console.log(
++    (await cancelOneMaRollback(dataDir))
++      ? "cancelled: this version builds the 1ma plugins in again at its next start"
++      : "nothing to cancel",
++  );
++  process.exit(0);
++}
 +const databasePath = resolveDataDirDatabasePath({ dataDir });
 +if (!existsSync(databasePath)) {
 +  console.error(`no 1ma database at ${databasePath}`);
@@ -82,7 +99,7 @@ index 0000000..fe83e44
 +}
 +const db = createConnection(databasePath);
 +try {
-+  const lines = await removeBuiltInOneMaPlugins({
++  const lines = await prepareOneMaRollback({
 +    db,
 +    dataDir,
 +    pluginIds: ONE_MA_PLUGINS.map((plugin) => plugin.pluginId),
@@ -97,13 +114,16 @@ index 0000000..fe83e44
 +}
 diff --git a/apps/server/src/services/plugins/one-ma-rollback.ts b/apps/server/src/services/plugins/one-ma-rollback.ts
 new file mode 100644
-index 0000000..4cb4797
+index 0000000..983cac4
 --- /dev/null
 +++ b/apps/server/src/services/plugins/one-ma-rollback.ts
-@@ -0,0 +1,106 @@
-+import { mkdir, rename, rm, stat } from "node:fs/promises";
+@@ -0,0 +1,235 @@
++import { readFileSync } from "node:fs";
++import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 +import { join } from "node:path";
++import Database from "better-sqlite3";
 +import { eq } from "drizzle-orm";
++import { drizzle } from "drizzle-orm/better-sqlite3";
 +import {
 +  claimBbAppRuntimeFile,
 +  clearOwnBbAppRuntimeFile,
@@ -115,12 +135,33 @@ index 0000000..4cb4797
 +// and 0015). Such a version deletes, with their settings, secrets and
 +// schedules, the rows whose source is a built-in it does not know; bb deletes
 +// a plugin's data only on removal, and installing a plugin keeps the data
-+// stored under its id. So the way back removes only the built-in 1ma rows,
-+// with 1ma stopped; the older version then starts with nothing to delete, and
-+// the 1ma plugins installed again there find their data as it was.
++// stored under its id. So the way back writes a plan, then removes only the
++// built-in 1ma rows, with 1ma stopped. While the plan is there this version
++// leaves the 1ma plugins out instead of building them in again; the older
++// version starts with nothing to delete, and the 1ma plugins installed again
++// there find their data. Seeing such an install, this version drops the plan.
++
++type Action = "install" | "install-and-turn-off" | "leave-out" | "new";
++
++interface PlannedPlugin {
++  id: string;
++  action: Action;
++  // How it was installed before the move, from the database copy.
++  previous: string | null;
++}
++
++interface RollbackPlan {
++  format: 1;
++  createdAt: number;
++  plugins: PlannedPlugin[];
++}
 +
 +export function oneMaDatabaseCopyPath(dataDir: string): string {
 +  return join(dataDir, "backups", "before-1ma-builtins.db");
++}
++
++export function oneMaRollbackPlanPath(dataDir: string): string {
++  return join(dataDir, "backups", "1ma-rollback.json");
 +}
 +
 +async function exists(path: string): Promise<boolean> {
@@ -130,8 +171,15 @@ index 0000000..4cb4797
 +  );
 +}
 +
++async function writeAtomically(path: string, contents: string): Promise<void> {
++  const partial = `${path}.partial`;
++  await writeFile(partial, contents, { mode: 0o600 });
++  await rename(partial, path);
++}
++
 +// One copy of the whole database before the first built-in 1ma row, kept as a
-+// last resort; an existing copy is never replaced.
++// last resort and as the record of how the plugins were installed before; an
++// existing copy is never replaced.
 +export async function saveOneMaDatabaseCopy(db: DbConnection, dataDir: string): Promise<boolean> {
 +  const target = oneMaDatabaseCopyPath(dataDir);
 +  if (await exists(target)) return false;
@@ -147,10 +195,82 @@ index 0000000..4cb4797
 +  return true;
 +}
 +
++export async function readOneMaRollbackPlan(dataDir: string): Promise<RollbackPlan | null> {
++  try {
++    const plan = JSON.parse(await readFile(oneMaRollbackPlanPath(dataDir), "utf8")) as RollbackPlan;
++    return plan.format === 1 && Array.isArray(plan.plugins) ? plan : null;
++  } catch {
++    return null;
++  }
++}
++
++// Called when this version sees a 1ma plugin installed again by an older one:
++// the way back is done, and the next move to built-ins makes its own copy.
++export async function finishOneMaRollback(dataDir: string, now: number): Promise<void> {
++  await rm(oneMaRollbackPlanPath(dataDir), { force: true });
++  const copy = oneMaDatabaseCopyPath(dataDir);
++  if (await exists(copy)) {
++    await rename(copy, join(dataDir, "backups", `before-1ma-builtins.${now}.db`));
++  }
++}
++
++function previousInstalls(dataDir: string, pluginIds: readonly string[]): Map<string, string> {
++  const found = new Map<string, string>();
++  let sqlite: Database.Database;
++  try {
++    sqlite = new Database(oneMaDatabaseCopyPath(dataDir), { readonly: true, fileMustExist: true });
++  } catch {
++    return found;
++  }
++  const copy = drizzle({ client: sqlite });
++  try {
++    for (const id of pluginIds) {
++      const row = copy.select().from(installedPlugins).where(eq(installedPlugins.id, id)).get();
++      if (row?.sourceKind === "git" && row.sourceGitUrl !== null) {
++        const ref = row.sourceGitResolvedTag ?? row.gitResolvedCommit;
++        found.set(
++          id,
++          `from git ${row.sourceGitUrl}${row.sourceGitSubdirectory === null ? "" : ` (${row.sourceGitSubdirectory})`}${ref === null ? "" : ` at ${ref}`}`,
++        );
++      } else if (row?.sourceKind === "path") {
++        let commit: unknown = null;
++        try {
++          commit = JSON.parse(readFileSync(join(row.rootDir, ".1ma-release.json"), "utf8")).commit;
++        } catch {}
++        found.set(
++          id,
++          typeof commit === "string"
++            ? `from the release folder: node scripts/release-linux.mjs ${commit} --add=${id}`
++            : `from the folder ${row.rootDir}`,
++        );
++      }
++    }
++  } catch {
++    // An unreadable copy only costs the hints.
++  } finally {
++    sqlite.close();
++  }
++  return found;
++}
++
++function describe(plugin: PlannedPlugin): string {
++  const how = plugin.previous === null ? "" : `, ${plugin.previous}`;
++  switch (plugin.action) {
++    case "install":
++      return `${plugin.id}: install it again in the older 1ma${how}; its settings and data are kept`;
++    case "install-and-turn-off":
++      return `${plugin.id}: install it again in the older 1ma${how} and turn it off, as it was; its settings and data are kept`;
++    case "leave-out":
++      return `${plugin.id}: you had removed it, so do not install it again`;
++    case "new":
++      return `${plugin.id}: came with the built-in version; install it in the older 1ma only if you want it; its settings and data are kept`;
++  }
++}
++
 +// Takes bb-app's claim on the data folder for its run, so it refuses while
-+// 1ma runs, and removes the rows in one transaction. Returns what to tell the
-+// owner about each plugin.
-+export async function removeBuiltInOneMaPlugins(args: {
++// 1ma runs; writes the plan before removing the rows in one transaction. A
++// repeated run keeps the earlier decisions. Returns what to tell the owner.
++export async function prepareOneMaRollback(args: {
 +  db: DbConnection;
 +  dataDir: string;
 +  pluginIds: readonly string[];
@@ -175,40 +295,66 @@ index 0000000..4cb4797
 +    );
 +  }
 +  try {
-+    const lines = args.db.transaction(
-+      (tx) => {
-+        const said: string[] = [];
-+        for (const id of args.pluginIds) {
-+          const row = tx.select().from(installedPlugins).where(eq(installedPlugins.id, id)).get();
-+          if (row === undefined) continue;
-+          if (row.sourceKind !== "builtin") {
-+            said.push(`${id}: installed from ${row.source}, left as it is`);
-+            continue;
-+          }
-+          tx.delete(installedPlugins).where(eq(installedPlugins.id, id)).run();
-+          said.push(
-+            row.removedAt !== null
-+              ? `${id}: removed; you had removed it, so do not install it again`
++    const earlier = new Map(
++      ((await readOneMaRollbackPlan(args.dataDir))?.plugins ?? []).map((plugin) => [plugin.id, plugin]),
++    );
++    const previous = previousInstalls(args.dataDir, args.pluginIds);
++    const current = (id: string) =>
++      args.db.select().from(installedPlugins).where(eq(installedPlugins.id, id)).get();
++    const plugins: PlannedPlugin[] = [];
++    const notes: string[] = [];
++    for (const id of args.pluginIds) {
++      const row = current(id);
++      if (row !== undefined && row.sourceKind !== "builtin") {
++        notes.push(`${id}: installed from ${row.source}, left as it is`);
++        continue;
++      }
++      const before = earlier.get(id);
++      if (before !== undefined) {
++        plugins.push(before);
++        continue;
++      }
++      if (row === undefined) continue;
++      plugins.push({
++        id,
++        action:
++          row.removedAt !== null
++            ? "leave-out"
++            : !previous.has(id)
++              ? "new"
 +              : row.enabled
-+                ? `${id}: removed; install it again in the older 1ma, its settings and data are kept`
-+                : `${id}: removed; install it again in the older 1ma and turn it off, as it was; its settings and data are kept`,
-+          );
++                ? "install"
++                : "install-and-turn-off",
++        previous: previous.get(id) ?? null,
++      });
++    }
++    await mkdir(join(args.dataDir, "backups"), { recursive: true });
++    const plan: RollbackPlan = { format: 1, createdAt: now, plugins };
++    await writeAtomically(oneMaRollbackPlanPath(args.dataDir), `${JSON.stringify(plan, null, 2)}\n`);
++    args.db.transaction(
++      (tx) => {
++        for (const plugin of plugins) {
++          const row = tx.select().from(installedPlugins).where(eq(installedPlugins.id, plugin.id)).get();
++          if (row?.sourceKind === "builtin") {
++            tx.delete(installedPlugins).where(eq(installedPlugins.id, plugin.id)).run();
++          }
 +        }
-+        return said;
 +      },
 +      { behavior: "exclusive" },
 +    );
-+    const copy = oneMaDatabaseCopyPath(args.dataDir);
-+    if (await exists(copy)) {
-+      await rename(copy, join(args.dataDir, "backups", `before-1ma-builtins.${now}.db`));
-+    }
-+    return lines;
++    return [...plugins.map(describe), ...notes];
 +  } finally {
 +    await clearOwnBbAppRuntimeFile({ dataDir: args.dataDir, pid });
 +  }
 +}
++
++export async function cancelOneMaRollback(dataDir: string): Promise<boolean> {
++  if (!(await exists(oneMaRollbackPlanPath(dataDir)))) return false;
++  await rm(oneMaRollbackPlanPath(dataDir), { force: true });
++  return true;
++}
 diff --git a/apps/server/src/services/plugins/plugin-registration.ts b/apps/server/src/services/plugins/plugin-registration.ts
-index 8fa9e84..be46bc5 100644
+index 8fa9e84..1cd3ad3 100644
 --- a/apps/server/src/services/plugins/plugin-registration.ts
 +++ b/apps/server/src/services/plugins/plugin-registration.ts
 @@ -4,7 +4,8 @@ import {
@@ -229,15 +375,21 @@ index 8fa9e84..be46bc5 100644
    SHIPPED_PLUGINS,
    builtinPluginSource,
    type BundledPluginRegistration,
-@@ -59,6 +61,7 @@ import type {
+@@ -59,6 +61,13 @@ import type {
    RegisterInstalledArgs,
  } from "./managed-plugin-artifacts.js";
  import { commitInstall } from "./install-cancellation.js";
-+import { oneMaDatabaseCopyPath, saveOneMaDatabaseCopy } from "./one-ma-rollback.js";
++import {
++  finishOneMaRollback,
++  oneMaDatabaseCopyPath,
++  oneMaRollbackPlanPath,
++  readOneMaRollbackPlan,
++  saveOneMaDatabaseCopy,
++} from "./one-ma-rollback.js";
  import type { PluginServiceDeps } from "./plugin-service-internal.js";
  import {
    gitResolvedVersion,
-@@ -765,6 +768,96 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+@@ -765,7 +774,118 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
      });
    }
  
@@ -331,15 +483,38 @@ index 8fa9e84..be46bc5 100644
 +    }
 +  }
 +
++  // While a prepared way back to an older 1ma is pending, the 1ma plugins stay
++  // out, so the older version still finds nothing to delete. A 1ma plugin
++  // installed again (by that version) means it has run: the plan is done.
++  // Returns why the 1ma plugins stay out, or null.
++  async function oneMaRollbackHold(): Promise<string | null> {
++    if ((await readOneMaRollbackPlan(deps.dataDir)) === null) return null;
++    const ids = ONE_MA_PLUGINS.map((plugin) => plugin.pluginId);
++    if (
++      ids.some((id) => {
++        const row = getInstalledPluginRegistration(deps.db, id);
++        return row !== undefined && row.sourceKind !== "builtin";
++      })
++    ) {
++      await finishOneMaRollback(deps.dataDir, Date.now());
++      logger.info("a 1ma plugin was installed again after going back; the 1ma plugins are built in again");
++      return null;
++    }
++    return `the way back to an older 1ma is prepared (${oneMaRollbackPlanPath(deps.dataDir)}); start the older 1ma, or run one-ma-rollback.js --cancel to keep this version`;
++  }
++
    async function reconcileBundled(): Promise<void> {
++    const oneMaHeld = await oneMaRollbackHold();
      for (const bundled of bundledPlugins) {
        const source = builtinPluginSource(bundled.name);
-@@ -803,6 +896,34 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+       let manifest: PluginManifest;
+@@ -803,6 +923,35 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
            name: bundled.name,
          })
        ) {
 +        if (oneMaPluginNames.has(bundled.name)) {
 +          const problem =
++            oneMaHeld ??
 +            (await oneMaTakeoverProblem(existing, bundled.name, manifest.version)) ??
 +            (await oneMaDatabaseCopyProblem());
 +          if (problem !== null) {
@@ -369,12 +544,12 @@ index 8fa9e84..be46bc5 100644
          logger.warn(
            `bundled plugin ${bundled.name} resolved to id "${manifest.id}", but that id is already installed from ${existing.source}; skipping bundled reconciliation`,
          );
-@@ -818,6 +939,13 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+@@ -818,6 +967,13 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
          existing.rootDir !== bundled.rootDir ||
          existing.enabled !== enabled
        ) {
 +        if (oneMaPluginNames.has(bundled.name)) {
-+          const problem = await oneMaDatabaseCopyProblem();
++          const problem = oneMaHeld ?? (await oneMaDatabaseCopyProblem());
 +          if (problem !== null) {
 +            logger.warn(`built-in 1ma plugin ${bundled.name} is not installed yet: ${problem}`);
 +            continue;
@@ -384,7 +559,7 @@ index 8fa9e84..be46bc5 100644
            id: manifest.id,
            source,
 diff --git a/apps/server/test/services/plugins/plugin-service.test.ts b/apps/server/test/services/plugins/plugin-service.test.ts
-index 5dd296e..4796835 100644
+index 5dd296e..f75e7c5 100644
 --- a/apps/server/test/services/plugins/plugin-service.test.ts
 +++ b/apps/server/test/services/plugins/plugin-service.test.ts
 @@ -3,6 +3,7 @@ import {
@@ -420,12 +595,12 @@ index 5dd296e..4796835 100644
  } from "../../../src/services/plugins/plugin-service.js";
  import { testLogger } from "../../helpers/test-app.js";
  import { pluginInstalledTelemetryEvent } from "../../../src/services/plugins/plugin-registration.js";
-+import { removeBuiltInOneMaPlugins } from "../../../src/services/plugins/one-ma-rollback.js";
++import { cancelOneMaRollback, prepareOneMaRollback } from "../../../src/services/plugins/one-ma-rollback.js";
 +import { readSecret } from "../../../src/services/plugins/plugin-settings.js";
  import type { TelemetryEvent } from "../../../src/services/system/telemetry.js";
  import { createNoopTelemetryService } from "../../../src/services/system/telemetry.js";
  import { createProviderRegistryService } from "../../../src/services/providers/provider-registry.js";
-@@ -230,6 +241,265 @@ describe("plugin service", () => {
+@@ -230,6 +241,301 @@ describe("plugin service", () => {
      expect(order).toEqual(["zz-provider", "aa-installed"]);
    });
  
@@ -622,12 +797,15 @@ index 5dd296e..4796835 100644
 +
 +    const oneMaIds = ["1ma-brand", "1ma-theme", "1ma-server-switcher", "1ma-auto-updates"];
 +
-+    it("going back removes only the built-in 1ma rows and keeps their settings, secrets and schedules", async () => {
++    const planPath = () => join(dataDir(), "backups", "1ma-rollback.json");
++    const fileExists = (path: string) => readFile(path).then(() => true, () => false);
++
++    it("going back removes only the built-in 1ma rows, keeps their data and says how to install each again", async () => {
 +      await moveToBuiltIns();
 +      expect(getInstalledPluginRegistration(db, "1ma-brand")?.source).toBe("builtin:1ma-brand");
 +      expect(getInstalledPluginRegistration(db, "1ma-theme")?.source).toBe(`git:${repository}@^0`);
 +
-+      const lines = await removeBuiltInOneMaPlugins({ db, dataDir: dataDir(), pluginIds: oneMaIds, now: 42 });
++      const lines = await prepareOneMaRollback({ db, dataDir: dataDir(), pluginIds: oneMaIds });
 +
 +      expect(getInstalledPluginRegistration(db, "1ma-brand")).toBeUndefined();
 +      expect(getInstalledPluginRegistration(db, "1ma-server-switcher")).toBeUndefined();
@@ -641,30 +819,63 @@ index 5dd296e..4796835 100644
 +        expect(listPluginSchedules(db, id)).toMatchObject([{ name: schedule }]);
 +      }
 +      expect(lines).toEqual([
-+        "1ma-brand: removed; install it again in the older 1ma and turn it off, as it was; its settings and data are kept",
++        `1ma-brand: install it again in the older 1ma, from git ${repository} (plugins/1ma-brand) at 1ma-brand/v0.3.1 and turn it off, as it was; its settings and data are kept`,
++        "1ma-server-switcher: came with the built-in version; install it in the older 1ma only if you want it; its settings and data are kept",
 +        `1ma-theme: installed from git:${repository}@^0, left as it is`,
-+        "1ma-server-switcher: removed; install it again in the older 1ma, its settings and data are kept",
 +      ]);
-+      expect(await readdir(join(dataDir(), "backups"))).toEqual(["before-1ma-builtins.42.db"]);
++      expect(await fileExists(planPath())).toBe(true);
++      expect(await fileExists(databaseCopy())).toBe(true);
 +    });
 +
-+    it("a 1ma plugin installed again after going back finds its settings, and is taken over again", async () => {
++    it("names the release commit to install a Linux release-folder copy again from", async () => {
++      await start({ kind: "path", marker: true });
++      const lines = await prepareOneMaRollback({ db, dataDir: dataDir(), pluginIds: oneMaIds });
++      expect(lines[0]).toContain(`node scripts/release-linux.mjs ${"a".repeat(40)} --add=1ma-brand`);
++    });
++
++    it("after going back this version leaves the 1ma plugins out, so the older one still finds nothing to delete", async () => {
 +      await moveToBuiltIns();
-+      await removeBuiltInOneMaPlugins({ db, dataDir: dataDir(), pluginIds: oneMaIds });
++      await prepareOneMaRollback({ db, dataDir: dataDir(), pluginIds: oneMaIds });
++      const warn = vi.spyOn(logger, "warn");
++      await launch({ "1ma-brand": await writeBuiltin("1ma-brand"), "1ma-server-switcher": await writeBuiltin("1ma-server-switcher") });
++      expect(getInstalledPluginRegistration(db, "1ma-brand")).toBeUndefined();
++      expect(getInstalledPluginRegistration(db, "1ma-server-switcher")).toBeUndefined();
++      expect(warn.mock.calls.some(([line]) => String(line).includes("the way back to an older 1ma is prepared"))).toBe(true);
++    });
++
++    it("a repeated way back keeps the decisions taken from the rows it removed", async () => {
++      await moveToBuiltIns();
++      db.update(installedPlugins).set({ removedAt: 1 }).where(eq(installedPlugins.id, "1ma-server-switcher")).run();
++      const first = await prepareOneMaRollback({ db, dataDir: dataDir(), pluginIds: oneMaIds });
++      const again = await prepareOneMaRollback({ db, dataDir: dataDir(), pluginIds: oneMaIds });
++      expect(again).toEqual(first);
++      expect(again.slice(0, 2)).toEqual([
++        `1ma-brand: install it again in the older 1ma, from git ${repository} (plugins/1ma-brand) at 1ma-brand/v0.3.1 and turn it off, as it was; its settings and data are kept`,
++        "1ma-server-switcher: you had removed it, so do not install it again",
++      ]);
++    });
++
++    it("a 1ma plugin installed again by the older version ends the way back; it is built in again with a fresh database copy", async () => {
++      await moveToBuiltIns();
++      await prepareOneMaRollback({ db, dataDir: dataDir(), pluginIds: oneMaIds });
 +      await installCopy("1ma-brand", { kind: "git", withData: false });
 +      expect(getPluginSettingsValues(db, "1ma-brand")).toEqual({ accent: "#ff6600" });
 +      expect(await readSecret(dataDir(), "1ma-brand", "token")).toBe("s3cret");
 +      await launch({ "1ma-brand": await writeBuiltin("1ma-brand") });
 +      expect(getInstalledPluginRegistration(db, "1ma-brand")?.source).toBe("builtin:1ma-brand");
-+      expect(await readdir(join(dataDir(), "backups"))).toContain("before-1ma-builtins.db");
++      expect(await fileExists(planPath())).toBe(false);
++      const backups = await readdir(join(dataDir(), "backups"));
++      expect(backups).toContain("before-1ma-builtins.db");
++      expect(backups.some((name) => /^before-1ma-builtins\.\d+\.db$/u.test(name))).toBe(true);
 +    });
 +
-+    it("going back tells not to install a plugin the owner had removed", async () => {
++    it("--cancel lets this version build the 1ma plugins in again", async () => {
 +      await moveToBuiltIns();
-+      db.update(installedPlugins).set({ removedAt: 1 }).where(eq(installedPlugins.id, "1ma-server-switcher")).run();
-+      const lines = await removeBuiltInOneMaPlugins({ db, dataDir: dataDir(), pluginIds: oneMaIds });
-+      expect(lines).toContain("1ma-server-switcher: removed; you had removed it, so do not install it again");
-+      expect(getInstalledPluginRegistration(db, "1ma-server-switcher")).toBeUndefined();
++      await prepareOneMaRollback({ db, dataDir: dataDir(), pluginIds: oneMaIds });
++      expect(await cancelOneMaRollback(dataDir())).toBe(true);
++      await launch({ "1ma-brand": await writeBuiltin("1ma-brand") });
++      expect(getInstalledPluginRegistration(db, "1ma-brand")?.source).toBe("builtin:1ma-brand");
++      expect(getPluginSettingsValues(db, "1ma-brand")).toEqual({ accent: "#ff6600" });
 +    });
 +
 +    it("going back refuses while 1ma runs on the data, and changes nothing", async () => {
@@ -681,10 +892,10 @@ index 5dd296e..4796835 100644
 +        }),
 +      );
 +      await expect(
-+        removeBuiltInOneMaPlugins({ db, dataDir: dataDir(), pluginIds: oneMaIds }),
++        prepareOneMaRollback({ db, dataDir: dataDir(), pluginIds: oneMaIds }),
 +      ).rejects.toThrow(/1ma is running on this data/u);
 +      expect(getInstalledPluginRegistration(db, "1ma-brand")?.source).toBe("builtin:1ma-brand");
-+      expect(await readdir(join(dataDir(), "backups"))).toEqual(["before-1ma-builtins.db"]);
++      expect(await fileExists(planPath())).toBe(false);
 +    });
 +  });
 +

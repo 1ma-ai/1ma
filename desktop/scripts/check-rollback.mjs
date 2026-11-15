@@ -3,7 +3,8 @@
 // machines would: the older release installs the 1ma plugins from git (Mac)
 // and from a release folder (Linux); the new one takes them over, adds one
 // they did not have and refuses the way back while it runs;
-// server/dist/one-ma-rollback.js removes the built-in rows; the older release
+// server/dist/one-ma-rollback.js removes the built-in rows; the new release
+// started again by habit leaves the 1ma plugins out; the older release
 // starts, the plugins are installed again and find their settings and
 // secrets, the one it never had keeps its secret; the new one takes them over
 // again. Run in CI only (it starts servers):
@@ -14,7 +15,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { installTarball, pluginsRunning, startServer, until } from "./test-server.mjs";
+import { delay, installTarball, pluginsRunning, startServer, until } from "./test-server.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const EMBEDDED = JSON.parse(
@@ -156,6 +157,19 @@ try {
   const back = rollback();
   process.stdout.write(back.stdout);
   check(back.status === 0, `one-ma-rollback.js failed:\n${back.stderr}`);
+
+  await run("new release started again by habit", newer, async (server) => {
+    await delay(5_000);
+    const plugins = (await (await server.get("/api/v1/plugins")).json()).plugins ?? [];
+    const back = plugins
+      .filter((plugin) => EMBEDDED.includes(plugin.id))
+      .map((plugin) => plugin.id);
+    check(
+      back.length === 0,
+      `the new release built ${back.join(", ")} in again after the way back`,
+    );
+    console.log("it leaves the 1ma plugins out while the way back is prepared");
+  });
 
   await run("older release again: install the 1ma plugins again", older, async (server) => {
     const before = (await (await server.get("/api/v1/plugins")).json()).plugins ?? [];
