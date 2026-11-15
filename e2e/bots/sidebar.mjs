@@ -43,6 +43,11 @@ export async function openApp(browser, theme) {
   const problems = [];
   page.on("pageerror", (error) => problems.push(error.message));
   await page.goto(server.url);
+  // A fresh server starts with the first-run setup in front of the app.
+  await page
+    .getByRole("button", { name: "Skip setup" })
+    .click({ timeout: 20_000 })
+    .catch(() => {});
   return { context, page, problems };
 }
 

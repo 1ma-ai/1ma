@@ -167,6 +167,9 @@ describe("1ma-bots on a real server", () => {
       `[stub:wait 45] ${stubCall("bot_message", toAlice("first-from-bruno"))}`,
     );
     await waitStatus(brunoThread, "active");
+    const own = exchangeOf(brunoThread);
+    assert.ok(own.chain, "Bruno's own message started an exchange");
+    assert.equal(own.chain.letters, 0);
     await say(
       aliceThread,
       stubCall("bot_message", { to: bruno.id, threadId: brunoThread, text: second }),
