@@ -4,7 +4,8 @@ import { Fleet, STUB_MODEL, STUB_PROVIDER, requireEnv, waitFor } from "../lib/se
 
 export const BOTS = "1ma-bots";
 export const SIDEBAR = "1ma-sidebar";
-const root = path.join(requireEnv("E2E_ROOT"), "bots");
+const scratch = requireEnv("E2E_ROOT");
+const root = path.join(scratch, "bots");
 export const screenshotDir = path.join(root, "screenshots");
 export const stubLog = path.join(root, "stub.log");
 export const pluginDirs = {
@@ -12,7 +13,7 @@ export const pluginDirs = {
   sidebar: path.resolve(import.meta.dirname, "../../plugins/1ma-sidebar"),
 };
 
-export const fleet = new Fleet({ root });
+export const fleet = new Fleet({ root, packageDir: path.join(scratch, "server-package") });
 export const server = fleet.add("bots");
 export const projects = {};
 
