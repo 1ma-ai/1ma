@@ -430,6 +430,61 @@ describe("1ma-superagent bot actions with a model turn", () => {
     );
   });
 
+  it("keeps a decision recorded before its card closed through a crash, and starts the chat once", async () => {
+    await clearCards();
+    control.bb(["plugin", "config", PLUGIN, "set", "passEnabled", "false"]);
+    const known = await knownActions();
+    const prompt = "[stub:reply crash task]";
+    await sayToBot(startCall(prompt, "crash task"));
+    const created = await newestAction(known);
+    const card = await waitCard("start card", (data) => data.quote === prompt);
+    const { questionId, token } = card.payload.data;
+    const decided = await control.rpc(PLUGIN, "questions.v1.decide", {
+      questionId,
+      token,
+      optionId: "start",
+    });
+    assert.equal(decided.outcome, "applied");
+    assert.equal((await action(created.id)).state, "confirmed");
+    const postsBefore = proxy.spawnPosts().length;
+    await control.crash();
+    control.start();
+    await control.waitReady();
+    const afterCrash = await waitFor("plugin back after the crash", 120_000, async () =>
+      action(created.id).catch(() => null),
+    );
+    assert.equal(afterCrash.state, "confirmed");
+    assert.equal(proxy.spawnPosts().length, postsBefore);
+    const survivor = (await pendingCards()).find(
+      (pending) => pending.payload.data.questionId === questionId,
+    );
+    if (survivor !== undefined) {
+      const state = await control.rpc(PLUGIN, "questions.v1.state", { questionId, token });
+      assert.deepEqual(state, { open: false, decided: "start" });
+      await respond(survivor, state.decided);
+    }
+    console.log(
+      `card after the crash: ${survivor === undefined ? "gone" : "closed with the stored decision"}`,
+    );
+    control.bb(["plugin", "config", PLUGIN, "set", "passEnabled", "true"]);
+    const bound = await waitFor("crash action bound", PASS * 2, async () => {
+      const current = await action(created.id);
+      return current?.state === "bound" ? current : null;
+    });
+    const matching = (await spawnedOnExecutor()).filter(
+      (row) => row.label?.actionId === created.id,
+    );
+    assert.deepEqual(
+      matching.map((row) => row.threadId),
+      [bound.threadId],
+    );
+    assert.equal(proxy.spawnPosts().length, postsBefore + 1);
+    const repeated = (await pendingCards()).filter(
+      (pending) => pending.payload.data.quote === prompt,
+    );
+    assert.deepEqual(repeated, []);
+  });
+
   it("shows the machine as the reason a new chat waits behind the executor's concurrency limit", async () => {
     await clearCards();
     executor.bb(["concurrency-limit", "global", "0"]);

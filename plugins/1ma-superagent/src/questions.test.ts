@@ -78,6 +78,14 @@ function setup() {
   };
 }
 
+function kindsOf(answers: Array<{ subject: string; optionId: string }>) {
+  const kind: QuestionKind = {
+    currentVersion: () => "v1",
+    onAnswer: (question, optionId) => answers.push({ subject: question.subject, optionId }),
+  };
+  return new Map([["test", kind]]);
+}
+
 function payloadOf(request: { payload: unknown }) {
   return questionPayloadSchema.parse(request.payload);
 }
@@ -177,5 +185,38 @@ describe("question dispatcher", () => {
     harness.behavior.cancelInteraction(first.id);
     await settle();
     expect(store.latest("first")?.state).toBe("canceled");
+  });
+
+  it("records a decision before the card closes and does not apply it again when the card's answer arrives", async () => {
+    const { makeDispatcher, ask, pending, harness, answers, outcomes, store, settle } = setup();
+    const id = ask("first");
+    ask("second");
+    if (id === null) throw new Error("not asked");
+    makeDispatcher().dispatch();
+    const first = pending()[0];
+    if (first === undefined) throw new Error("no card");
+    const { questionId, token } = payloadOf(first);
+    expect(questionId).toBe(id);
+    expect(store.answer(questionId, token, "yes", kindsOf(answers), 1_500)).toBe("applied");
+    expect(store.cardState(questionId, token)).toEqual({ open: false, decided: "yes" });
+    harness.behavior.submitInteraction(first.id, { token, optionId: "yes" });
+    await settle();
+    expect(answers).toEqual([{ subject: "first", optionId: "yes" }]);
+    expect(outcomes).toEqual(["recorded"]);
+    expect(store.latest("first")?.state).toBe("answered");
+    expect(pending().map((request) => payloadOf(request).title)).toEqual(["second"]);
+  });
+
+  it("does not ask again after a restart that came between recording a decision and closing the card", () => {
+    const { makeDispatcher, ask, pending, answers, store } = setup();
+    const id = ask("first");
+    if (id === null) throw new Error("not asked");
+    makeDispatcher().dispatch();
+    const token = payloadOf(pending()[0] ?? { payload: null }).token;
+    store.answer(id, token, "yes", kindsOf(answers), 1_500);
+    makeDispatcher().dispatch();
+    expect(pending()).toHaveLength(1);
+    expect(store.answer(id, token, "no", kindsOf(answers), 1_600)).toBe("rejected");
+    expect(answers).toEqual([{ subject: "first", optionId: "yes" }]);
   });
 });

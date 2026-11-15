@@ -23,6 +23,7 @@ import {
 } from "./src/action-runner.js";
 import { ActionStore } from "./src/actions.js";
 import { createBackground } from "./src/background.js";
+import { questionRpcContract } from "./src/card.js";
 import { QuestionDispatcher } from "./src/dispatcher.js";
 import { BYPASS_KIND, type ReadJournal, mainWatchRows, runMainWatch } from "./src/main-watch.js";
 import { RESULT_KIND, runReports } from "./src/reports.js";
@@ -148,7 +149,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
       kinds,
       chat: () => (config.role === "control" ? config.mainBotThreadId : null),
       now: Date.now,
-      onAnswered: () => void runner.request(FULL_SCOPE),
+      onAnswered: () => afterAnswer(),
       signal: lifecycle.signal,
     });
     const executorsFor = options.executors ?? defaultExecutors;
@@ -214,6 +215,17 @@ export function createPlugin(options: SuperagentOptions = {}) {
     });
 
     const isControl = () => config.role === "control";
+    const afterAnswer = () => {
+      if (isControl() && config.passEnabled) void runner.request(FULL_SCOPE);
+    };
+    bb.rpc.register(questionRpcContract, {
+      "questions.v1.decide": ({ questionId, token, optionId }) => {
+        const outcome = questions.answer(questionId, token, optionId, kinds, Date.now());
+        if (outcome === "applied") afterAnswer();
+        return { outcome };
+      },
+      "questions.v1.state": ({ questionId, token }) => questions.cardState(questionId, token),
+    });
 
     bb.background.schedule(PASS_SCHEDULE_NAME, PASS_SCHEDULE_CRON, async () => {
       if (!isControl() || !config.passEnabled) return;

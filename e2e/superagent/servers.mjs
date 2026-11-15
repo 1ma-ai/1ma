@@ -59,7 +59,11 @@ export class Server {
         "--no-in-app-updates",
         "--bundled",
       ],
-      { env: cleanEnv({ HOME: this.home, ...this.extraEnv }), stdio: ["ignore", "pipe", "pipe"] },
+      {
+        env: cleanEnv({ HOME: this.home, ...this.extraEnv }),
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
+      },
     );
     this.process.stdout.pipe(log);
     this.process.stderr.pipe(log);
@@ -72,6 +76,13 @@ export class Server {
     const timer = setTimeout(() => this.process.kill("SIGKILL"), 20_000);
     await exited;
     clearTimeout(timer);
+  }
+
+  async crash() {
+    if (this.process === null || this.process.exitCode !== null) return;
+    const exited = new Promise((resolve) => this.process.once("exit", resolve));
+    process.kill(-this.process.pid, "SIGKILL");
+    await exited;
   }
 
   bb(args, { input } = {}) {

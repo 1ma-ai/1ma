@@ -1,11 +1,43 @@
-import { useState } from "react";
-import { definePluginApp, type PluginPendingInteractionProps } from "@get-bb/plugin-sdk/app";
-import { questionPayloadSchema } from "./src/card.js";
+import { useEffect, useState } from "react";
+import {
+  definePluginApp,
+  type PluginPendingInteractionProps,
+  useRpc,
+} from "@get-bb/plugin-sdk/app";
+import { questionPayloadSchema, questionRpcContract } from "./src/card.js";
 import { strings } from "./strings.js";
 
+const RECORDED = new Set(["applied", "recorded", "stale"]);
+
 function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionProps) {
+  const rpc = useRpc<typeof questionRpcContract>();
   const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [decided, setDecided] = useState<string | null>(null);
   const parsed = questionPayloadSchema.safeParse(interaction.payload);
+  const questionId = parsed.success ? parsed.data.questionId : null;
+  const token = parsed.success ? parsed.data.token : null;
+
+  useEffect(() => {
+    if (questionId === null || token === null) return;
+    let live = true;
+    rpc.call("questions.v1.state", { questionId, token }).then(
+      (state) => {
+        if (!live) return;
+        if (state.decided !== null) {
+          setDecided(state.decided);
+          void submit({ token, optionId: state.decided }).catch(() => {});
+        } else if (!state.open) {
+          void cancel().catch(() => {});
+        }
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [questionId, token]);
+
   if (!parsed.success) {
     return (
       <div className="space-y-2 text-sm">
@@ -23,8 +55,17 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
   const card = parsed.data;
   const choose = (optionId: string) => {
     setBusy(true);
-    void submit({ token: card.token, optionId }).finally(() => setBusy(false));
+    setProblem(null);
+    rpc
+      .call("questions.v1.decide", { questionId: card.questionId, token: card.token, optionId })
+      .then(async ({ outcome }) => {
+        if (RECORDED.has(outcome)) await submit({ token: card.token, optionId });
+        else setProblem(strings.cardNotRecorded);
+      })
+      .catch(() => setProblem(strings.cardNotRecorded))
+      .finally(() => setBusy(false));
   };
+  const decidedLabel = card.options.find((option) => option.id === decided)?.label;
   return (
     <div className="space-y-3 text-sm">
       <p className="font-medium">{card.title}</p>
@@ -52,7 +93,7 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
           <button
             key={option.id}
             type="button"
-            disabled={busy}
+            disabled={busy || decided !== null}
             className={`rounded-md px-3 py-1.5 ${option.recommended ? "bg-primary text-primary-foreground" : "border"} disabled:opacity-50`}
             onClick={() => choose(option.id)}
           >
@@ -60,6 +101,10 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
           </button>
         ))}
       </div>
+      {decidedLabel === undefined ? null : (
+        <p className="text-xs text-muted-foreground">{strings.cardDecided(decidedLabel)}</p>
+      )}
+      {problem === null ? null : <p className="text-xs text-destructive">{problem}</p>}
       {card.waiting > 0 ? (
         <p className="text-xs text-muted-foreground">{strings.moreWaiting(card.waiting)}</p>
       ) : null}

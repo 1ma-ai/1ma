@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import { type Card, cardSchema } from "./card.js";
+import { type AnswerOutcome, type Card, cardSchema } from "./card.js";
 
 export { answerSchema, cardSchema, questionPayloadSchema } from "./card.js";
-export type { Card, QuestionPayload } from "./card.js";
+export type { AnswerOutcome, Card, QuestionPayload } from "./card.js";
 export const QUESTION_RENDERER = "question";
 export const QUESTION_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -83,8 +83,6 @@ export interface QuestionKind {
   currentVersion(subject: string): string | null;
   onAnswer(question: QuestionRow, optionId: string, now: number): void;
 }
-
-export type AnswerOutcome = "applied" | "stale" | "unknown" | "rejected";
 
 export class QuestionStore {
   readonly #db: Database.Database;
@@ -197,6 +195,8 @@ export class QuestionStore {
   ): AnswerOutcome {
     const apply = this.#db.transaction((): AnswerOutcome => {
       const question = this.get(id);
+      if (question?.state === "answered" && question.token === token)
+        return question.answer === optionId ? "recorded" : "rejected";
       if (question === null || question.state !== "open" || question.token !== token)
         return "unknown";
       if (!question.card.options.some((option) => option.id === optionId)) return "rejected";
@@ -217,6 +217,15 @@ export class QuestionStore {
       return "applied";
     });
     return apply();
+  }
+
+  cardState(id: string, token: string): { open: boolean; decided: string | null } {
+    const question = this.get(id);
+    if (question === null || question.token !== token) return { open: false, decided: null };
+    return {
+      open: question.state === "open",
+      decided: question.state === "answered" ? question.answer : null,
+    };
   }
 }
 

@@ -48,7 +48,7 @@ export class QuestionDispatcher {
     if (!this.#deps.store.markOpen(question.id, chat, token, now)) return;
     this.#live = { questionId: question.id, token };
     const waiting = Math.max(0, this.#deps.store.waiting().length - 1);
-    const payload: QuestionPayload = { ...question.card, token, waiting };
+    const payload: QuestionPayload = { ...question.card, questionId: question.id, token, waiting };
     void this.#deps.background
       .run(() =>
         this.#deps.requestInput(

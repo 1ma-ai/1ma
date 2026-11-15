@@ -67,6 +67,10 @@ export class FaultProxy {
     });
   }
 
+  spawnPosts() {
+    return this.log.filter((entry) => entry.method === "POST" && entry.url === "/api/v1/threads");
+  }
+
   #handle(req, res) {
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
