@@ -1,11 +1,13 @@
 // Checks going back from a 1ma with built-in plugins (patches 0014, 0015) to
 // the last release without them, on one data folder, the way the owner's
 // machines would: the older release installs the 1ma plugins from git (Mac)
-// and from a release folder (Linux), the new one takes them over, bb's
-// artifact GC removes the old checkouts, server/dist/one-ma-rollback.js puts
-// the installs back, the older release runs them with their settings and
-// secrets, and the new one takes them over again. Run in CI only (it starts
-// servers):
+// and from a release folder (Linux); the new one takes them over, adds one
+// they did not have and refuses a restore while it runs; the release folder
+// moves on and bb's artifact GC removes the old checkouts;
+// server/dist/one-ma-rollback.js puts the installs back; the older release
+// runs the files it ran before, with their settings and secrets, and keeps
+// the secrets of the plugin it never had; the new one takes them over again.
+// Run in CI only (it starts servers):
 //
 //   node desktop/scripts/check-rollback.mjs <older server tgz> <new server tgz>
 import { spawnSync } from "node:child_process";
@@ -24,6 +26,7 @@ const FROM_GIT = ["1ma-brand", "1ma-auto-updates"];
 const FROM_FOLDER = "1ma-theme";
 const COPIES = [...FROM_GIT, FROM_FOLDER];
 const SECRET = { plugin: "1ma-brand", key: "probe", value: "kept" };
+const NEW_ONLY = "1ma-server-switcher";
 
 const [olderTarball, newTarball] = process.argv.slice(2);
 if (olderTarball === undefined || newTarball === undefined) {
@@ -41,6 +44,26 @@ const root = mkdtempSync(path.join(tmpdir(), "1ma-rollback-"));
 const dataDir = path.join(root, "data");
 const older = installTarball(path.resolve(olderTarball), path.join(root, "older"));
 const newer = installTarball(path.resolve(newTarball), path.join(root, "new"));
+const releaseFolder = path.join(root, "release", "plugins", FROM_FOLDER);
+const restoredFolder = path.join(dataDir, "plugins", "1ma-rollback", FROM_FOLDER);
+
+function rollback() {
+  return spawnSync(
+    process.execPath,
+    [path.join(newer.serverDist, "one-ma-rollback.js"), "--data-dir", dataDir],
+    { encoding: "utf8" },
+  );
+}
+
+function writeSecret(plugin, value) {
+  const secrets = path.join(dataDir, "plugins", plugin, "secrets");
+  mkdirSync(secrets, { recursive: true });
+  writeFileSync(path.join(secrets, SECRET.key), value);
+}
+
+function readSecret(plugin) {
+  return readFileSync(path.join(dataDir, "plugins", plugin, "secrets", SECRET.key), "utf8");
+}
 
 async function run(label, installed, steps) {
   console.log(`--- ${label}`);
@@ -95,7 +118,7 @@ try {
       check(archive.status === 0, `git archive failed: ${archive.stderr}`);
       const untar = spawnSync("tar", ["-x", "-C", release], { input: archive.stdout });
       check(untar.status === 0, `tar failed: ${untar.stderr}`);
-      const folder = path.join(release, "plugins", FROM_FOLDER);
+      const folder = releaseFolder;
       writeFileSync(
         path.join(folder, ".1ma-release.json"),
         `${JSON.stringify({ repository: "https://github.com/1ma-ai/1ma", commit: "0".repeat(40) })}\n`,
@@ -104,9 +127,7 @@ try {
       await pluginsRunning(server, ["1ma-auto-updates"]);
       server.bb(["plugin", "config", "1ma-auto-updates", "set", "providers", "false"]);
       server.bb(["plugin", "config", "1ma-auto-updates", "set", "plugins", "false"]);
-      const secrets = path.join(dataDir, "plugins", SECRET.plugin, "secrets");
-      mkdirSync(secrets, { recursive: true });
-      writeFileSync(path.join(secrets, SECRET.key), SECRET.value);
+      writeSecret(SECRET.plugin, SECRET.value);
       const plugins = await pluginsRunning(server, COPIES);
       const before = sources(plugins, COPIES);
       for (const id of FROM_GIT) check(before[id].startsWith("git:"), `${id} is ${before[id]}`);
@@ -122,13 +143,28 @@ try {
     const saved = JSON.parse(
       readFileSync(path.join(dataDir, "backups", "before-1ma-builtins", "plugins.json"), "utf8"),
     );
+    const installed = saved.plugins.filter((plugin) => plugin.state === "installed");
     check(
-      JSON.stringify(saved.plugins.map((plugin) => plugin.id).sort()) ===
-        JSON.stringify([...COPIES].sort()),
-      `the saved installs are ${saved.plugins.map((plugin) => plugin.id).join(", ")}`,
+      JSON.stringify(installed.map((plugin) => plugin.id).sort()) ===
+        JSON.stringify([...COPIES].sort()) &&
+        JSON.stringify(saved.plugins.map((plugin) => plugin.id).sort()) ===
+          JSON.stringify([...EMBEDDED].sort()),
+      `the saved state is ${JSON.stringify(saved.plugins.map((plugin) => [plugin.id, plugin.state]))}`,
     );
-    console.log("built in; saved installs:", saved.plugins.map((plugin) => plugin.id).join(", "));
+    writeSecret(NEW_ONLY, "new");
+    const refused = rollback();
+    check(
+      refused.status !== 0 && refused.stderr.includes("1ma is running"),
+      `the restore ran next to the server: ${refused.status} ${refused.stdout}${refused.stderr}`,
+    );
+    expectBuiltIn(await pluginsRunning(server, EMBEDDED));
+    console.log("built in; saved:", installed.map((plugin) => plugin.id).join(", "));
+    console.log("the restore refuses while this server runs, and changed nothing");
   });
+
+  const overview = readFileSync(path.join(releaseFolder, "PLUGIN_OVERVIEW.md"), "utf8");
+  writeFileSync(path.join(releaseFolder, "PLUGIN_OVERVIEW.md"), `${overview}\nA later release.\n`);
+  console.log("--- the release folder moved on to a later version");
 
   const database = new DatabaseSync(path.join(dataDir, "bb.db"));
   const marks = FROM_GIT.map(() => "?").join(", ");
@@ -145,27 +181,29 @@ try {
   database.close();
   console.log(`--- removed ${artifacts.length} git artifact(s), as bb's GC does a week later`);
 
-  const restore = spawnSync(
-    process.execPath,
-    [path.join(newer.serverDist, "one-ma-rollback.js"), "--data-dir", dataDir],
-    { encoding: "utf8" },
-  );
+  const restore = rollback();
   process.stdout.write(restore.stdout);
   check(restore.status === 0, `one-ma-rollback.js failed:\n${restore.stderr}`);
 
   await run("older release again, after the restore", older, async (server) => {
     const plugins = await pluginsRunning(server, COPIES);
     const after = sources(plugins, COPIES);
+    const expected = { ...installedBefore, [FROM_FOLDER]: `path:${restoredFolder}` };
     check(
-      JSON.stringify(after) === JSON.stringify(installedBefore),
-      `sources ${JSON.stringify(after)} instead of ${JSON.stringify(installedBefore)}`,
+      JSON.stringify(after) === JSON.stringify(expected),
+      `sources ${JSON.stringify(after)} instead of ${JSON.stringify(expected)}`,
     );
+    check(
+      readFileSync(path.join(restoredFolder, "PLUGIN_OVERVIEW.md"), "utf8") === overview,
+      `${FROM_FOLDER} does not run the files it ran before`,
+    );
+    check(
+      !plugins.has(NEW_ONLY),
+      `${NEW_ONLY}, which came only with the new release, is still installed`,
+    );
+    check(readSecret(NEW_ONLY) === "new", `the secret of ${NEW_ONLY} was lost`);
     check((await settingsOf(server, "1ma-auto-updates")).providers === false, "a setting was lost");
-    const secret = readFileSync(
-      path.join(dataDir, "plugins", SECRET.plugin, "secrets", SECRET.key),
-      "utf8",
-    );
-    check(secret === SECRET.value, "the secret was lost");
+    check(readSecret(SECRET.plugin) === SECRET.value, "the secret was lost");
     console.log(
       "the older release runs the 1ma plugins as installed before, settings and secret kept",
     );
@@ -174,7 +212,8 @@ try {
   await run("new release again", newer, async (server) => {
     expectBuiltIn(await pluginsRunning(server, EMBEDDED));
     check((await settingsOf(server, "1ma-auto-updates")).providers === false, "a setting was lost");
-    console.log("built in again, settings kept");
+    check(readSecret(NEW_ONLY) === "new", `the secret of ${NEW_ONLY} was lost`);
+    console.log("built in again, settings and secrets kept");
   });
 } finally {
   rmSync(root, { recursive: true, force: true });
