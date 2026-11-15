@@ -38,6 +38,26 @@ export interface ClaimingChat {
   readonly projectRepo: string | null;
 }
 
+const PROBLEM_CODES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^the chat belongs to an excluded project$/, "chat_project_excluded"],
+  [/^the pull request is in an excluded project$/, "pr_project_excluded"],
+  [/^the chat's project is not the pull request's repository$/, "project_mismatch"],
+  [/^the repository is not watched$/, "repo_not_watched"],
+  [/^the pull request does not match the claim$/, "claim_mismatch"],
+  [/^the pull request comes from another repository$/, "fork"],
+  [
+    /^the pull request author is not a GitHub account of the (mac|linux) server$/,
+    "author_not_server_account",
+  ],
+  [/^the claim is older than the pull request$/, "claim_before_pr"],
+  [/^the chat was not on the pull request's branch when it claimed it$/, "branch_mismatch"],
+  [/^claimed by \d+ chats$/, "several_claims"],
+];
+
+export function claimProblemCode(problem: string): string {
+  return PROBLEM_CODES.find(([pattern]) => pattern.test(problem))?.[1] ?? "other";
+}
+
 export type ClaimVerdict = { ok: true } | { ok: false; problem: string };
 
 export function checkClaim(

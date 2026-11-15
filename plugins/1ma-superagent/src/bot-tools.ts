@@ -1,7 +1,8 @@
 import type { BbPluginApi, PluginAgentToolResult } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { strings } from "../strings.js";
-import { parsePullRequestUrl } from "./github/names.js";
+import { claimProblemCode } from "./claims.js";
+import { isRepoName, parsePullRequestUrl, repoFromRemoteUrl } from "./github/names.js";
 import type { PullRequestDto, WorkDto } from "./work-rpc.js";
 
 export const OVERVIEW_TOOL = "sa_overview";
@@ -40,29 +41,96 @@ function iso(value: number | null): string | null {
   return value === null ? null : new Date(value).toISOString();
 }
 
+const SHA = /^[0-9a-f]{7,40}$/;
+const IDENT = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,99}$/;
+const THREAD = /^thr_[a-z0-9]+$/;
+const WAITING = new Set(["owner", "limit", "machine"]);
+const MAIN_STATES = new Set(["ok", "needs_reconcile", "bypass", "unknown"]);
+
+function ident(value: string | null): string | null {
+  return value !== null && IDENT.test(value) ? value : null;
+}
+
+function chatRef(serverId: string | null, threadId: string | null): string | null {
+  if (threadId === null || !THREAD.test(threadId)) return null;
+  return serverId === "mac" || serverId === "linux" ? `${serverId}:${threadId}` : null;
+}
+
+function repoName(value: string): string | null {
+  return isRepoName(value) ? value : null;
+}
+
 export function botPullRequest(pr: PullRequestDto) {
+  const repo = repoName(pr.repo);
   return {
-    pr: `${pr.repo}#${pr.number}`,
+    pr: repo === null ? null : `${repo}#${pr.number}`,
     state: pr.state,
-    headSha: pr.headSha.slice(0, 12),
+    headSha: SHA.test(pr.headSha) ? pr.headSha.slice(0, 12) : null,
     link: pr.link.kind === null ? "unlinked" : pr.link.kind === "claim" ? "claimed" : "manual",
-    chat: pr.link.threadId === null ? null : `${pr.link.serverId}:${pr.link.threadId}`,
-    linkProblem: pr.link.problem,
+    chat: chatRef(pr.link.serverId, pr.link.threadId),
+    linkProblem: pr.link.problem === null ? null : claimProblemCode(pr.link.problem),
     provenance: pr.provenance,
-    chatModelsClaimed: pr.chatModels.models.map((model) => `${model.providerId}/${model.model}`),
+    chatModelsClaimed: pr.chatModels.models.flatMap((model) => {
+      const provider = ident(model.providerId);
+      const name = ident(model.model);
+      return provider === null || name === null ? [] : [`${provider}/${name}`];
+    }),
   };
 }
 
 export function botWork(work: WorkDto) {
   return {
-    chat: `${work.source.serverId}:${work.source.threadId}`,
+    chat: chatRef(work.source.serverId, work.source.threadId),
     state: work.state,
-    waiting: work.waitingReason,
-    repo: work.repo,
-    branch: work.branch,
-    provider: work.providerId,
+    waiting:
+      work.waitingReason !== null && WAITING.has(work.waitingReason) ? work.waitingReason : null,
+    repo: repoFromRemoteUrl(work.repo),
+    provider: ident(work.providerId),
     pullRequests: work.pullRequests.map(botPullRequest),
     updatedAt: iso(work.updatedAt),
+  };
+}
+
+export function overviewData(
+  list: Awaited<ReturnType<BotReadSource["list"]>>,
+  waiting: Awaited<ReturnType<BotReadSource["waiting"]>>,
+  pulls: Awaited<ReturnType<BotReadSource["pullRequests"]>>,
+  tasks: ReturnType<BotReadSource["botTasks"]>,
+) {
+  return {
+    servers: list.servers.map((server) => ({
+      server: server.id === "mac" || server.id === "linux" ? server.id : null,
+      completeness: server.completeness,
+      lastSeen: iso(server.lastSeenAt),
+      lastAttempt: iso(server.lastAttemptAt),
+      problem: server.lastError === null ? null : "read_failed",
+    })),
+    github:
+      list.github === null
+        ? null
+        : { lastPass: iso(list.github.at), problems: list.github.problems.length },
+    works: list.works.slice(0, OVERVIEW_LIMIT).map(botWork),
+    moreWorks: Math.max(0, list.works.length - OVERVIEW_LIMIT),
+    waiting: waiting.works.map((work) => chatRef(work.source.serverId, work.source.threadId)),
+    questionsForOwner: waiting.questions.map((question) => ({
+      kind: ident(question.kind),
+      state: question.state === "open" ? "open" : "queued",
+    })),
+    main: list.releases.map((row) => ({
+      repo: repoName(row.repo),
+      head: SHA.test(row.mainHead) ? row.mainHead.slice(0, 12) : null,
+      state: MAIN_STATES.has(row.state) ? row.state : "unknown",
+    })),
+    botTasks: tasks.map((task) => ({
+      id: ident(task.id),
+      server: task.server === "mac" || task.server === "linux" ? task.server : null,
+      state: ident(task.state),
+      chat: task.chat !== null && /^(mac|linux):thr_[a-z0-9]+$/.test(task.chat) ? task.chat : null,
+      updatedAt: iso(task.updatedAt),
+    })),
+    unlinkedPullRequests: pulls.pullRequests
+      .filter((pr) => pr.link.threadId === null && pr.state === "open")
+      .map(botPullRequest),
   };
 }
 
@@ -94,37 +162,7 @@ export function registerBotReadTools(
         source.waiting(),
         source.pullRequests(),
       ]);
-      return data({
-        servers: list.servers.map((server) => ({
-          server: server.id,
-          completeness: server.completeness,
-          lastSeen: iso(server.lastSeenAt),
-          lastAttempt: iso(server.lastAttemptAt),
-          problem: server.lastError,
-        })),
-        github:
-          list.github === null
-            ? null
-            : { lastPass: iso(list.github.at), problems: list.github.problems },
-        works: list.works.slice(0, OVERVIEW_LIMIT).map(botWork),
-        moreWorks: Math.max(0, list.works.length - OVERVIEW_LIMIT),
-        waiting: waiting.works.map((work) => `${work.source.serverId}:${work.source.threadId}`),
-        questionsForOwner: waiting.questions.map((question) => ({
-          kind: question.kind,
-          title: question.title,
-          state: question.state,
-        })),
-        main: list.releases.map((row) => ({
-          repo: row.repo,
-          head: row.mainHead.slice(0, 12),
-          state: row.state,
-          detail: row.detail,
-        })),
-        botTasks: source.botTasks().map((task) => ({ ...task, updatedAt: iso(task.updatedAt) })),
-        unlinkedPullRequests: pulls.pullRequests
-          .filter((pr) => pr.link.threadId === null && pr.state === "open")
-          .map(botPullRequest),
-      });
+      return data(overviewData(list, waiting, pulls, source.botTasks()));
     },
   });
 
