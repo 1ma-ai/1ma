@@ -30,8 +30,8 @@ which the owner had removed; those installed again find their data.
  apps/server/src/one-ma-rollback.ts            |  41 +++
  .../src/services/plugins/one-ma-rollback.ts   | 106 +++++++
  .../services/plugins/plugin-registration.ts   | 130 ++++++++-
- .../services/plugins/plugin-service.test.ts   | 271 ++++++++++++++++++
- 5 files changed, 548 insertions(+), 2 deletions(-)
+ .../services/plugins/plugin-service.test.ts   | 270 ++++++++++++++++++
+ 5 files changed, 547 insertions(+), 2 deletions(-)
  create mode 100644 apps/server/src/one-ma-rollback.ts
  create mode 100644 apps/server/src/services/plugins/one-ma-rollback.ts
 
@@ -384,7 +384,7 @@ index 8fa9e84..be46bc5 100644
            id: manifest.id,
            source,
 diff --git a/apps/server/test/services/plugins/plugin-service.test.ts b/apps/server/test/services/plugins/plugin-service.test.ts
-index 5dd296e..c38b822 100644
+index 5dd296e..4796835 100644
 --- a/apps/server/test/services/plugins/plugin-service.test.ts
 +++ b/apps/server/test/services/plugins/plugin-service.test.ts
 @@ -3,6 +3,7 @@ import {
@@ -425,13 +425,12 @@ index 5dd296e..c38b822 100644
  import type { TelemetryEvent } from "../../../src/services/system/telemetry.js";
  import { createNoopTelemetryService } from "../../../src/services/system/telemetry.js";
  import { createProviderRegistryService } from "../../../src/services/providers/provider-registry.js";
-@@ -230,6 +241,266 @@ describe("plugin service", () => {
+@@ -230,6 +241,265 @@ describe("plugin service", () => {
      expect(order).toEqual(["zz-provider", "aa-installed"]);
    });
  
 +  describe("a built-in 1ma plugin already installed as a copy", () => {
 +    const repository = "https://github.com/1ma-ai/1ma.git";
-+    const DAY = 24 * 60 * 60_000;
 +    const dataDir = () => join(workDir, "data");
 +    const databaseCopy = () => join(dataDir(), "backups", "before-1ma-builtins.db");
 +    const checkout = () =>
