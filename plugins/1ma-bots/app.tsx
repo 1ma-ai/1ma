@@ -1,6 +1,7 @@
 import { definePluginApp, experimental_THREAD_INFO_ROW_GROUPS } from "@get-bb/plugin-sdk/app";
 import { strings } from "./strings.js";
 import { BotsPanel, PANEL_PATH } from "./src/ui/bot-pages.js";
+import { assignToBotAction } from "./src/ui/assign-action.js";
 import { ThreadBotRow } from "./src/ui/thread-bot-row.js";
 
 export default definePluginApp((app) => {
@@ -16,4 +17,5 @@ export default definePluginApp((app) => {
     group: experimental_THREAD_INFO_ROW_GROUPS.thread,
     component: ThreadBotRow,
   });
+  app.slots.experimental_threadAction(assignToBotAction);
 });

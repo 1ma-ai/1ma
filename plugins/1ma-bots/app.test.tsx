@@ -111,3 +111,42 @@ describe("the bot page", () => {
     );
   });
 });
+
+describe("Assign to bot in a thread's menu", () => {
+  const thread = { id: "thr_1", parentThreadId: null, archivedAt: null } as never;
+
+  it("offers every bot, marks the current one and can take the thread out", async () => {
+    const { assignToBotAction } = await import("./src/ui/assign-action.js");
+    const calls: Array<[string, string | null]> = [];
+    const data = {
+      bots: [
+        bot("bot_a", "Marketer", [{ threadId: "thr_1", startedFromBot: false, completed: false }]),
+        bot("bot_b", "Accountant", []),
+      ],
+      assign: async (threadId: string, botId: string | null) => {
+        calls.push([threadId, botId]);
+      },
+    };
+    const item = assignToBotAction.item({ thread, data } as never)!;
+    expect(item.choices!.items.map((choice) => [choice.id, choice.selected ?? false])).toEqual([
+      ["bot_a", true],
+      ["bot_b", false],
+      ["none", false],
+    ]);
+    await item.run({ value: "bot_b" } as never);
+    await item.run({ value: "none" } as never);
+    expect(calls).toEqual([
+      ["thr_1", "bot_b"],
+      ["thr_1", null],
+    ]);
+  });
+
+  it("is absent for child conversations and when there are no bots", async () => {
+    const { assignToBotAction } = await import("./src/ui/assign-action.js");
+    const data = { bots: [bot("bot_a", "Marketer", [])], assign: async () => undefined };
+    expect(
+      assignToBotAction.item({ thread: { id: "c", parentThreadId: "p", archivedAt: null }, data } as never),
+    ).toBeNull();
+    expect(assignToBotAction.item({ thread, data: { ...data, bots: [] } } as never)).toBeNull();
+  });
+});
