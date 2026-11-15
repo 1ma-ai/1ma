@@ -14,6 +14,7 @@ async function setup(remote = "https://github.com/example/app.git") {
   const { bb, harness } = createFakePluginHost({
     pluginId: "1ma-superagent",
     settings: { role: "control", mainBotThreadId: BOT, excludedRepos: "example/private" },
+    sdk: { projects: { get: async () => ({ id: "proj_bot", gitRemoteUrl: null }) } },
   });
   const linux = fakeExecutor("linux", {
     snapshot: async () => snapshot([]),
@@ -71,7 +72,7 @@ describe("sa_start_chat", () => {
     expect(spawned[0]).toMatchObject({
       prompt: PROMPT,
       projectId: "proj_app",
-      label: { attempt: 1 },
+      label: { nonce: expect.stringMatching(/^lbl_[0-9a-f]{32}$/) },
     });
     await harness.lifecycle.dispose();
   });

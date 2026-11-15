@@ -14,7 +14,6 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
   const rpc = useRpc<typeof questionRpcContract>();
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const [decided, setDecided] = useState<string | null>(null);
   const closing = useRef(false);
   const parsed = questionPayloadSchema.safeParse(interaction.payload);
   const questionId = parsed.success ? parsed.data.questionId : null;
@@ -27,16 +26,18 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
     enabled: questionId !== null && token !== null,
   }).data;
 
+  const decided = state?.decided ?? null;
+
   useEffect(() => {
     if (state === undefined || token === null || closing.current) return;
-    closing.current = state.decided !== null || !state.open;
     if (state.decided !== null) {
-      setDecided(state.decided);
+      closing.current = true;
       void submit({ token, optionId: state.decided }).catch(() => {});
     } else if (!state.open) {
+      closing.current = true;
       void cancel().catch(() => {});
     }
-  }, [state?.decided, state?.open, token]);
+  }, [state, token, submit, cancel]);
 
   if (!parsed.success) {
     return (

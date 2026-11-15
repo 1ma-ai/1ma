@@ -112,7 +112,7 @@ export interface SpawnRequest {
   readonly model: string;
   readonly prompt: string;
   readonly title: string;
-  readonly label: { readonly actionId: string; readonly attempt: number };
+  readonly label: { readonly nonce: string };
 }
 
 export class DefiniteSpawnFailure extends Error {

@@ -74,20 +74,20 @@ export function judgeMainMove(
 ): MainVerdict {
   const ofRepo = records.filter((record) => record.repo === repo);
   const lastMerge = (sha: string) =>
-    ofRepo.filter((record) => record.event === "merged" && sameSha(record.finalSha, sha)).at(-1);
+    ofRepo.findLast((record) => record.event === "merged" && sameSha(record.finalSha, sha));
   const missing = (detail: string): MainVerdict =>
     truncated
       ? { kind: "needs_reconcile", detail: `the journal tail is incomplete: ${detail}` }
       : { kind: "unexplained", detail };
 
   if (lastMerge(head) === undefined) {
-    const rollback = ofRepo
-      .filter((record) => record.event === "rolled-back" && sameSha(record.finalSha, previous))
-      .at(-1);
+    const rollback = ofRepo.findLast(
+      (record) => record.event === "rolled-back" && sameSha(record.finalSha, previous),
+    );
     if (rollback !== undefined) return { kind: "rollback", attempt: rollback.attempt };
-    const intent = ofRepo
-      .filter((record) => record.event === "push-intent" && sameSha(record.finalSha, head))
-      .at(-1);
+    const intent = ofRepo.findLast(
+      (record) => record.event === "push-intent" && sameSha(record.finalSha, head),
+    );
     if (intent !== undefined)
       return {
         kind: "needs_reconcile",

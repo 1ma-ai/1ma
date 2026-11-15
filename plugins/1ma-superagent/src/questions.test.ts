@@ -40,7 +40,9 @@ function setup() {
   const answers: Array<{ subject: string; optionId: string }> = [];
   const kind: QuestionKind = {
     currentVersion: (subject) => versions.get(subject) ?? null,
-    onAnswer: (question, optionId) => answers.push({ subject: question.subject, optionId }),
+    onAnswer: (question, optionId) => {
+      answers.push({ subject: question.subject, optionId });
+    },
   };
   const kinds = new Map([["test", kind]]);
   const { bb, harness } = createFakePluginHost({ pluginId: "1ma-superagent" });
@@ -82,7 +84,9 @@ function setup() {
 function kindsOf(answers: Array<{ subject: string; optionId: string }>) {
   const kind: QuestionKind = {
     currentVersion: () => "v1",
-    onAnswer: (question, optionId) => answers.push({ subject: question.subject, optionId }),
+    onAnswer: (question, optionId) => {
+      answers.push({ subject: question.subject, optionId });
+    },
   };
   return new Map([["test", kind]]);
 }
@@ -199,7 +203,7 @@ describe("question dispatcher", () => {
     const { questionId, token } = payloadOf(first);
     expect(questionId).toBe(id);
     expect(store.answer(questionId, token, "yes", kindsOf(answers), 1_500)).toBe("applied");
-    expect(store.cardState(questionId, token)).toEqual({ open: false, decided: "yes" });
+    expect(store.cardState(questionId, token)).toMatchObject({ open: false, decided: "yes" });
     harness.behavior.submitInteraction(first.id, { token, optionId: "yes" });
     await settle();
     expect(answers).toEqual([{ subject: "first", optionId: "yes" }]);

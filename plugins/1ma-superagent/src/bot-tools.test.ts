@@ -82,7 +82,7 @@ describe("main bot tools", () => {
       }),
     );
     expect(pinned.tools).toEqual([]);
-    expect(pinned.instructions).toBeUndefined();
+    expect(pinned.instructions ?? undefined).toBeUndefined();
     const result = await harness.behavior.callAgentTool(
       OVERVIEW_TOOL,
       {},

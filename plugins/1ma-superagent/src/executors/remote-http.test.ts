@@ -224,8 +224,9 @@ describe("remote-http time limits", () => {
           (error: unknown) => (error instanceof DefiniteSpawnFailure ? "failed" : "unknown"),
         );
     };
-    for (const status of [400, 401, 403, 404, 422]) expect(await outcome(status)).toBe("failed");
-    for (const status of [408, 409, 425, 429, 500, 502])
-      expect(await outcome(status)).toBe("unknown");
+    const definite = [400, 401, 403, 404, 422];
+    const other = [408, 409, 425, 429, 500, 502];
+    expect(await Promise.all(definite.map(outcome))).toEqual(definite.map(() => "failed"));
+    expect(await Promise.all(other.map(outcome))).toEqual(other.map(() => "unknown"));
   });
 });
