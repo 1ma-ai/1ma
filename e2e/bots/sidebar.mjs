@@ -1,0 +1,71 @@
+import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { requireEnv } from "../lib/servers.mjs";
+import { SIDEBAR, screenshotDir, server } from "./harness.mjs";
+
+// Playwright is installed by the workflow outside the repository, so the
+// lockfile and the plugins stay free of a browser dependency.
+const { chromium } = createRequire(path.join(requireEnv("E2E_PLAYWRIGHT_DIR"), "noop.js"))(
+  "playwright",
+);
+
+export const VIEWPORT = { width: 1440, height: 900 };
+const PROVIDER_KEY = `${SIDEBAR}/thread-list`;
+
+const preferences = async () => (await server.api("GET", "/preferences/ui")).preferences ?? {};
+
+export async function selectSidebar() {
+  const put = async (key, value) => {
+    const current = (await preferences())[key];
+    await server.api("PUT", `/preferences/ui/${key}`, {
+      expectedRevision: current?.revision ?? 0,
+      value,
+    });
+  };
+  await put("sidebar.organizationMode", "project");
+  await put("sidebar.threadListProvider", PROVIDER_KEY);
+  const after = await preferences();
+  return {
+    provider: after["sidebar.threadListProvider"]?.value,
+    mode: after["sidebar.organizationMode"]?.value,
+  };
+}
+
+export async function launch() {
+  mkdirSync(screenshotDir, { recursive: true });
+  return chromium.launch();
+}
+
+export async function openApp(browser, theme) {
+  const context = await browser.newContext({ viewport: VIEWPORT, colorScheme: theme });
+  const page = await context.newPage();
+  const problems = [];
+  page.on("pageerror", (error) => problems.push(error.message));
+  await page.goto(server.url);
+  return { context, page, problems };
+}
+
+export const threadLink = (page, threadId) =>
+  page.locator(`a[data-sidebar-thread-id="${threadId}"]`);
+
+export async function sectionIds(page) {
+  return page.locator("[data-sidebar-section-id]").evaluateAll((nodes) =>
+    nodes.map((node) => ({
+      id: node.getAttribute("data-sidebar-section-id"),
+      top: node.getBoundingClientRect().top,
+    })),
+  );
+}
+
+export async function expandBot(page, botName) {
+  const toggle = page.getByRole("button", { name: new RegExp(`^${botName}: \\d+ conversations$`) });
+  await toggle.waitFor({ timeout: 30_000 });
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
+}
+
+export const fontOf = (locator) =>
+  locator.first().evaluate((node) => getComputedStyle(node).fontFamily);
+
+export const screenshot = (page, name) =>
+  page.screenshot({ path: path.join(screenshotDir, `${name}.png`) });

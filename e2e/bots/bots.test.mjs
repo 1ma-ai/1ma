@@ -1,0 +1,341 @@
+import assert from "node:assert/strict";
+import { after, before, describe, it } from "node:test";
+import { waitFor } from "../lib/servers.mjs";
+import {
+  BOTS,
+  completedOf,
+  createBot,
+  fleet,
+  projects,
+  regularThread,
+  rename,
+  rpc,
+  say,
+  server,
+  setUp,
+  startConversation,
+  stubCall,
+  stubRecords,
+  thread,
+  waitStatus,
+  waitTurns,
+} from "./harness.mjs";
+import {
+  expandBot,
+  fontOf,
+  launch,
+  openApp,
+  screenshot,
+  sectionIds,
+  selectSidebar,
+  threadLink,
+} from "./sidebar.mjs";
+
+const SECOND = 1000;
+const projectSection = (projectId) => `[data-sidebar-section-id="project:${projectId}"]`;
+async function counts(page, places) {
+  const entries = await Promise.all(
+    Object.entries(places).map(async ([name, [scope, threadId]]) => [
+      name,
+      await page.locator(`${scope} a[data-sidebar-thread-id="${threadId}"]`).count(),
+    ]),
+  );
+  return Object.fromEntries(entries);
+}
+const letterOutputs = (since) =>
+  stubRecords()
+    .filter((entry) => entry.kind === "tool" && entry.name === "bot_message")
+    .slice(since);
+const lettersToAlice = (since) =>
+  letterOutputs(since).filter((entry) => entry.output?.includes("for Alice"));
+
+before(setUp);
+after(() => fleet.stopAll());
+
+describe("1ma-bots on a real server", () => {
+  it("starts a conversation with the bot's identity, instructions and capabilities", async () => {
+    const marker = "E2E-INSTRUCTIONS-7f3a9c";
+    const bot = await createBot("Dev Bot", {
+      role: "Developer",
+      capabilities: ["dev"],
+      instructions: `Always answer in haiku. ${marker}`,
+    });
+    const threadId = await startConversation(bot, "[stub:reply seam-first-turn]");
+    await waitTurns(threadId, 1);
+
+    const row = await thread(threadId);
+    assert.equal(row.originPluginId, BOTS);
+    assert.deepEqual(await rpc("bots.v1.forThread", { threadId }), {
+      botId: bot.id,
+      capabilities: ["dev"],
+    });
+    const first = stubRecords().find(
+      (entry) => entry.kind === "prompt" && entry.text.includes("seam-first-turn"),
+    );
+    assert.ok(first, "the stub agent received the first turn");
+    assert.match(first.text, /<system_instructions>/);
+    assert.ok(first.text.includes(marker), "the bot's instructions reached the agent");
+    assert.ok(first.text.includes("Dev Bot"), "the bot's name reached the agent");
+    const tools = stubRecords().find((entry) => entry.kind === "tools" && entry.tools?.length);
+    assert.ok(
+      tools?.tools.includes("bot_read"),
+      `the bot's tools reached the agent: ${JSON.stringify(tools)}`,
+    );
+  });
+
+  it("refuses to mark a conversation done while a question waits, and allows it after the answer", async () => {
+    const bot = await createBot("Asker", { capabilities: ["dev"] });
+    const question = {
+      questions: [
+        {
+          question: "Which color should the button be?",
+          header: "Color",
+          multiSelect: false,
+          options: [
+            { label: "Red", description: "A red button" },
+            { label: "Blue", description: "A blue button" },
+          ],
+        },
+      ],
+    };
+    const threadId = await startConversation(bot, stubCall("AskUserQuestion", question));
+    const card = await waitFor("the pending question", 120 * SECOND, async () => {
+      const cards = await server.api("GET", `/threads/${threadId}/interactions`);
+      return cards.find((candidate) => candidate.status === "pending") ?? null;
+    });
+    await assert.rejects(
+      rpc("bots.v1.setCompleted", { threadId, completed: true }),
+      /waiting for the owner/,
+    );
+    assert.equal(await completedOf(bot.id, threadId), false);
+
+    await server.api("POST", `/threads/${threadId}/interactions/${card.id}/respond`, {
+      value: { answers: { q0: { selected: ["q0o1"] } } },
+    });
+    await waitTurns(threadId, 1);
+    await waitStatus(threadId, "idle");
+    await rpc("bots.v1.setCompleted", { threadId, completed: true });
+    assert.equal(await completedOf(bot.id, threadId), true);
+  });
+
+  it("reopens a done conversation when the owner presses Send now on a queued message", async () => {
+    const bot = await createBot("Sender", { capabilities: ["dev"] });
+    const threadId = await startConversation(bot, "[stub:reply first]");
+    await waitTurns(threadId, 1);
+    await waitStatus(threadId, "idle");
+
+    await say(threadId, "[stub:wait 45]");
+    await waitStatus(threadId, "active");
+    await rpc("bots.v1.setCompleted", { threadId, completed: true });
+    assert.equal(await completedOf(bot.id, threadId), true);
+
+    await server.api("POST", `/threads/${threadId}/queued-messages`, {
+      input: [{ type: "text", text: "[stub:reply queued-by-owner]", mentions: [] }],
+    });
+    const [queued] = await server.api("GET", `/threads/${threadId}/queued-messages`);
+    assert.ok(queued, "the message waits in the queue of the busy conversation");
+    assert.equal(await completedOf(bot.id, threadId), true, "queueing alone changes nothing");
+
+    await server.api("POST", `/threads/${threadId}/queued-messages/${queued.id}/send`, {
+      mode: "auto",
+    });
+    await waitFor("the conversation to reopen", 60 * SECOND, async () => {
+      return (await completedOf(bot.id, threadId)) === false;
+    });
+    await waitFor("the queued message to reach the agent", 120 * SECOND, async () =>
+      stubRecords().some(
+        (entry) => entry.kind === "prompt" && entry.text.includes("queued-by-owner"),
+      ),
+    );
+  });
+
+  it("keeps a letter queued in a busy conversation out of its exchange until it is dispatched", async () => {
+    const alice = await createBot("Alice", { capabilities: ["dev"] });
+    const bruno = await createBot("Bruno", { capabilities: ["dev"] });
+    const aliceThread = await startConversation(alice, "[stub:reply ready-a]");
+    const brunoThread = await startConversation(bruno, "[stub:reply ready-b]");
+    await Promise.all([waitTurns(aliceThread, 1), waitTurns(brunoThread, 1)]);
+    await Promise.all([waitStatus(aliceThread, "idle"), waitStatus(brunoThread, "idle")]);
+
+    const known = letterOutputs(0).length;
+    const toAlice = (text) => ({ to: alice.id, threadId: aliceThread, text });
+    // Bruno's busy turn writes to Alice after Alice's letter is already queued
+    // behind it; the letter text itself makes Bruno write to Alice once more
+    // when it is finally dispatched.
+    const second = stubCall("bot_message", toAlice("second-from-bruno"));
+    await say(
+      brunoThread,
+      `[stub:wait 45] ${stubCall("bot_message", toAlice("first-from-bruno"))}`,
+    );
+    await waitStatus(brunoThread, "active");
+    await say(
+      aliceThread,
+      stubCall("bot_message", { to: bruno.id, threadId: brunoThread, text: second }),
+    );
+
+    await waitFor("Alice's letter to be queued", 60 * SECOND, async () => {
+      const queued = await server.api("GET", `/threads/${brunoThread}/queued-messages`);
+      return queued.length === 1;
+    });
+    const mine = await waitFor("Bruno's own letter", 120 * SECOND, async () =>
+      lettersToAlice(known).find(Boolean),
+    );
+    assert.match(
+      mine.output,
+      /^Letter 1\//,
+      "Bruno's turn is still in his own exchange while Alice's letter waits in the queue",
+    );
+
+    await waitFor(
+      "the dispatched letter to make Bruno write again",
+      180 * SECOND,
+      async () =>
+        letters()
+          .slice(before)
+          .filter((entry) => entry.output?.includes("for Alice")).length >= 2,
+    );
+    const again = letters()
+      .slice(before)
+      .filter((entry) => entry.output?.includes("for Alice"));
+    assert.match(
+      again[1].output,
+      /^Letter 2\//,
+      "after dispatch Bruno's next letter continues Alice's exchange",
+    );
+  });
+});
+
+describe("1ma-sidebar with the bots block", () => {
+  const fixture = {};
+  let browser;
+
+  before(async () => {
+    // Earlier scenarios left bots behind; the layout checks need their own.
+    const { bots } = await rpc("bots.v1.list", {});
+    await Promise.all(bots.map((bot) => rpc("bots.v1.remove", { botId: bot.id })));
+    fixture.visible = await createBot("Visual Bot", { role: "Researcher", capabilities: ["dev"] });
+    fixture.hidden = await createBot("Hidden Bot", { role: "Sleeper" });
+    fixture.plain = regularThread(projects.alpha, "Regular thread");
+    fixture.v1 = await startConversation(fixture.visible, "[stub:reply v1]", projects.alpha);
+    fixture.v2 = await startConversation(fixture.visible, "[stub:reply v2]", projects.alpha);
+    fixture.h1 = await startConversation(fixture.hidden, "[stub:reply h1]", projects.beta);
+    await rename(fixture.v1, "Bot conversation one");
+    await rename(fixture.v2, "Bot conversation two");
+    await rename(fixture.h1, "Hidden bot conversation");
+    await Promise.all(
+      [fixture.plain, fixture.v1, fixture.v2, fixture.h1].map((id) => waitTurns(id, 1)),
+    );
+    const detail = await rpc("bots.v1.get", { botId: fixture.hidden.id });
+    await rpc("bots.v1.update", {
+      botId: fixture.hidden.id,
+      expectedRevision: detail.revision,
+      hidden: true,
+    });
+    assert.deepEqual(await selectSidebar(), {
+      provider: "1ma-sidebar/thread-list",
+      mode: "project",
+    });
+    browser = await launch();
+  });
+
+  after(async () => {
+    await browser?.close();
+  });
+
+  for (const theme of ["light", "dark"]) {
+    it(`shows the bots above the projects in the ${theme} theme`, async () => {
+      const { context, page, problems } = await openApp(browser, theme);
+      try {
+        await threadLink(page, fixture.plain).waitFor({ timeout: 90 * SECOND });
+        await expandBot(page, "Visual Bot");
+        await threadLink(page, fixture.v1).waitFor({ timeout: 30 * SECOND });
+        await screenshot(page, `sidebar-${theme}`);
+
+        const sections = await sectionIds(page);
+        const bots = sections.find((section) => section.id === "1ma-bots");
+        assert.ok(bots, `the bots block is drawn; sections: ${JSON.stringify(sections)}`);
+        const projectTops = sections
+          .filter((section) => section.id?.startsWith("project:"))
+          .map((section) => section.top);
+        assert.ok(projectTops.length >= 2, `both projects are drawn: ${JSON.stringify(sections)}`);
+        assert.ok(bots.top < Math.min(...projectTops), "the bots block is above the first project");
+        assert.equal(
+          await page.evaluate(() => document.documentElement.classList.contains("dark")),
+          theme === "dark",
+          "the theme the screenshot shows",
+        );
+
+        const botScope = `[data-bot-id="${fixture.visible.id}"]`;
+        const alpha = projectSection(projects.alpha);
+        const beta = projectSection(projects.beta);
+        assert.deepEqual(
+          await counts(page, {
+            v1InBot: [botScope, fixture.v1],
+            v2InBot: [botScope, fixture.v2],
+            v1InProject: [alpha, fixture.v1],
+            v2InProject: [alpha, fixture.v2],
+            v1Drawn: ["body", fixture.v1],
+            v2Drawn: ["body", fixture.v2],
+            plainInProject: [alpha, fixture.plain],
+            hiddenBotConversationInProject: [beta, fixture.h1],
+          }),
+          {
+            v1InBot: 1,
+            v2InBot: 1,
+            v1InProject: 0,
+            v2InProject: 0,
+            v1Drawn: 1,
+            v2Drawn: 1,
+            plainInProject: 1,
+            hiddenBotConversationInProject: 1,
+          },
+        );
+        assert.equal(
+          await page.getByText("Hidden Bot", { exact: true }).count(),
+          0,
+          "the hidden bot is absent",
+        );
+
+        const botName = page.locator(`[data-bot-id="${fixture.visible.id}"] span.font-medium`, {
+          hasText: "Visual Bot",
+        });
+        const rowTitle = page.locator(
+          `a[data-sidebar-thread-id="${fixture.plain}"] .bb-thread-title`,
+        );
+        const [nameFont, titleFont] = await Promise.all([fontOf(botName), fontOf(rowTitle)]);
+        assert.ok(nameFont.length > 0);
+        assert.equal(nameFont, titleFont, "a bot name uses the font of a thread row title");
+        assert.deepEqual(problems, []);
+      } finally {
+        await context.close();
+      }
+    });
+  }
+
+  it("draws no block and keeps every conversation in its project when 1ma-bots is disabled", async () => {
+    server.bb(["plugin", "disable", BOTS]);
+    const { context, page } = await openApp(browser, "light");
+    try {
+      await threadLink(page, fixture.plain).waitFor({ timeout: 90 * SECOND });
+      await Promise.all(
+        [fixture.v1, fixture.v2, fixture.h1].map((id) =>
+          threadLink(page, id).waitFor({ timeout: 30 * SECOND }),
+        ),
+      );
+      assert.deepEqual(
+        await counts(page, {
+          v1InProject: [projectSection(projects.alpha), fixture.v1],
+          v2InProject: [projectSection(projects.alpha), fixture.v2],
+          h1InProject: [projectSection(projects.beta), fixture.h1],
+        }),
+        { v1InProject: 1, v2InProject: 1, h1InProject: 1 },
+      );
+      await screenshot(page, "sidebar-bots-disabled");
+      assert.equal(await page.locator('[data-sidebar-section-id="1ma-bots"]').count(), 0);
+      assert.equal(await page.locator("[data-bot-id]").count(), 0);
+    } finally {
+      await context.close();
+      server.bb(["plugin", "enable", BOTS]);
+    }
+  });
+});
