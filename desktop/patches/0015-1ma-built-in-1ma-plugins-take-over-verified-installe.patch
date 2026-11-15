@@ -35,9 +35,9 @@ drops the plan to stay on this version.
  apps/server/package.json                      |   2 +-
  apps/server/src/one-ma-rollback.ts            |  52 +++
  .../src/services/plugins/one-ma-rollback.ts   | 235 ++++++++++++++
- .../services/plugins/plugin-registration.ts   | 158 ++++++++-
+ .../services/plugins/plugin-registration.ts   | 159 ++++++++-
  .../services/plugins/plugin-service.test.ts   | 306 ++++++++++++++++++
- 5 files changed, 751 insertions(+), 2 deletions(-)
+ 5 files changed, 752 insertions(+), 2 deletions(-)
  create mode 100644 apps/server/src/one-ma-rollback.ts
  create mode 100644 apps/server/src/services/plugins/one-ma-rollback.ts
 
@@ -354,7 +354,7 @@ index 0000000..983cac4
 +  return true;
 +}
 diff --git a/apps/server/src/services/plugins/plugin-registration.ts b/apps/server/src/services/plugins/plugin-registration.ts
-index 8fa9e84..1cd3ad3 100644
+index 8fa9e84..08c3ec1 100644
 --- a/apps/server/src/services/plugins/plugin-registration.ts
 +++ b/apps/server/src/services/plugins/plugin-registration.ts
 @@ -4,7 +4,8 @@ import {
@@ -389,7 +389,7 @@ index 8fa9e84..1cd3ad3 100644
  import type { PluginServiceDeps } from "./plugin-service-internal.js";
  import {
    gitResolvedVersion,
-@@ -765,7 +774,118 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+@@ -765,7 +774,119 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
      });
    }
  
@@ -484,14 +484,15 @@ index 8fa9e84..1cd3ad3 100644
 +  }
 +
 +  // While a prepared way back to an older 1ma is pending, the 1ma plugins stay
-+  // out, so the older version still finds nothing to delete. A 1ma plugin
-+  // installed again (by that version) means it has run: the plan is done.
++  // out, so the older version still finds nothing to delete. One of the
++  // plugins it removed, installed again (by that version), means it has run:
++  // the plan is done. A copy that was never built in proves nothing.
 +  // Returns why the 1ma plugins stay out, or null.
 +  async function oneMaRollbackHold(): Promise<string | null> {
-+    if ((await readOneMaRollbackPlan(deps.dataDir)) === null) return null;
-+    const ids = ONE_MA_PLUGINS.map((plugin) => plugin.pluginId);
++    const plan = await readOneMaRollbackPlan(deps.dataDir);
++    if (plan === null) return null;
 +    if (
-+      ids.some((id) => {
++      plan.plugins.some(({ id }) => {
 +        const row = getInstalledPluginRegistration(deps.db, id);
 +        return row !== undefined && row.sourceKind !== "builtin";
 +      })
@@ -508,7 +509,7 @@ index 8fa9e84..1cd3ad3 100644
      for (const bundled of bundledPlugins) {
        const source = builtinPluginSource(bundled.name);
        let manifest: PluginManifest;
-@@ -803,6 +923,35 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+@@ -803,6 +924,35 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
            name: bundled.name,
          })
        ) {
@@ -544,7 +545,7 @@ index 8fa9e84..1cd3ad3 100644
          logger.warn(
            `bundled plugin ${bundled.name} resolved to id "${manifest.id}", but that id is already installed from ${existing.source}; skipping bundled reconciliation`,
          );
-@@ -818,6 +967,13 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+@@ -818,6 +968,13 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
          existing.rootDir !== bundled.rootDir ||
          existing.enabled !== enabled
        ) {
