@@ -46,8 +46,11 @@ export function installedSource(json) {
 // removed, and a new one is installed only when named in `add`. A plugin
 // installed from git or npm is replaced only with replaceManaged; if its new
 // install fails, the previous install is put back so the plugin is not left
-// missing. The active theme is restored whatever happens.
-export function deployPlugins({ entries, replaceManaged, add = [], bb, log }) {
+// missing. A plugin built into the app (patch 0014) comes with the app and is
+// never touched here. Before each install, `mark` records in the plugin's
+// directory where it comes from, so 1ma can recognise this install when the
+// plugin becomes built in. The active theme is restored whatever happens.
+export function deployPlugins({ entries, replaceManaged, add = [], bb, log, mark = () => {} }) {
   const unknown = add.filter((id) => !entries.some((entry) => entry.id === id));
   if (unknown.length > 0)
     throw new Error(`--add names plugins this release does not have: ${unknown.join(", ")}`);
@@ -60,6 +63,10 @@ export function deployPlugins({ entries, replaceManaged, add = [], bb, log }) {
         log(`${id}: not on this server, left out; install it with --add=${id}`);
         continue;
       }
+      if (current?.startsWith("builtin:")) {
+        log(`${id}: built into the app, comes with its updates; left alone`);
+        continue;
+      }
       const managed = current !== null && !current.startsWith("path:");
       if (managed && !replaceManaged) {
         blocked.push(`${id} (installed from ${current})`);
@@ -70,6 +77,7 @@ export function deployPlugins({ entries, replaceManaged, add = [], bb, log }) {
         log(`${id}: removed managed install ${current}`);
       }
       try {
+        mark(directory);
         bb.install(directory);
       } catch (error) {
         if (!managed) throw error;
