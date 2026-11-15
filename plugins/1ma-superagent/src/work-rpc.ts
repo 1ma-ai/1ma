@@ -1,6 +1,7 @@
 import { defineRpcContract, experimental_PluginRpcRefusal } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import type { ActionStore } from "./actions.js";
+import type { JournalObservation } from "./main-watch.js";
 import type { GitHubPassState } from "./pass.js";
 import type { PrLinkRow, PrStore } from "./pr-store.js";
 import type { QuestionStore } from "./questions.js";
@@ -114,6 +115,13 @@ export const workRpcContract = defineRpcContract({
           checkedAt: z.number(),
         }),
       ),
+      journal: z
+        .object({
+          at: z.number(),
+          status: z.enum(["ok", "unconfigured", "error"]),
+          problem: z.string().nullable(),
+        })
+        .nullable(),
       nextOffset: z.number().int().nullable(),
     }),
   },
@@ -216,6 +224,7 @@ export function workRpcHandlers(
   }>,
   github: () => Promise<GitHubPassState | null>,
   actions: ActionStore,
+  journal: () => Promise<JournalObservation | null> = async () => null,
 ) {
   const toDto = (row: WorkRow) => toWorkDto(row, prStore);
   const githubDto = async () => {
@@ -242,6 +251,7 @@ export function workRpcHandlers(
           detail: row.detail,
           checkedAt: row.checkedAt,
         })),
+        journal: await journal(),
         nextOffset: rows.length > limit ? offset + limit : null,
       };
     },

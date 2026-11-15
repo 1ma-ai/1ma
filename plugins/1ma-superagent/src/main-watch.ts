@@ -28,6 +28,7 @@ export interface MainWatchDeps {
   readonly questions: QuestionStore;
   readonly now: number;
   readonly signal: AbortSignal;
+  readonly recordJournal?: (observation: JournalObservation) => Promise<void>;
 }
 
 export function mainWatchRows(db: Database.Database): MainWatchRow[] {
@@ -50,10 +51,33 @@ export function mainWatchRows(db: Database.Database): MainWatchRow[] {
   }));
 }
 
+export const JOURNAL_STATE_KEY = "train-journal";
+
+export interface JournalObservation {
+  readonly at: number;
+  readonly status: "ok" | "unconfigured" | "error";
+  readonly problem: string | null;
+}
+
 export async function runMainWatch(deps: MainWatchDeps): Promise<string[]> {
   if (!deps.enabled || deps.policy.connected.size === 0) return [];
   const problems: string[] = [];
-  const journal = await deps.readJournal(deps.signal);
+  let journal: JournalTail;
+  try {
+    journal = await deps.readJournal(deps.signal);
+  } catch (error) {
+    journal = { status: "error", message: describeError(error) };
+  }
+  await deps.recordJournal?.({
+    at: deps.now,
+    status: journal.status,
+    problem:
+      journal.status === "error"
+        ? journal.message
+        : journal.status === "unconfigured"
+          ? strings.mainCheckNoJournal
+          : null,
+  });
   if (journal.status === "unconfigured") return [strings.mainCheckNoJournal];
   if (journal.status === "error") return [`train journal: ${journal.message}`];
   const records = parseJournal(journal.text);

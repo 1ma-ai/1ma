@@ -1,4 +1,5 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
+import { z } from "zod";
 import { describe, expect, it } from "vitest";
 import type { Executor, ServerId } from "./src/observation.js";
 import { fakeExecutor as makeExecutor, snapshot, threadSummary } from "./src/test-helpers.js";
@@ -133,6 +134,75 @@ describe("default executors", () => {
         expect.objectContaining({ id: "mac", completeness: "complete" }),
       ],
     });
+    await harness.lifecycle.dispose();
+  });
+});
+
+describe("a pass whose train journal read throws", () => {
+  it("still shows the questions the pass raised", async () => {
+    const BOT = "thr_bot";
+    const labels: unknown[] = [];
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "1ma-superagent",
+      settings: {
+        role: "control",
+        mainBotThreadId: BOT,
+        mainCheckEnabled: true,
+        repos: JSON.stringify([{ repo: "example/app" }]),
+      },
+      sdk: {
+        projects: {
+          get: async () => ({ id: "proj_bot", gitRemoteUrl: "https://github.com/example/bot.git" }),
+        },
+      },
+    });
+    await createPlugin({
+      executors: () => [
+        makeExecutor("mac", { snapshot: async () => snapshot([]) }),
+        makeExecutor("linux", {
+          snapshot: async () => snapshot([]),
+          projectRemote: async () => "https://github.com/example/app.git",
+          spawn: async (request) => {
+            labels.push(request.label);
+            throw new TypeError("fetch failed: other side closed");
+          },
+          findSpawned: async () =>
+            ["thr_one", "thr_two"].map((threadId) => ({
+              threadId,
+              metadata: { spawn: labels[0] },
+              projectId: "proj_app",
+              createdAt: Date.now(),
+            })),
+        }),
+      ],
+      gh: () => async () => ({ status: "error", message: "unused" }),
+      readJournal: () => async () => {
+        throw new Error("host RPC rejected");
+      },
+    })(bb);
+    await harness.behavior.callAgentTool(
+      "sa_start_chat",
+      {
+        server: "linux",
+        projectId: "proj_app",
+        providerId: "claude-code",
+        model: "m",
+        prompt: "do it",
+      },
+      { threadId: BOT, projectId: "proj_bot" },
+    );
+    const [card] = harness.inspection.pendingInteractions;
+    if (card === undefined) throw new Error("no start card");
+    const payload = z.object({ token: z.string() }).passthrough().parse(card.payload);
+    harness.behavior.submitInteraction(card.id, { token: payload.token, optionId: "start" });
+    const deadline = Date.now() + 5_000;
+    const ambiguous = () =>
+      harness.inspection.pendingInteractions.find(
+        (pending) => pending.title === "Найдено два чата одной попытки",
+      );
+    while (ambiguous() === undefined && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(ambiguous()).toBeDefined();
     await harness.lifecycle.dispose();
   });
 });

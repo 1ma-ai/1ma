@@ -106,4 +106,33 @@ describe("main watch", () => {
     await t.run(false);
     expect(mainWatchRows(t.db)).toEqual([]);
   });
+
+  it("survives a host that throws, and records that the journal was not read", async () => {
+    const db = new Database(":memory:");
+    for (const statement of MIGRATIONS) db.exec(statement);
+    const recorded: unknown[] = [];
+    const problems = await runMainWatch({
+      db,
+      github: {
+        pull: async () => {
+          throw new Error("unused");
+        },
+        recentPulls: async () => ({ pulls: [], complete: true }),
+        mainHead: async () => A,
+      },
+      readJournal: async () => {
+        throw new Error("host worker exited");
+      },
+      enabled: true,
+      policy: repoPolicy([{ repo: "example/app", accounts: { mac: [], linux: [] } }], []),
+      questions: new QuestionStore(db),
+      now: 5_000,
+      signal: new AbortController().signal,
+      recordJournal: async (observation) => {
+        recorded.push(observation);
+      },
+    });
+    expect(problems).toEqual(["train journal: host worker exited"]);
+    expect(recorded).toEqual([{ at: 5_000, status: "error", problem: "host worker exited" }]);
+  });
 });

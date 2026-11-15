@@ -25,7 +25,15 @@ import { ActionStore } from "./src/actions.js";
 import { createBackground } from "./src/background.js";
 import { questionRpcContract } from "./src/card.js";
 import { QuestionDispatcher } from "./src/dispatcher.js";
-import { BYPASS_KIND, type ReadJournal, mainWatchRows, runMainWatch } from "./src/main-watch.js";
+import {
+  BYPASS_KIND,
+  JOURNAL_STATE_KEY,
+  type JournalObservation,
+  type ReadJournal,
+  mainWatchRows,
+  runMainWatch,
+} from "./src/main-watch.js";
+import { runSteps } from "./src/pass-steps.js";
 import { RESULT_KIND, runReports } from "./src/reports.js";
 import { START_TOOL, registerStartTool } from "./src/start-tool.js";
 import { UNLINKED_KIND, askAboutUnlinked, unlinkedKind } from "./src/kinds/unlinked-pr.js";
@@ -136,6 +144,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
       () => mainWatchRows(db),
       async () => (await bb.storage.kv.get<GitHubPassState>(GITHUB_STATE_KEY)) ?? null,
       actions,
+      async () => (await bb.storage.kv.get<JournalObservation>(JOURNAL_STATE_KEY)) ?? null,
     );
     bb.rpc.register(workRpcContract, handlers);
 
@@ -164,43 +173,65 @@ export function createPlugin(options: SuperagentOptions = {}) {
             policy,
             mainBotThreadId: () => config.mainBotThreadId,
             recordGitHub: (state) => bb.storage.kv.set(GITHUB_STATE_KEY, state),
-            afterFullPass: async (now, executors, observed) => {
-              askAboutUnlinked(prStore, questions, policy(), now);
-              await runActions({
-                actions,
-                questions,
-                executors,
-                observed,
-                policy: policy(),
-                claimant,
-                now: Date.now,
-                signal: lifecycle.signal,
-                warn: (message) => bb.log.warn(message),
-              });
-              const journalProblems = await runMainWatch({
-                db,
-                github,
-                readJournal,
-                enabled: config.mainCheckEnabled,
-                policy: policy(),
-                questions,
-                now,
-                signal: lifecycle.signal,
-              });
-              for (const problem of journalProblems) bb.log.warn(problem);
-              await runReports({
-                db,
-                store,
-                actions,
-                questions,
-                executors,
-                observed,
-                now: Date.now(),
-                signal: lifecycle.signal,
-                warn: (message) => bb.log.warn(message),
-              });
-              dispatcher.dispatch();
-            },
+            afterFullPass: (now, executors, observed) =>
+              runSteps(
+                [
+                  [
+                    "unlinked PR questions",
+                    () => askAboutUnlinked(prStore, questions, policy(), now),
+                  ],
+                  [
+                    "bot actions",
+                    () =>
+                      runActions({
+                        actions,
+                        questions,
+                        executors,
+                        observed,
+                        policy: policy(),
+                        claimant,
+                        now: Date.now,
+                        signal: lifecycle.signal,
+                        warn: (message) => bb.log.warn(message),
+                      }),
+                  ],
+                  [
+                    "check of main",
+                    async () => {
+                      const problems = await runMainWatch({
+                        db,
+                        github,
+                        readJournal,
+                        enabled: config.mainCheckEnabled,
+                        policy: policy(),
+                        questions,
+                        now,
+                        signal: lifecycle.signal,
+                        recordJournal: (observation) =>
+                          bb.storage.kv.set(JOURNAL_STATE_KEY, observation),
+                      });
+                      for (const problem of problems) bb.log.warn(problem);
+                    },
+                  ],
+                  [
+                    "task results",
+                    () =>
+                      runReports({
+                        db,
+                        store,
+                        actions,
+                        questions,
+                        executors,
+                        observed,
+                        now: Date.now(),
+                        signal: lifecycle.signal,
+                        warn: (message) => bb.log.warn(message),
+                      }),
+                  ],
+                  ["questions", () => dispatcher.dispatch()],
+                ],
+                (message) => bb.log.warn(message),
+              ),
             now: Date.now,
             signal: lifecycle.signal,
           },
