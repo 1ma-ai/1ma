@@ -120,7 +120,12 @@ export function stubCall(tool, args) {
 // What a failed wait needs to be read from the log alone.
 export function diagnose(extra = {}) {
   return JSON.stringify(
-    { ...extra, stub: stubRecords().slice(-12).map((entry) => ({ ...entry, text: entry.text?.slice(-400) })) },
+    {
+      ...extra,
+      stub: stubRecords()
+        .slice(-12)
+        .map((entry) => ({ ...entry, text: entry.text?.slice(-400) })),
+    },
     null,
     1,
   );
@@ -135,9 +140,7 @@ function pluginDatabase() {
     });
   for (const file of walk(server.dataDir)) {
     const db = new DatabaseSync(file, { readOnly: true });
-    const found = db
-      .prepare("SELECT name FROM sqlite_master WHERE name = 'thread_chains'")
-      .get();
+    const found = db.prepare("SELECT name FROM sqlite_master WHERE name = 'thread_chains'").get();
     if (found !== undefined) return db;
     db.close();
   }

@@ -53,15 +53,6 @@ export async function openApp(browser, theme) {
 export const threadLink = (page, threadId) =>
   page.locator(`a[data-sidebar-thread-id="${threadId}"]`);
 
-export async function sectionIds(page) {
-  return page.locator("[data-sidebar-section-id]").evaluateAll((nodes) =>
-    nodes.map((node) => ({
-      id: node.getAttribute("data-sidebar-section-id"),
-      top: node.getBoundingClientRect().top,
-    })),
-  );
-}
-
 export async function expandBot(page, botName) {
   const toggle = page.getByRole("button", { name: new RegExp(`^${botName}: \\d+ conversations$`) });
   await toggle.waitFor({ timeout: 30_000 });
@@ -80,7 +71,9 @@ export async function waitDrawn(page, locator, label) {
   } catch (error) {
     await screenshot(page, `failed-${label}`);
     const text = await page.locator("body").innerText();
-    throw new Error(`${label}: ${error.message}\npage text: ${text.slice(0, 2000)}`);
+    throw new Error(`${label}: ${error.message}\npage text: ${text.slice(0, 2000)}`, {
+      cause: error,
+    });
   }
 }
 
@@ -105,7 +98,10 @@ export async function groupsOf(page, headers, threadIds) {
   return {
     order: ordered.map(([name]) => name),
     groupOf: Object.fromEntries(
-      rows.map(([id, top]) => [id, ordered.findLast(([, headerTop]) => headerTop < top)?.[0] ?? null]),
+      rows.map(([id, top]) => [
+        id,
+        ordered.findLast(([, headerTop]) => headerTop < top)?.[0] ?? null,
+      ]),
     ),
   };
 }
