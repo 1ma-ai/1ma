@@ -146,9 +146,6 @@ describe("1ma-bots on a real server", () => {
 
   it(
     "keeps a letter queued in a busy conversation out of its exchange until it is dispatched",
-    {
-      todo: "known defect in 1ma-bots: the message.dispatch hook takes the letter into the exchange when the dispatch attempt is queued behind the running turn",
-    },
     async () => {
       const alice = await createBot("Alice", { capabilities: ["dev"] });
       const bruno = await createBot("Bruno", { capabilities: ["dev"] });
