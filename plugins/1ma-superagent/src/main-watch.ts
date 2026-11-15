@@ -2,18 +2,14 @@ import type Database from "better-sqlite3";
 import { strings } from "../strings.js";
 import { describeError } from "./executors/paging.js";
 import type { GitHubReader } from "./github/reader.js";
+import type { JournalTail } from "./host-contract.js";
 import { judgeMainHead, parseJournal } from "./journal.js";
 import type { QuestionStore } from "./questions.js";
 import type { RepoPolicy } from "./repos.js";
 
 export const BYPASS_KIND = "main_bypass";
 
-export type ReadJournal = (
-  path: string,
-  signal: AbortSignal,
-) => Promise<
-  { status: "ok"; text: string; truncated: boolean } | { status: "error"; message: string }
->;
+export type ReadJournal = (signal: AbortSignal) => Promise<JournalTail>;
 
 export interface MainWatchRow {
   repo: string;
@@ -27,7 +23,7 @@ export interface MainWatchDeps {
   readonly db: Database.Database;
   readonly github: GitHubReader;
   readonly readJournal: ReadJournal;
-  readonly journalPath: string | null;
+  readonly enabled: boolean;
   readonly policy: RepoPolicy;
   readonly questions: QuestionStore;
   readonly now: number;
@@ -55,9 +51,10 @@ export function mainWatchRows(db: Database.Database): MainWatchRow[] {
 }
 
 export async function runMainWatch(deps: MainWatchDeps): Promise<string[]> {
-  if (deps.journalPath === null || deps.policy.connected.size === 0) return [];
+  if (!deps.enabled || deps.policy.connected.size === 0) return [];
   const problems: string[] = [];
-  const journal = await deps.readJournal(deps.journalPath, deps.signal);
+  const journal = await deps.readJournal(deps.signal);
+  if (journal.status === "unconfigured") return [strings.mainCheckNoJournal];
   if (journal.status === "error") return [`train journal: ${journal.message}`];
   const records = parseJournal(journal.text);
   const previous = new Map(mainWatchRows(deps.db).map((row) => [row.repo, row]));

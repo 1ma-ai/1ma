@@ -65,24 +65,24 @@ function hostClient(bb: BbPluginApi) {
 
 export function hostJournal(bb: BbPluginApi, host: HostClient): ReadJournal {
   const hostId = primaryHost(bb);
-  return async (path, signal) => {
+  return async (signal) => {
     const id = await hostId(signal);
     if (id === null)
       return {
         status: "error",
         message: "this server has no primary machine to read the journal on",
       };
-    return host.call("readJournal", { path }, { hostId: id, signal });
+    return host.call("readJournal", {}, { hostId: id, signal });
   };
 }
 
 export function hostGh(bb: BbPluginApi, host: HostClient): GhApi {
   const hostId = primaryHost(bb);
-  return async (path, signal) => {
+  return async (request, signal) => {
     const id = await hostId(signal);
     if (id === null)
       return { status: "error", message: "this server has no primary machine to run gh on" };
-    return host.call("ghApi", { path }, { hostId: id, signal });
+    return host.call("gh", request, { hostId: id, signal });
   };
 }
 
@@ -179,7 +179,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
                 db,
                 github,
                 readJournal,
-                journalPath: config.trainJournalPath,
+                enabled: config.mainCheckEnabled,
                 policy: policy(),
                 questions,
                 now,

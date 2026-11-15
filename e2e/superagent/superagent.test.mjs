@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { Server, requireEnv, waitFor } from "./servers.mjs";
@@ -108,7 +108,10 @@ describe("1ma-superagent on two 1ma servers", () => {
     chats.executor = await spawnPendingChat(executor, executorProject, "executor chat");
     chats.bot = await spawnPendingChat(control, controlProject, "main bot");
     control.bb(["plugin", "config", PLUGIN, "set", "mainBotThreadId", chats.bot]);
-    control.bb(["plugin", "config", PLUGIN, "set", "trainJournalPath", journal]);
+    const hostData = path.join(control.dataDir, "plugins", PLUGIN, "host-data");
+    mkdirSync(hostData, { recursive: true });
+    writeFileSync(path.join(hostData, "settings.json"), JSON.stringify({ trainJournal: journal }));
+    control.bb(["plugin", "config", PLUGIN, "set", "mainCheckEnabled", "true"]);
   });
 
   after(async () => {

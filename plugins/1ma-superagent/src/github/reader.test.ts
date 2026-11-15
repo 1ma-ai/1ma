@@ -35,14 +35,15 @@ describe("GitHub reader", () => {
   });
 
   it("stops listing recent PRs at the first one older than the cursor", async () => {
-    const paths: string[] = [];
+    const pages: number[] = [];
     const page1 = Array.from({ length: RECENT_PAGE_SIZE }, (_, index) =>
       apiPull(100 - index, "2026-11-14T10:00:00Z"),
     );
     const page2 = [apiPull(50, "2026-11-14T09:00:00Z"), apiPull(49, "2026-11-01T00:00:00Z")];
-    const reader = createGitHubReader(async (path) => {
-      paths.push(path);
-      return { status: "ok", body: JSON.stringify(path.endsWith("page=1") ? page1 : page2) };
+    const reader = createGitHubReader(async (request) => {
+      const page = request.op === "recentPulls" ? request.page : 0;
+      pages.push(page);
+      return { status: "ok", body: JSON.stringify(page === 1 ? page1 : page2) };
     });
     const result = await reader.recentPulls(
       "example/app",
@@ -52,7 +53,7 @@ describe("GitHub reader", () => {
     expect(result.complete).toBe(true);
     expect(result.pulls.map((pull) => pull.number)).toContain(50);
     expect(result.pulls.map((pull) => pull.number)).not.toContain(49);
-    expect(paths).toHaveLength(2);
+    expect(pages).toEqual([1, 2]);
   });
 
   it("turns a gh failure and an unexpected answer into errors", async () => {

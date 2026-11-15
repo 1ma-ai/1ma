@@ -95,9 +95,11 @@ export const strings = {
       : `Чат ${chat} закончил ход. Ниже его последнее сообщение, обрезанное до 600 символов, как есть.`,
   resultAffected: "Изменения, если они были, — в чате исполнителя и его PR.",
   resultRecommendation: (chat: string) => `Откройте ${chat}, чтобы ответить или продолжить.`,
-  trainJournalPathLabel: "Release train journal",
-  trainJournalPathDescription:
-    "Absolute path on this server's machine to the release train's journal.jsonl. Empty turns the check of main off.",
+  mainCheckEnabledLabel: "Check main against the release train",
+  mainCheckEnabledDescription:
+    "Compares every move of main with the release train journal. The journal path is set on the machine itself, in settings.json of this plugin's host data directory.",
+  mainCheckNoJournal:
+    "the check of main is on, but this machine's host settings name no train journal",
   bypassTitle: (repo: string) => `Коммит в main мимо поезда: ${repo}`,
   bypassObserved: (repo: string, sha: string) =>
     `main в ${repo} теперь указывает на ${sha.slice(0, 12)}. В журнале поезда нет ни записи merged, ни намерения записи с этим коммитом.`,

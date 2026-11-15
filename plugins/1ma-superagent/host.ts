@@ -1,18 +1,18 @@
 import { execFile } from "node:child_process";
-import { open } from "node:fs/promises";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
-import { GH_OUTPUT_LIMIT, JOURNAL_TAIL_BYTES, hostContract } from "./src/host-contract.js";
+import { GH_OUTPUT_LIMIT, type GhRequest, ghArgs, hostContract } from "./src/host-contract.js";
+import { readTrainJournal } from "./src/host-journal.js";
 
 const GH_TIMEOUT_MS = 20_000;
 
-function ghApi(
-  path: string,
+function gh(
+  request: GhRequest,
   signal: AbortSignal,
 ): Promise<{ status: "ok"; body: string } | { status: "error"; message: string }> {
   return new Promise((resolve) => {
     execFile(
       "gh",
-      ["api", "--method", "GET", "-H", "Accept: application/vnd.github+json", path],
+      ghArgs(request),
       {
         signal,
         timeout: GH_TIMEOUT_MS,
@@ -31,36 +31,10 @@ function ghApi(
   });
 }
 
-async function readJournalTail(
-  path: string,
-): Promise<
-  { status: "ok"; text: string; truncated: boolean } | { status: "error"; message: string }
-> {
-  try {
-    const file = await open(path, "r");
-    try {
-      const { size } = await file.stat();
-      const start = Math.max(0, size - JOURNAL_TAIL_BYTES);
-      const buffer = Buffer.alloc(size - start);
-      await file.read(buffer, 0, buffer.length, start);
-      const text = buffer.toString("utf8");
-      return {
-        status: "ok",
-        text: start === 0 ? text : text.slice(text.indexOf("\n") + 1),
-        truncated: start > 0,
-      };
-    } finally {
-      await file.close();
-    }
-  } catch (error) {
-    return { status: "error", message: error instanceof Error ? error.message : String(error) };
-  }
-}
-
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
-    ghApi: async ({ path }, context) => ghApi(path, context.signal),
-    readJournal: async ({ path }) => readJournalTail(path),
+    gh: async (request, context) => gh(request, context.signal),
+    readJournal: async (_input, context) => readTrainJournal(context.experimental_paths.dataDir),
   },
 });

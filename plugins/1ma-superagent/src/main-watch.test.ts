@@ -63,12 +63,12 @@ function setup(journal: string) {
     recentPulls: async () => ({ pulls: [], complete: true }),
     mainHead: async () => head,
   };
-  const run = (path: string | null = "/train/journal.jsonl") =>
+  const run = (enabled = true) =>
     runMainWatch({
       db,
       github,
       readJournal: async () => ({ status: "ok", text: journal, truncated: false }),
-      journalPath: path,
+      enabled,
       policy: repoPolicy([{ repo: "example/app", accounts: { mac: [], linux: [] } }], []),
       questions,
       now: 1_000,
@@ -101,9 +101,9 @@ describe("main watch", () => {
     expect(mainWatchRows(t.db)[0]).toMatchObject({ state: "needs_reconcile" });
   });
 
-  it("is off without a journal path", async () => {
+  it("is off unless enabled", async () => {
     const t = setup("");
-    await t.run(null);
+    await t.run(false);
     expect(mainWatchRows(t.db)).toEqual([]);
   });
 });

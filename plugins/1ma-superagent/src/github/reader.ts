@@ -1,7 +1,10 @@
 import { z } from "zod";
+import { type GhRequest, RECENT_MAX_PAGES, RECENT_PAGE_SIZE, ghPath } from "../host-contract.js";
+
+export { RECENT_MAX_PAGES, RECENT_PAGE_SIZE };
 
 export type GhApi = (
-  path: string,
+  request: GhRequest,
   signal: AbortSignal,
 ) => Promise<{ status: "ok"; body: string } | { status: "error"; message: string }>;
 
@@ -60,12 +63,14 @@ export interface GitHubReader {
   mainHead(repo: string, signal: AbortSignal): Promise<string>;
 }
 
-export const RECENT_PAGE_SIZE = 50;
-export const RECENT_MAX_PAGES = 3;
-
 export function createGitHubReader(gh: GhApi): GitHubReader {
-  async function getJson<T>(path: string, schema: z.ZodType<T>, signal: AbortSignal): Promise<T> {
-    const result = await gh(path, signal);
+  async function getJson<T>(
+    request: GhRequest,
+    schema: z.ZodType<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
+    const path = ghPath(request);
+    const result = await gh(request, signal);
     if (result.status === "error") throw new GitHubError(`gh api ${path}: ${result.message}`);
     let json: unknown;
     try {
@@ -83,11 +88,11 @@ export function createGitHubReader(gh: GhApi): GitHubReader {
 
   return {
     async pull(repo, number, signal) {
-      return toPullRequest(await getJson(`/repos/${repo}/pulls/${number}`, pullSchema, signal));
+      return toPullRequest(await getJson({ op: "pull", repo, number }, pullSchema, signal));
     },
     async mainHead(repo, signal) {
       const [head] = await getJson(
-        `/repos/${repo}/commits?sha=main&per_page=1`,
+        { op: "mainHead", repo },
         z.array(z.object({ sha: z.string().regex(/^[0-9a-f]{40}$/) })),
         signal,
       );
@@ -100,11 +105,7 @@ export function createGitHubReader(gh: GhApi): GitHubReader {
         found: PullRequest[],
       ): Promise<{ pulls: PullRequest[]; complete: boolean }> => {
         if (page > RECENT_MAX_PAGES) return { pulls: found, complete: false };
-        const rows = await getJson(
-          `/repos/${repo}/pulls?state=all&sort=updated&direction=desc&per_page=${RECENT_PAGE_SIZE}&page=${page}`,
-          z.array(pullSchema),
-          signal,
-        );
+        const rows = await getJson({ op: "recentPulls", repo, page }, z.array(pullSchema), signal);
         const pulls = rows.map(toPullRequest);
         const fresh = pulls.filter((pull) => pull.updatedAt >= since);
         const all = [...found, ...fresh];

@@ -66,17 +66,11 @@ export function defineSettings(bb: BbPluginApi) {
       description: strings.excludedReposDescription,
       default: "",
     },
-    trainJournalPath: {
-      type: "string",
-      label: strings.trainJournalPathLabel,
-      description: strings.trainJournalPathDescription,
-      experimental_schema: z
-        .string()
-        .refine(
-          (value) => value === "" || /^\/.+\.jsonl$/.test(value),
-          "use an absolute path to a .jsonl file",
-        ),
-      default: "",
+    mainCheckEnabled: {
+      type: "boolean",
+      label: strings.mainCheckEnabledLabel,
+      description: strings.mainCheckEnabledDescription,
+      default: false,
     },
     passEnabled: {
       type: "boolean",
@@ -98,7 +92,7 @@ export interface Config {
   mainBotThreadId: string | null;
   repos: readonly ConnectedRepo[];
   excludedRepos: readonly string[];
-  trainJournalPath: string | null;
+  mainCheckEnabled: boolean;
   passEnabled: boolean;
 }
 
@@ -108,7 +102,7 @@ export function toConfig(values: {
   mainBotThreadId: string;
   repos: string;
   excludedRepos: string;
-  trainJournalPath: string;
+  mainCheckEnabled: boolean;
   passEnabled: boolean;
 }): Config {
   const repos = parseReposSetting(values.repos);
@@ -119,7 +113,7 @@ export function toConfig(values: {
     mainBotThreadId: values.mainBotThreadId === "" ? null : values.mainBotThreadId,
     repos: typeof repos === "string" ? [] : repos,
     excludedRepos: parseExcludedSetting(values.excludedRepos),
-    trainJournalPath: values.trainJournalPath === "" ? null : values.trainJournalPath,
+    mainCheckEnabled: values.mainCheckEnabled,
     passEnabled: values.passEnabled,
   };
 }
