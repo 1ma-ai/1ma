@@ -162,13 +162,15 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+packageExtensionsChecksum: sha256-gT9fnLxhUk9aUH2rk0Dt/x1hfx5gz2LnBydILIHPeHU=
+
 importers:
 
   .:
     devDependencies:
       bb-app:
         specifier: 0.49.0
-        version: 0.49.0
+        version: 0.49.0(@testing-library/react@16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@types/better-sqlite3@7.6.13)(@types/react@19.3.0)(cron-parser@5.10.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       oxfmt:
         specifier: ^0.64.0
         version: 0.64.0
@@ -2790,6 +2792,21 @@ snapshots:
       react: 19.3.1
       react-dom: 19.3.1(react@19.3.1)
 
+  '@get-bb/plugin-sdk@0.6.132(@testing-library/react@16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@types/better-sqlite3@7.6.13)(@types/react@19.3.0)(better-sqlite3@13.0.3)(cron-parser@5.10.5)(hono@4.13.18)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)':
+    dependencies:
+      '@tanstack/react-query': 5.107.1(@types/react@19.3.0)(react@19.3.1)
+      cross-spawn: 7.0.6
+      zod: 4.6.7
+    optionalDependencies:
+      '@testing-library/react': 16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
+      '@types/better-sqlite3': 7.6.13
+      '@types/react': 19.3.0
+      better-sqlite3: 13.0.3
+      cron-parser: 5.10.5
+      hono: 4.13.18
+      react: 19.3.1
+      react-dom: 19.3.1(react@19.3.1)
+
   '@get-bb/plugin-sdk@0.6.79(@testing-library/react@16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.2.8(react@19.3.1))(react@19.3.1))(@types/better-sqlite3@7.6.13)(@types/react@19.3.0)(better-sqlite3@12.11.1)(cron-parser@5.10.2)(hono@4.13.14)(react-dom@19.2.8(react@19.3.1))(react@19.3.1)':
     dependencies:
       '@tanstack/react-query': 5.105.0(@types/react@19.3.0)(react@19.3.1)
@@ -3893,8 +3910,9 @@ snapshots:
 
   base64-js@1.5.1: {}
 
-  bb-app@0.49.0:
+  bb-app@0.49.0(@testing-library/react@16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@types/better-sqlite3@7.6.13)(@types/react@19.3.0)(cron-parser@5.10.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1):
     dependencies:
+      '@get-bb/plugin-sdk': 0.6.132(@testing-library/react@16.3.3(@testing-library/dom@10.4.2)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@types/better-sqlite3@7.6.13)(@types/react@19.3.0)(better-sqlite3@13.0.3)(cron-parser@5.10.5)(hono@4.13.18)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       '@parcel/watcher': 2.6.0
       better-sqlite3: 13.0.3
       fs-native-extensions: 1.5.0
@@ -3907,7 +3925,13 @@ snapshots:
       pino-roll: 4.0.0
       zod: 4.6.7
     transitivePeerDependencies:
+      - '@testing-library/react'
+      - '@types/better-sqlite3'
+      - '@types/react'
       - bare-url
+      - cron-parser
+      - react
+      - react-dom
 
   better-sqlite3@12.11.1:
     dependencies:

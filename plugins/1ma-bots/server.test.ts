@@ -620,3 +620,37 @@ describe("Codex review of stage 1", () => {
     expect(text.trimEnd().endsWith(`letter ${token}>>>`)).toBe(true);
   });
 });
+
+describe("end-to-end finding: a letter meets a running turn", () => {
+  it("is not accepted by the dispatch attempt that bb then queues, only when it leaves the queue", async () => {
+    const t = setup({ chainLetters: 3 });
+    const a = await t.create("Alpha");
+    const b = await t.create("Beta");
+    await t.assign("thr_a", a.id);
+    await t.assign("thr_b", b.id);
+    await t.dispatch("thr_a", "user", null);
+    await t.dispatch("thr_b", "user", null);
+    t.delivery.immediate = false;
+    await t.letter("thr_a", b.id);
+    const queued = t.delivery.queued[0]!;
+    await t.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({
+        thread: { id: "thr_b", status: "active" },
+        attempt: "start-turn",
+        initiator: "agent",
+        senderThreadId: "thr_a",
+        input: { text: queued.input[0]!.text, blocks: queued.input as never },
+      }),
+    );
+    expect(await t.letter("thr_b", a.id)).toContain("Letter 1/3");
+    await t.harness.behavior.emitThreadEvent("message.dispatched", {
+      entry: makeQueueEntry({
+        threadId: "thr_b",
+        initiator: "agent",
+        senderThreadId: "thr_a",
+        content: [{ type: "text", text: queued.input[0]!.text, mentions: [] }],
+      }),
+    });
+    expect(await t.letter("thr_b", a.id)).toContain("Letter 2/3");
+  });
+});

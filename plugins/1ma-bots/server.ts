@@ -44,6 +44,7 @@ const SPAWN_FIELDS = [
   "input",
   "sendAt",
 ] as const;
+const BUSY_STATUSES: ReadonlySet<string> = new Set(["active", "starting", "stopping"]);
 const TOOLS = ["bot_read", "bot_memory_update", "bot_update_identity", "bot_message"] as const;
 
 const positiveCount = (fallback: number) => z.number().int().min(1).max(1000).catch(fallback);
@@ -324,7 +325,12 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       block.type === "text" && block.text !== undefined ? [block.text] : [],
     );
 
+  // bb applies its own waits (a busy thread) after this hook, so a message
+  // that meets a running turn is not accepted yet: it waits in the queue and
+  // is accepted by message.dispatched when it leaves it.
   bb.experimental_hooks.on("message.dispatch", (ctx) => {
+    const meetsRunningTurn = ctx.attempt === "start-turn" && BUSY_STATUSES.has(ctx.thread.status);
+    if (meetsRunningTurn) return { action: "proceed" };
     accepted({
       threadId: ctx.thread.id,
       fromOwner: ctx.initiator === "user" && ctx.senderThreadId === null,

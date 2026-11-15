@@ -145,7 +145,10 @@ describe("Assign to bot in a thread's menu", () => {
     const { assignToBotAction } = await import("./src/ui/assign-action.js");
     const data = { bots: [bot("bot_a", "Marketer", [])], assign: async () => undefined };
     expect(
-      assignToBotAction.item({ thread: { id: "c", parentThreadId: "p", archivedAt: null }, data } as never),
+      assignToBotAction.item({
+        thread: { id: "c", parentThreadId: "p", archivedAt: null },
+        data,
+      } as never),
     ).toBeNull();
     expect(assignToBotAction.item({ thread, data: { ...data, bots: [] } } as never)).toBeNull();
   });
