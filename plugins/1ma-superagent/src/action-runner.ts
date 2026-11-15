@@ -19,6 +19,8 @@ export const START_KIND = "start_chat";
 export const UNKNOWN_KIND = "unknown_spawn";
 export const AMBIGUOUS_KIND = "ambiguous_spawn";
 export const NOTICE_KIND = "notice";
+export const STOPPING_LATE = "stopping late";
+export const STOPPED_LATE = "stopped late";
 
 export interface ActionDeps {
   readonly actions: ActionStore;
@@ -212,8 +214,8 @@ export async function runActions(deps: ActionDeps): Promise<void> {
     .filter(
       (action) =>
         action.sentAt !== null &&
-        action.threadId === null &&
-        deps.now() - action.sentAt < LATE_WINDOW_MS,
+        (action.result === STOPPING_LATE ||
+          (action.threadId === null && deps.now() - action.sentAt < LATE_WINDOW_MS)),
     );
   const servers = new Set([...unknown, ...late].map((action) => action.serverId));
   const spawned = new Map<ServerId, ThreadMetadataRow[]>();
@@ -297,21 +299,47 @@ export async function runActions(deps: ActionDeps): Promise<void> {
       if (rows === undefined || executor === undefined) return;
       const found = matching(rows, action);
       if (found.length === 0) return;
-      await Promise.all(
+      const stopped = await Promise.all(
         found.map(async (threadId) => {
           try {
             await executor.clearQueueAndStop(threadId, deps.signal);
+            return (await executor.queuedWaits(threadId, deps.signal)).length === 0;
           } catch (error) {
             deps.warn(
               `stopping late chat ${chatRef(action.serverId, threadId)}: ${describeError(error)}`,
             );
+            return false;
           }
         }),
       );
       const first = found[0] ?? "";
+      const chats = found.map((id) => chatRef(action.serverId, id)).join(", ");
+      if (!stopped.every(Boolean)) {
+        deps.actions.transition(action.id, ["canceled"], "canceled", deps.now(), {
+          threadId: first,
+          result: STOPPING_LATE,
+        });
+        deps.questions.ask(
+          {
+            key: `${NOTICE_KIND}:stopping:${action.id}`,
+            kind: NOTICE_KIND,
+            subject: action.id,
+            expectedVersion: "1",
+            card: ackCard(
+              strings.stoppingTitle,
+              strings.stoppingObserved(chats),
+              strings.lateAffected,
+              strings.stoppingRecommendation,
+            ),
+            priority: 40,
+          },
+          deps.now(),
+        );
+        return;
+      }
       deps.actions.transition(action.id, ["canceled"], "canceled", deps.now(), {
         threadId: first,
-        result: "stopped late",
+        result: STOPPED_LATE,
       });
       deps.questions.ask(
         {
@@ -321,7 +349,7 @@ export async function runActions(deps: ActionDeps): Promise<void> {
           expectedVersion: "1",
           card: ackCard(
             strings.lateTitle,
-            strings.lateObserved(found.map((id) => chatRef(action.serverId, id)).join(", ")),
+            strings.lateObserved(chats),
             strings.lateAffected,
             strings.lateRecommendation,
           ),

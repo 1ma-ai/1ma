@@ -37,6 +37,7 @@ function setup() {
   const spawned: SpawnRequest[] = [];
   const existing: ThreadMetadataRow[] = [];
   const stopped: string[] = [];
+  const stopping = { failures: 0 };
   const target = { remote: "https://github.com/example/app.git", excluded: [] as string[] };
   let spawnBehavior: (request: SpawnRequest) => Promise<{ threadId: string }> = async (request) => {
     const threadId = `thr_${spawned.length}`;
@@ -51,8 +52,13 @@ function setup() {
     findSpawned: async () => [...existing],
     projectRemote: async () => target.remote,
     clearQueueAndStop: async (threadId) => {
+      if (stopping.failures > 0) {
+        stopping.failures -= 1;
+        throw new TypeError("fetch failed");
+      }
       stopped.push(threadId);
     },
+    queuedWaits: async () => [],
   });
   const run = (claimant = "gen_a") =>
     runActions({
@@ -82,6 +88,7 @@ function setup() {
     spawned,
     existing,
     stopped,
+    stopping,
     target,
     advance: (ms: number) => {
       clock += ms;
@@ -257,6 +264,34 @@ describe("spawn actions", () => {
     expect(t.questions.waiting().map((item) => item.kind)).toEqual(["notice"]);
     await t.run();
     expect(t.stopped).toEqual(["thr_first_late"]);
+  });
+
+  it("keeps stopping a late chat until a stop is confirmed", async () => {
+    const t = setup();
+    const id = t.confirmed();
+    t.setSpawn(async () => {
+      throw new Error("timeout");
+    });
+    await t.run();
+    const action = t.actions.get(id);
+    if (action === null) throw new Error("no action");
+    t.actions.transition(id, ["unknown"], "canceled", t.now(), { result: "replaced" });
+    t.existing.push({
+      threadId: "thr_late",
+      metadata: { spawn: { actionId: id, attempt: action.attempt } },
+    });
+    t.stopping.failures = 1;
+    await t.run();
+    expect(t.stopped).toEqual([]);
+    expect(t.actions.get(id)).toMatchObject({ threadId: "thr_late", result: "stopping late" });
+    expect(t.questions.waiting().map((item) => item.card.title)).toEqual([
+      "Отменённый чат создан, остановить пока не удалось",
+    ]);
+    await t.run();
+    expect(t.stopped).toEqual(["thr_late"]);
+    expect(t.actions.get(id)?.result).toBe("stopped late");
+    await t.run();
+    expect(t.stopped).toEqual(["thr_late"]);
   });
 });
 
