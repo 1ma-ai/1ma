@@ -144,78 +144,75 @@ describe("1ma-bots on a real server", () => {
     );
   });
 
-  it(
-    "keeps a letter queued in a busy conversation out of its exchange until it is dispatched",
-    async () => {
-      const alice = await createBot("Alice", { capabilities: ["dev"] });
-      const bruno = await createBot("Bruno", { capabilities: ["dev"] });
-      const aliceThread = await startConversation(alice, "[stub:reply ready-a]");
-      const brunoThread = await startConversation(bruno, "[stub:reply ready-b]");
-      await Promise.all([waitTurns(aliceThread, 1), waitTurns(brunoThread, 1)]);
-      await Promise.all([waitStatus(aliceThread, "idle"), waitStatus(brunoThread, "idle")]);
+  it("keeps a letter queued in a busy conversation out of its exchange until it is dispatched", async () => {
+    const alice = await createBot("Alice", { capabilities: ["dev"] });
+    const bruno = await createBot("Bruno", { capabilities: ["dev"] });
+    const aliceThread = await startConversation(alice, "[stub:reply ready-a]");
+    const brunoThread = await startConversation(bruno, "[stub:reply ready-b]");
+    await Promise.all([waitTurns(aliceThread, 1), waitTurns(brunoThread, 1)]);
+    await Promise.all([waitStatus(aliceThread, "idle"), waitStatus(brunoThread, "idle")]);
 
-      const known = letterOutputs(0).length;
-      const toAlice = (text) => ({ to: alice.id, threadId: aliceThread, text });
-      // Bruno's busy turn writes to Alice after Alice's letter is already queued
-      // behind it; the letter text itself makes Bruno write to Alice once more
-      // when it is finally dispatched.
-      const second = stubCall("bot_message", toAlice("second-from-bruno"));
-      await say(
-        brunoThread,
-        `[stub:wait 45] ${stubCall("bot_message", toAlice("first-from-bruno"))}`,
-      );
-      await waitStatus(brunoThread, "active");
-      const own = exchangeOf(brunoThread);
-      assert.ok(own.chain, "Bruno's own message started an exchange");
-      assert.equal(own.chain.letters, 0);
-      await say(
-        aliceThread,
-        stubCall("bot_message", { to: bruno.id, threadId: brunoThread, text: second }),
-      );
+    const known = letterOutputs(0).length;
+    const toAlice = (text) => ({ to: alice.id, threadId: aliceThread, text });
+    // Bruno's busy turn writes to Alice after Alice's letter is already queued
+    // behind it; the letter text itself makes Bruno write to Alice once more
+    // when it is finally dispatched.
+    const second = stubCall("bot_message", toAlice("second-from-bruno"));
+    await say(
+      brunoThread,
+      `[stub:wait 45] ${stubCall("bot_message", toAlice("first-from-bruno"))}`,
+    );
+    await waitStatus(brunoThread, "active");
+    const own = exchangeOf(brunoThread);
+    assert.ok(own.chain, "Bruno's own message started an exchange");
+    assert.equal(own.chain.letters, 0);
+    await say(
+      aliceThread,
+      stubCall("bot_message", { to: bruno.id, threadId: brunoThread, text: second }),
+    );
 
-      await waitFor("Alice's letter to be queued", 60 * SECOND, async () => {
-        const queued = await server.api("GET", `/threads/${brunoThread}/queued-messages`);
-        return queued.length === 1;
-      });
-      const waiting = exchangeOf(brunoThread);
-      assert.deepEqual(
-        waiting,
-        { chain: own.chain, waiting: 1 },
-        `a queued letter leaves Bruno's exchange alone; the queue: ${JSON.stringify(
-          (await server.api("GET", `/threads/${brunoThread}/queued-messages`)).map((row) => [
-            row.state,
-            row.waitingOn,
-          ]),
-        )}; Alice's exchange: ${JSON.stringify(exchangeOf(aliceThread))}`,
-      );
-      const alicesExchange = exchangeOf(aliceThread).chain;
-      assert.ok(alicesExchange && alicesExchange.id !== own.chain.id);
-      const observed = {
-        queued: await server.api("GET", `/threads/${brunoThread}/queued-messages`),
-        status: (await thread(brunoThread)).status,
-      };
-      const mine = await waitFor("Bruno's own letter", 120 * SECOND, async () =>
-        lettersToAlice(known).find(Boolean),
-      );
-      assert.match(
-        mine.output,
-        /^Letter 1\//,
-        `Bruno's turn is still in his own exchange while Alice's letter waits in the queue\n${diagnose(observed)}`,
-      );
+    await waitFor("Alice's letter to be queued", 60 * SECOND, async () => {
+      const queued = await server.api("GET", `/threads/${brunoThread}/queued-messages`);
+      return queued.length === 1;
+    });
+    const waiting = exchangeOf(brunoThread);
+    assert.deepEqual(
+      waiting,
+      { chain: own.chain, waiting: 1 },
+      `a queued letter leaves Bruno's exchange alone; the queue: ${JSON.stringify(
+        (await server.api("GET", `/threads/${brunoThread}/queued-messages`)).map((row) => [
+          row.state,
+          row.waitingOn,
+        ]),
+      )}; Alice's exchange: ${JSON.stringify(exchangeOf(aliceThread))}`,
+    );
+    const alicesExchange = exchangeOf(aliceThread).chain;
+    assert.ok(alicesExchange && alicesExchange.id !== own.chain.id);
+    const observed = {
+      queued: await server.api("GET", `/threads/${brunoThread}/queued-messages`),
+      status: (await thread(brunoThread)).status,
+    };
+    const mine = await waitFor("Bruno's own letter", 120 * SECOND, async () =>
+      lettersToAlice(known).find(Boolean),
+    );
+    assert.match(
+      mine.output,
+      /^Letter 1\//,
+      `Bruno's turn is still in his own exchange while Alice's letter waits in the queue\n${diagnose(observed)}`,
+    );
 
-      const again = await waitFor(
-        "the dispatched letter to make Bruno write again",
-        180 * SECOND,
-        async () => (lettersToAlice(known).length >= 2 ? lettersToAlice(known) : null),
-      );
-      assert.match(
-        again[1].output,
-        /^Letter 2\//,
-        "after dispatch Bruno's next letter continues Alice's exchange",
-      );
-      assert.equal(exchangeOf(brunoThread).chain?.id, alicesExchange.id);
-    },
-  );
+    const again = await waitFor(
+      "the dispatched letter to make Bruno write again",
+      180 * SECOND,
+      async () => (lettersToAlice(known).length >= 2 ? lettersToAlice(known) : null),
+    );
+    assert.match(
+      again[1].output,
+      /^Letter 2\//,
+      "after dispatch Bruno's next letter continues Alice's exchange",
+    );
+    assert.equal(exchangeOf(brunoThread).chain?.id, alicesExchange.id);
+  });
 });
 
 describe("1ma-sidebar with the bots block", () => {
