@@ -4,45 +4,16 @@
 // Run in CI only (it starts a server):
 //
 //   node desktop/scripts/smoke-builtin-plugins.mjs <1ma-server-<version>.tgz>
-import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { installTarball, pluginsRunning, startServer } from "./test-server.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const EMBEDDED = JSON.parse(
   readFileSync(path.join(repo, "desktop", "embedded-plugins.json"), "utf8"),
 );
-const TIMEOUT_MS = 120_000;
-
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
-  });
-}
-
-async function until(label, check, deadline = Date.now() + TIMEOUT_MS, last = "no answer yet") {
-  if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}: ${last}`);
-  let why = last;
-  try {
-    const result = await check();
-    if (result.done) return result.value;
-    why = result.why;
-  } catch (error) {
-    why = error.message;
-  }
-  await delay(1_000);
-  return until(label, check, deadline, why);
-}
 
 const tarball = path.resolve(process.argv[2] ?? "");
 if (!process.argv[2]) {
@@ -52,50 +23,11 @@ if (!process.argv[2]) {
 const root = mkdtempSync(path.join(tmpdir(), "1ma-builtin-smoke-"));
 const install = path.join(root, "install");
 const dataDir = path.join(root, "data");
-const npm = spawnSync("npm", ["install", "--prefix", install, "--no-audit", "--no-fund", tarball], {
-  encoding: "utf8",
-});
-if (npm.status !== 0) throw new Error(`npm install failed:\n${npm.stdout}${npm.stderr}`);
-
-const [serverPort, daemonPort] = [await freePort(), await freePort()];
-const base = `http://127.0.0.1:${serverPort}`;
-const server = spawn(
-  path.join(install, "node_modules", ".bin", "bb-app"),
-  [
-    "--data-dir",
-    dataDir,
-    "--server-port",
-    String(serverPort),
-    "--host-daemon-port",
-    String(daemonPort),
-    "--no-in-app-updates",
-  ],
-  { env: { ...process.env, BB_LOG_LEVEL: "warn", BB_TELEMETRY: "false" }, stdio: "inherit" },
-);
-
-const get = async (route) => {
-  const response = await fetch(`${base}${route}`);
-  if (!response.ok) throw new Error(`GET ${route}: HTTP ${response.status}`);
-  return response;
-};
+const server = await startServer(installTarball(tarball, install), dataDir);
+const { get } = server;
 
 try {
-  const plugins = await until("the 1ma plugins to run as built-ins", async () => {
-    const list = (await (await get("/api/v1/plugins")).json()).plugins ?? [];
-    const byId = new Map(list.map((plugin) => [plugin.id, plugin]));
-    const failed = EMBEDDED.filter(
-      (id) => byId.get(id)?.status === "error" && byId.get(id)?.statusDetail !== "not loaded",
-    );
-    if (failed.length > 0)
-      throw new Error(failed.map((id) => `${id}: ${byId.get(id).statusDetail}`).join("; "));
-    const waiting = EMBEDDED.filter((id) => byId.get(id)?.status !== "running");
-    return waiting.length === 0
-      ? { done: true, value: byId }
-      : {
-          done: false,
-          why: waiting.map((id) => `${id}=${byId.get(id)?.status ?? "missing"}`).join(", "),
-        };
-  });
+  const plugins = await pluginsRunning(server, EMBEDDED);
   for (const id of EMBEDDED) {
     const plugin = plugins.get(id);
     if (plugin.source !== `builtin:${id}`)
@@ -131,8 +63,6 @@ try {
     throw new Error(`the 1ma theme resolves without its CSS: ${resolved.slice(0, 300)}`);
   console.log(`the 1ma theme (${theme.id}) resolves with its CSS`);
 } finally {
-  server.kill("SIGTERM");
-  await delay(2_000);
-  if (server.exitCode === null) server.kill("SIGKILL");
+  await server.stop();
   rmSync(root, { recursive: true, force: true });
 }

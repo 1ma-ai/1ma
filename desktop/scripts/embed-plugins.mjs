@@ -11,7 +11,8 @@
 // The result is .1ma-plugins/<name>/.bundled-runtime, outside plugins/ (which
 // holds only bb's own plugin sources); packages/bundled-plugins copies it.
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -65,6 +66,15 @@ export function embedPlugin({ tree, name, log = () => {} }) {
     mkdirSync(path.dirname(path.join(staging, file)), { recursive: true });
     cpSync(path.join(source, file), path.join(staging, file));
   }
+  // Part of the bundled-plugins build's turbo inputs (patch 0014), which see
+  // the sources here but not the git-ignored node_modules and dist: a change
+  // to 1ma's locked dependencies rebuilds the plugin too.
+  writeFileSync(
+    path.join(staging, "1ma-lockfile.sha256"),
+    `${createHash("sha256")
+      .update(readFileSync(path.join(repo, "pnpm-lock.yaml")))
+      .digest("hex")}\n`,
+  );
   const deployed = path.join(tree, ".1ma-plugins", `${name}.deploy`);
   rmSync(deployed, { recursive: true, force: true });
   // corepack runs the pnpm 1ma pins; a bb job may have bb's own pnpm first on PATH.

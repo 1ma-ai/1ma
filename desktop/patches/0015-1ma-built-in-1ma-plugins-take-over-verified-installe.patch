@@ -8,20 +8,268 @@ or from the Linux release folder (path). When a built-in 1ma plugin meets a
 copy with its id, reconcileBundled now moves that row to the built-in source
 instead of skipping it, keeping the enablement and, through the plugin id,
 the settings, secrets, schedules and data. Only a verifiable 1ma source
-qualifies: git from github.com/1ma-ai/1ma with subdirectory plugins/<name>,
-or a folder carrying the release script's .1ma-release.json; a copy newer
-than the built-in is kept. Every other copy stays and the log says why.
-Before the first takeover the database is copied to
-<data>/backups/before-1ma-builtins-<version>-<time>.db: an app from before
-0014 deletes these rows at start, so going back means restoring that copy.
-If the copy cannot be made, the installed copies stay until a later start.
----
- .../services/plugins/plugin-registration.ts   | 113 ++++++++++++++++-
- .../services/plugins/plugin-service.test.ts   | 116 ++++++++++++++++++
- 2 files changed, 228 insertions(+), 1 deletion(-)
+qualifies: git from github.com/1ma-ai/1ma (compared by host and path) with
+subdirectory plugins/<name>, or a folder carrying the release script's
+.1ma-release.json; a copy newer than the built-in is kept. Every other copy
+stays and the log says why.
 
+An app from before 0014 deletes these rows, with their settings, at start,
+and bb's artifact GC removes a git checkout once no row points at it. So
+before the first built-in 1ma row is written, on a takeover or a clean
+install, <data>/backups/before-1ma-builtins/ is saved once: the previous
+plugin and artifact rows, copies of their checkouts and a copy of the whole
+database. It is never replaced, so a transition that takes two starts keeps
+the original state. server/dist/one-ma-rollback.js, run with 1ma stopped,
+puts back only those rows and checkouts, so an older 1ma starts with
+everything else as it is. If the state cannot be saved, the copies stay and
+a clean install waits until a later start.
+---
+ apps/server/package.json                      |   2 +-
+ apps/server/src/one-ma-rollback.ts            |  38 +++
+ .../src/services/plugins/one-ma-rollback.ts   | 172 ++++++++++++
+ .../services/plugins/plugin-registration.ts   | 139 +++++++++-
+ .../services/plugins/plugin-service.test.ts   | 251 ++++++++++++++++++
+ 5 files changed, 600 insertions(+), 2 deletions(-)
+ create mode 100644 apps/server/src/one-ma-rollback.ts
+ create mode 100644 apps/server/src/services/plugins/one-ma-rollback.ts
+
+diff --git a/apps/server/package.json b/apps/server/package.json
+index ddd8d1d..65c1971 100644
+--- a/apps/server/package.json
++++ b/apps/server/package.json
+@@ -4,7 +4,7 @@
+   "type": "module",
+   "private": true,
+   "scripts": {
+-    "build": "node ../../scripts/build-node-entry.mjs src/index.ts dist/index.js --clean-dist --external ./start-server.js --copy-dir ../../packages/db/drizzle dist/drizzle --copy-dir src/assets dist/assets && node --import tsx scripts/copy-builtin-skills.ts && node ../../scripts/build-node-entry.mjs src/start-server.ts dist/start-server.js && node ../../scripts/build-node-entry.mjs ../../packages/plugin-sdk/src/index.ts dist/plugin-sdk-runtime.js && node ../../scripts/build-node-entry.mjs src/services/plugins/zod-runtime.ts dist/zod-runtime.js",
++    "build": "node ../../scripts/build-node-entry.mjs src/index.ts dist/index.js --clean-dist --external ./start-server.js --copy-dir ../../packages/db/drizzle dist/drizzle --copy-dir src/assets dist/assets && node --import tsx scripts/copy-builtin-skills.ts && node ../../scripts/build-node-entry.mjs src/start-server.ts dist/start-server.js && node ../../scripts/build-node-entry.mjs ../../packages/plugin-sdk/src/index.ts dist/plugin-sdk-runtime.js && node ../../scripts/build-node-entry.mjs src/services/plugins/zod-runtime.ts dist/zod-runtime.js && node ../../scripts/build-node-entry.mjs src/one-ma-rollback.ts dist/one-ma-rollback.js",
+     "start": "node dist/index.js",
+     "dev": "node --conditions=source --import tsx scripts/dev-supervisor.mjs",
+     "clean": "rimraf dist",
+diff --git a/apps/server/src/one-ma-rollback.ts b/apps/server/src/one-ma-rollback.ts
+new file mode 100644
+index 0000000..939df69
+--- /dev/null
++++ b/apps/server/src/one-ma-rollback.ts
+@@ -0,0 +1,38 @@
++// Puts the 1ma plugins back the way they were installed before they were
++// built in, so that an older 1ma can start on this data. With 1ma stopped:
++//
++//   node <server package>/server/dist/one-ma-rollback.js --data-dir <dir>
++//
++// The 1ma desktop app runs it with its own runtime: ELECTRON_RUN_AS_NODE=1.
++import { existsSync } from "node:fs";
++import { resolve } from "node:path";
++import { parseArgs } from "node:util";
++import { resolveDataDirDatabasePath } from "@bb/config/runtime";
++import { createConnection } from "@bb/db";
++import { restoreOneMaRollbackSet } from "./services/plugins/one-ma-rollback.js";
++
++const { values } = parseArgs({ options: { "data-dir": { type: "string" } } });
++const dataDir = values["data-dir"];
++if (dataDir === undefined) {
++  console.error("usage: one-ma-rollback.js --data-dir <1ma data directory>");
++  process.exit(2);
++}
++const databasePath = resolveDataDirDatabasePath({ dataDir: resolve(dataDir) });
++if (!existsSync(databasePath)) {
++  console.error(`no 1ma database at ${databasePath}`);
++  process.exit(2);
++}
++const db = createConnection(databasePath);
++try {
++  await restoreOneMaRollbackSet({
++    db,
++    dataDir: resolve(dataDir),
++    log: (line) => console.log(line),
++  });
++  console.log("done: the older 1ma can be started now");
++} catch (error) {
++  console.error(error instanceof Error ? error.message : String(error));
++  process.exitCode = 1;
++} finally {
++  db.$client.close();
++}
+diff --git a/apps/server/src/services/plugins/one-ma-rollback.ts b/apps/server/src/services/plugins/one-ma-rollback.ts
+new file mode 100644
+index 0000000..bc4be82
+--- /dev/null
++++ b/apps/server/src/services/plugins/one-ma-rollback.ts
+@@ -0,0 +1,172 @@
++import { cp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
++import { join, relative, resolve, sep } from "node:path";
++import { eq } from "drizzle-orm";
++import { installedPlugins, pluginArtifacts, type DbConnection } from "@bb/db";
++
++// The 1ma plugins' installs from before they were built in (patches 0014 and
++// 0015), saved once so that an older 1ma can run on the same data again. Such
++// a version deletes, with their settings, the rows whose source is a built-in
++// it does not know, and bb's artifact GC removes a git checkout once no row
++// points at it. Restoring puts back only these rows and checkouts; everything
++// else in the database stays as it is.
++export const ONE_MA_ROLLBACK_DIRECTORY = "before-1ma-builtins";
++
++type PluginRegistration = typeof installedPlugins.$inferSelect;
++type PluginArtifact = typeof pluginArtifacts.$inferSelect;
++
++interface SavedPlugin {
++  id: string;
++  registration: PluginRegistration;
++  artifact: PluginArtifact | null;
++  files: { original: string; copy: string }[];
++}
++
++interface RollbackManifest {
++  format: 1;
++  appVersion: string;
++  createdAt: number;
++  plugins: SavedPlugin[];
++}
++
++export function oneMaRollbackDirectory(dataDir: string): string {
++  return join(dataDir, "backups", ONE_MA_ROLLBACK_DIRECTORY);
++}
++
++async function exists(path: string): Promise<boolean> {
++  return stat(path).then(
++    () => true,
++    () => false,
++  );
++}
++
++function isInside(parent: string, child: string): boolean {
++  const fromParent = relative(resolve(parent), resolve(child));
++  return fromParent !== "" && fromParent !== ".." && !fromParent.startsWith(`..${sep}`);
++}
++
++// Does nothing when the set exists: it describes the state before the very
++// first built-in row, and a later pass must not replace it with a mixed one.
++export async function saveOneMaRollbackSet(args: {
++  db: DbConnection;
++  dataDir: string;
++  appVersion: string;
++  pluginIds: readonly string[];
++  now: number;
++}): Promise<boolean> {
++  const target = oneMaRollbackDirectory(args.dataDir);
++  if (await exists(target)) return false;
++  const staging = `${target}.partial`;
++  await rm(staging, { recursive: true, force: true });
++  await mkdir(join(staging, "files"), { recursive: true });
++  try {
++    await args.db.$client.backup(join(staging, "bb.db"));
++    const plugins: SavedPlugin[] = [];
++    const copies = new Map<string, string>();
++    for (const id of args.pluginIds) {
++      const registration = args.db
++        .select()
++        .from(installedPlugins)
++        .where(eq(installedPlugins.id, id))
++        .get();
++      if (registration === undefined || registration.sourceKind === "builtin") continue;
++      const artifact =
++        registration.activeArtifactId === null
++          ? null
++          : (args.db
++              .select()
++              .from(pluginArtifacts)
++              .where(eq(pluginArtifacts.id, registration.activeArtifactId))
++              .get() ?? null);
++      const files: SavedPlugin["files"] = [];
++      const root = artifact === null ? null : (artifact.gitCheckoutRoot ?? artifact.path);
++      if (root !== null && isInside(args.dataDir, root)) {
++        let copy = copies.get(root);
++        if (copy === undefined) {
++          copy = join("files", String(copies.size));
++          await cp(root, join(staging, copy), { recursive: true, verbatimSymlinks: true });
++          copies.set(root, copy);
++        }
++        files.push({ original: root, copy });
++      }
++      plugins.push({ id, registration, artifact, files });
++    }
++    const manifest: RollbackManifest = {
++      format: 1,
++      appVersion: args.appVersion,
++      createdAt: args.now,
++      plugins,
++    };
++    await writeFile(join(staging, "plugins.json"), `${JSON.stringify(manifest, null, 2)}\n`, {
++      mode: 0o600,
++    });
++    await rename(staging, target);
++    return true;
++  } catch (error) {
++    await rm(staging, { recursive: true, force: true });
++    throw error;
++  }
++}
++
++// Run with 1ma stopped, before an older version starts on this data. A plugin
++// that is no longer built in is left alone; one that is gone means an older
++// version already ran, and only the whole database copy can help.
++export async function restoreOneMaRollbackSet(args: {
++  db: DbConnection;
++  dataDir: string;
++  log: (line: string) => void;
++}): Promise<void> {
++  const directory = oneMaRollbackDirectory(args.dataDir);
++  const manifestPath = join(directory, "plugins.json");
++  if (!(await exists(manifestPath))) {
++    throw new Error(`nothing to restore: ${manifestPath} does not exist`);
++  }
++  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as RollbackManifest;
++  if (manifest.format !== 1) {
++    throw new Error(`${manifestPath} has format ${String(manifest.format)}, expected 1`);
++  }
++  const pending: SavedPlugin[] = [];
++  for (const plugin of manifest.plugins) {
++    const current = args.db
++      .select()
++      .from(installedPlugins)
++      .where(eq(installedPlugins.id, plugin.id))
++      .get();
++    if (current === undefined) {
++      throw new Error(
++        `${plugin.id} is no longer installed, so an older 1ma has probably run on this data already; with 1ma stopped, put ${join(directory, "bb.db")} in place of the database instead`,
++      );
++    }
++    if (current.sourceKind !== "builtin") {
++      args.log(`${plugin.id}: installed from ${current.source}, left as it is`);
++      continue;
++    }
++    pending.push(plugin);
++  }
++  for (const plugin of pending) {
++    for (const file of plugin.files) {
++      if (!(await exists(file.original))) {
++        await cp(join(directory, file.copy), file.original, {
++          recursive: true,
++          verbatimSymlinks: true,
++        });
++      }
++    }
++  }
++  args.db.transaction((tx) => {
++    for (const plugin of pending) {
++      if (plugin.artifact !== null) {
++        tx.insert(pluginArtifacts)
++          .values(plugin.artifact)
++          .onConflictDoUpdate({ target: pluginArtifacts.id, set: plugin.artifact })
++          .run();
++      }
++      tx.insert(installedPlugins)
++        .values(plugin.registration)
++        .onConflictDoUpdate({ target: installedPlugins.id, set: plugin.registration })
++        .run();
++    }
++  });
++  for (const plugin of pending) {
++    args.log(`${plugin.id}: installed from ${plugin.registration.source} again`);
++  }
++}
 diff --git a/apps/server/src/services/plugins/plugin-registration.ts b/apps/server/src/services/plugins/plugin-registration.ts
-index 8fa9e84..b618c98 100644
+index 8fa9e84..0596d65 100644
 --- a/apps/server/src/services/plugins/plugin-registration.ts
 +++ b/apps/server/src/services/plugins/plugin-registration.ts
 @@ -4,7 +4,8 @@ import {
@@ -29,7 +277,7 @@ index 8fa9e84..b618c98 100644
  import { isHostPathWithin } from "@bb/domain";
  import { realpathSync } from "node:fs";
 -import { cp, rename, rm, stat } from "node:fs/promises";
-+import { cp, mkdir, readFile, rename, rm, stat } from "node:fs/promises";
++import { cp, readFile, rename, rm, stat } from "node:fs/promises";
 +import semver from "semver";
  import { join, resolve } from "node:path";
  import { isFsErrorWithCode } from "../lib/fs-errors.js";
@@ -42,7 +290,15 @@ index 8fa9e84..b618c98 100644
    SHIPPED_PLUGINS,
    builtinPluginSource,
    type BundledPluginRegistration,
-@@ -765,6 +767,87 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+@@ -59,6 +61,7 @@ import type {
+   RegisterInstalledArgs,
+ } from "./managed-plugin-artifacts.js";
+ import { commitInstall } from "./install-cancellation.js";
++import { oneMaRollbackDirectory, saveOneMaRollbackSet } from "./one-ma-rollback.js";
+ import type { PluginServiceDeps } from "./plugin-service-internal.js";
+ import {
+   gitResolvedVersion,
+@@ -765,7 +768,106 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
      });
    }
  
@@ -52,15 +308,26 @@ index 8fa9e84..b618c98 100644
 +  // secrets, schedules and data, which belong to the plugin id. Only a
 +  // verifiable 1ma source qualifies, and never a copy newer than the built-in.
 +  const oneMaPluginNames = new Set(ONE_MA_PLUGINS.map((plugin) => plugin.name));
-+  const ONE_MA_REPOSITORY = "https://github.com/1ma-ai/1ma";
-+  let takeoverSnapshotSaved = false;
 +
-+  function normalizedRepository(url: string): string {
-+    return url
-+      .replace(/^git\+/u, "")
++  // The forms bb's git sources accept (install-sources.ts): an http(s) URL or
++  // host/path; compared by host and repository path.
++  function isOneMaRepository(url: string): boolean {
++    let parsed: URL;
++    try {
++      parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//iu.test(url) ? url : `https://${url}`);
++    } catch {
++      return false;
++    }
++    const repository = parsed.pathname
++      .replace(/^\/+|\/+$/gu, "")
 +      .replace(/\.git$/u, "")
-+      .replace(/\/+$/u, "")
 +      .toLowerCase();
++    return (
++      (parsed.protocol === "https:" || parsed.protocol === "http:") &&
++      parsed.hostname.toLowerCase() === "github.com" &&
++      parsed.port === "" &&
++      repository === "1ma-ai/1ma"
++    );
 +  }
 +
 +  async function oneMaTakeoverProblem(
@@ -71,7 +338,7 @@ index 8fa9e84..b618c98 100644
 +    if (existing.sourceKind === "git") {
 +      if (
 +        existing.sourceGitUrl === null ||
-+        normalizedRepository(existing.sourceGitUrl) !== ONE_MA_REPOSITORY ||
++        !isOneMaRepository(existing.sourceGitUrl) ||
 +        existing.sourceGitSubdirectory !== `plugins/${name}`
 +      ) {
 +        return `it is installed from ${existing.source}, not from 1ma's repository`;
@@ -85,7 +352,7 @@ index 8fa9e84..b618c98 100644
 +      } catch {}
 +      if (
 +        typeof repository !== "string" ||
-+        normalizedRepository(repository) !== ONE_MA_REPOSITORY
++        !isOneMaRepository(repository)
 +      ) {
 +        return `${existing.rootDir} is not a 1ma release install (no .1ma-release.json)`;
 +      }
@@ -103,41 +370,49 @@ index 8fa9e84..b618c98 100644
 +    return null;
 +  }
 +
-+  // One copy of the database before the first takeover: an app version from
-+  // before the 1ma plugins were built in deletes their rows and settings at
-+  // start, so going back is done by restoring this copy. Without the copy the
-+  // installed one, which still works, stays: returns why, or null.
-+  async function snapshotBeforeTakeover(): Promise<string | null> {
-+    if (takeoverSnapshotSaved) return null;
++  // Before the first built-in 1ma row is written, the installs it replaces are
++  // saved once (one-ma-rollback.ts). Returns why the 1ma rows have to wait, or
++  // null; a copy that still works stays in place meanwhile.
++  async function saveOneMaInstallsBefore(): Promise<string | null> {
++    const ids = ONE_MA_PLUGINS.map((plugin) => plugin.pluginId);
++    if (ids.some((id) => getInstalledPluginRegistration(deps.db, id)?.sourceKind === "builtin")) {
++      return null;
++    }
 +    try {
-+      const directory = join(deps.dataDir, "backups");
-+      await mkdir(directory, { recursive: true });
-+      const target = join(
-+        directory,
-+        `before-1ma-builtins-${deps.appVersion}-${Date.now()}.db`,
-+      );
-+      await deps.db.$client.backup(target);
-+      takeoverSnapshotSaved = true;
-+      logger.info(`saved the database to ${target} before taking over the 1ma plugins`);
++      if (
++        await saveOneMaRollbackSet({
++          db: deps.db,
++          dataDir: deps.dataDir,
++          appVersion: deps.appVersion,
++          pluginIds: ids,
++          now: Date.now(),
++        })
++      ) {
++        logger.info(
++          `saved the 1ma plugins' installs to ${oneMaRollbackDirectory(deps.dataDir)} before they are built in`,
++        );
++      }
 +      return null;
 +    } catch (error) {
-+      return `could not save the database first: ${
++      return `could not save the installs from before first: ${
 +        error instanceof Error ? error.message : String(error)
 +      }`;
 +    }
 +  }
 +
    async function reconcileBundled(): Promise<void> {
++    let oneMaInstallsSaved: Promise<string | null> | undefined;
      for (const bundled of bundledPlugins) {
        const source = builtinPluginSource(bundled.name);
-@@ -803,6 +886,34 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+       let manifest: PluginManifest;
+@@ -803,6 +905,34 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
            name: bundled.name,
          })
        ) {
 +        if (oneMaPluginNames.has(bundled.name)) {
 +          const problem =
 +            (await oneMaTakeoverProblem(existing, bundled.name, manifest.version)) ??
-+            (await snapshotBeforeTakeover());
++            (await (oneMaInstallsSaved ??= saveOneMaInstallsBefore()));
 +          if (problem !== null) {
 +            logger.warn(
 +              `built-in 1ma plugin ${bundled.name} left the installed copy in place: ${problem}`,
@@ -165,8 +440,22 @@ index 8fa9e84..b618c98 100644
          logger.warn(
            `bundled plugin ${bundled.name} resolved to id "${manifest.id}", but that id is already installed from ${existing.source}; skipping bundled reconciliation`,
          );
+@@ -818,6 +948,13 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
+         existing.rootDir !== bundled.rootDir ||
+         existing.enabled !== enabled
+       ) {
++        if (oneMaPluginNames.has(bundled.name)) {
++          const problem = await (oneMaInstallsSaved ??= saveOneMaInstallsBefore());
++          if (problem !== null) {
++            logger.warn(`built-in 1ma plugin ${bundled.name} is not installed yet: ${problem}`);
++            continue;
++          }
++        }
+         upsertInstalledPlugin(deps.db, {
+           id: manifest.id,
+           source,
 diff --git a/apps/server/test/services/plugins/plugin-service.test.ts b/apps/server/test/services/plugins/plugin-service.test.ts
-index 5dd296e..9e2b1f9 100644
+index 5dd296e..610b154 100644
 --- a/apps/server/test/services/plugins/plugin-service.test.ts
 +++ b/apps/server/test/services/plugins/plugin-service.test.ts
 @@ -3,6 +3,7 @@ import {
@@ -177,7 +466,7 @@ index 5dd296e..9e2b1f9 100644
    rename,
    rm,
    symlink,
-@@ -16,10 +17,13 @@ import {
+@@ -16,12 +17,21 @@ import {
    createEnvironment,
    createProject,
    getInstalledPlugin,
@@ -188,70 +477,125 @@ index 5dd296e..9e2b1f9 100644
    upsertInstalledPlugin,
    upsertPluginMarketplace,
 +  setPluginSettingsValues,
++  createPluginArtifact,
++  getPluginArtifact,
++  installedPlugins,
++  listPluginSchedules,
++  upsertPluginSchedule,
    type DbConnection,
  } from "@bb/db";
++import { eq } from "drizzle-orm";
  import { createMigratedConnection } from "@bb/db/testing";
-@@ -230,6 +234,118 @@ describe("plugin service", () => {
+ import { PLUGIN_SDK_VERSION, type SystemChangeKind } from "@bb/domain";
+ import type { Logger } from "@bb/logger";
+@@ -33,6 +43,9 @@ import {
+ } from "../../../src/services/plugins/plugin-service.js";
+ import { testLogger } from "../../helpers/test-app.js";
+ import { pluginInstalledTelemetryEvent } from "../../../src/services/plugins/plugin-registration.js";
++import { garbageCollectPluginArtifacts } from "../../../src/services/plugins/plugin-artifact-gc.js";
++import { restoreOneMaRollbackSet } from "../../../src/services/plugins/one-ma-rollback.js";
++import { readSecret } from "../../../src/services/plugins/plugin-settings.js";
+ import type { TelemetryEvent } from "../../../src/services/system/telemetry.js";
+ import { createNoopTelemetryService } from "../../../src/services/system/telemetry.js";
+ import { createProviderRegistryService } from "../../../src/services/providers/provider-registry.js";
+@@ -230,6 +243,244 @@ describe("plugin service", () => {
      expect(order).toEqual(["zz-provider", "aa-installed"]);
    });
  
 +  describe("a built-in 1ma plugin already installed as a copy", () => {
 +    const repository = "https://github.com/1ma-ai/1ma.git";
++    const DAY = 24 * 60 * 60_000;
++    const dataDir = () => join(workDir, "data");
++    const rollbackDir = () => join(dataDir(), "backups", "before-1ma-builtins");
++    const checkout = () =>
++      join(dataDir(), "plugins", "cache", "git", "github.com", "1ma-ai", "1ma", "c".repeat(40));
++    const readRollback = async () =>
++      JSON.parse(await readFile(join(rollbackDir(), "plugins.json"), "utf8")) as {
++        plugins: { id: string; registration: { source: string } }[];
++      };
 +
-+    async function start(copy: {
-+      kind: "git" | "path";
++    type Copy = {
++      kind: "none" | "git" | "path";
 +      repo?: string;
 +      version?: string;
 +      marker?: boolean;
++      artifact?: boolean;
 +      backupFails?: boolean;
-+    }) {
-+      const builtinRoot = await writePlugin(join(workDir, "builtin"), {
-+        name: "bb-plugin-1ma-brand",
++    };
++
++    async function writeBuiltin(name: string): Promise<string> {
++      return writePlugin(join(workDir, "builtin"), {
++        name: `bb-plugin-${name}`,
 +        version: "0.4.0",
 +        serverSource: "export default function plugin() {}",
 +      });
-+      const copyRoot = await writePlugin(join(workDir, "copy"), {
-+        name: "bb-plugin-1ma-brand",
-+        version: copy.version ?? "0.3.1",
-+        serverSource: "export default function plugin() {}",
-+      });
++    }
++
++    async function installCopy(name: string, copy: Copy): Promise<string | null> {
++      if (copy.kind === "none") return null;
++      const copyRoot = await writePlugin(
++        copy.artifact === true ? join(checkout(), "plugins") : join(workDir, "copy"),
++        {
++          name: `bb-plugin-${name}`,
++          version: copy.version ?? "0.3.1",
++          serverSource: "export default function plugin() {}",
++        },
++      );
 +      if (copy.marker === true) {
 +        await writeFile(
 +          join(copyRoot, ".1ma-release.json"),
 +          JSON.stringify({ repository: "https://github.com/1ma-ai/1ma", commit: "a".repeat(40) }),
 +        );
 +      }
++      if (copy.artifact === true) {
++        createPluginArtifact(db, {
++          id: `artifact-${name}`,
++          pluginId: name,
++          sourceKind: "git",
++          npmResolvedVersion: null,
++          gitResolvedCommit: "c".repeat(40),
++          gitCheckoutRoot: checkout(),
++          integrity: null,
++          path: copyRoot,
++          contentHash: null,
++          validationResult: "valid",
++          validatedAt: null,
++        });
++      }
 +      const git = copy.kind === "git";
 +      upsertInstalledPlugin(db, {
-+        id: "1ma-brand",
++        id: name,
 +        source: git ? `git:${copy.repo ?? repository}@^0` : `path:${copyRoot}`,
 +        provenance: { kind: "direct" },
 +        sourceIntent: git
 +          ? {
 +              kind: "git",
 +              url: copy.repo ?? repository,
-+              subdirectory: "plugins/1ma-brand",
-+              selector: { kind: "range", range: "^0", tagPrefix: "1ma-brand/", resolvedTag: "1ma-brand/v0.3.1" },
++              subdirectory: `plugins/${name}`,
++              selector: { kind: "range", range: "^0", tagPrefix: `${name}/`, resolvedTag: `${name}/v0.3.1` },
 +            }
 +          : { kind: "path", canonicalPath: copyRoot },
-+        exactResolution: git ? { kind: "git", commit: "b".repeat(40) } : { kind: "path" },
++        exactResolution: git ? { kind: "git", commit: "c".repeat(40) } : { kind: "path" },
 +        updateState: {
 +          lastCheckAt: null,
 +          availableCompatibleVersion: null,
 +          newestIncompatibleVersion: null,
 +          statusDetail: null,
 +        },
-+        activeArtifactId: null,
++        activeArtifactId: copy.artifact === true ? `artifact-${name}` : null,
 +        rootDir: copyRoot,
 +        version: copy.version ?? "0.3.1",
 +        enabled: false,
 +        enabledFollowsDefault: false,
 +      });
-+      setPluginSettingsValues(db, "1ma-brand", { accent: "#ff6600" });
-+      if (copy.backupFails === true) {
-+        vi.spyOn(db.$client, "backup").mockRejectedValue(new Error("disk full"));
-+      }
-+      const warn = vi.spyOn(logger, "warn");
++      setPluginSettingsValues(db, name, { accent: "#ff6600" });
++      await mkdir(join(dataDir(), "plugins", name, "secrets"), { recursive: true });
++      await writeFile(join(dataDir(), "plugins", name, "secrets", "token"), "s3cret");
++      upsertPluginSchedule(db, { pluginId: name, name: "nightly", cron: "0 3 * * *", nextRunAt: 1 });
++      return copyRoot;
++    }
++
++    async function launch(builtins: Record<string, string>) {
 +      service = createPluginService({
 +        aiServices: createAiServiceRegistry(),
 +        telemetry: createNoopTelemetryService(),
@@ -264,46 +608,135 @@ index 5dd296e..9e2b1f9 100644
 +          notifySystem: () => {},
 +        },
 +        logger,
-+        dataDir: join(workDir, "data"),
++        dataDir: dataDir(),
 +        appVersion: "0.9.0",
 +        loadTimeoutMs: 2000,
-+        bundledPlugins: [
-+          {
-+            name: "1ma-brand",
-+            pluginId: "1ma-brand",
-+            autoInstall: true,
-+            defaultEnabled: true,
-+            rootDir: builtinRoot,
-+          },
-+        ],
++        bundledPlugins: Object.entries(builtins).map(([name, rootDir]) => ({
++          name,
++          pluginId: name,
++          autoInstall: true,
++          defaultEnabled: true,
++          rootDir,
++        })),
 +      });
 +      await service.start();
-+      const backups = await readdir(join(workDir, "data", "backups")).catch(() => []);
++    }
++
++    async function start(copy: Copy) {
++      const builtinRoot = await writeBuiltin("1ma-brand");
++      const copyRoot = await installCopy("1ma-brand", copy);
++      if (copy.backupFails === true) {
++        vi.spyOn(db.$client, "backup").mockRejectedValue(new Error("disk full"));
++      }
++      const warn = vi.spyOn(logger, "warn");
++      await launch({ "1ma-brand": builtinRoot });
++      const backups = await readdir(join(dataDir(), "backups")).catch(() => []);
 +      const lines = warn.mock.calls.map((call) => `warn ${String(call[0])}`);
-+      return { row: getInstalledPluginRegistration(db, "1ma-brand"), lines, backups };
++      return { row: getInstalledPluginRegistration(db, "1ma-brand"), lines, backups, copyRoot };
 +    }
 +
 +    it.each([
 +      ["installed from 1ma's repository", { kind: "git" as const }],
++      ["installed from 1ma's repository written with .git/", { kind: "git" as const, repo: "https://github.com/1ma-ai/1ma.git/" }],
++      ["installed from 1ma's repository in another case", { kind: "git" as const, repo: "https://GitHub.com/1ma-ai/1MA" }],
++      ["installed from 1ma's repository as host/path", { kind: "git" as const, repo: "github.com/1ma-ai/1ma" }],
 +      ["installed by the Linux release script", { kind: "path" as const, marker: true }],
-+    ])("takes over a copy %s, keeping its enablement and settings, after a database copy", async (_case, copy) => {
++    ])("takes over a copy %s, keeping its enablement and settings, after saving the install", async (_case, copy) => {
 +      const { row, backups } = await start(copy);
 +      expect(row).toMatchObject({ source: "builtin:1ma-brand", version: "0.4.0", enabled: false });
 +      expect(getPluginSettingsValues(db, "1ma-brand")).toEqual({ accent: "#ff6600" });
-+      expect(backups).toEqual([expect.stringMatching(/^before-1ma-builtins-0\.9\.0-\d+\.db$/u)]);
++      expect(backups).toEqual(["before-1ma-builtins"]);
++      const saved = await readRollback();
++      expect(saved.plugins.map((plugin) => [plugin.id, plugin.registration.source.split(":")[0]])).toEqual([
++        ["1ma-brand", copy.kind],
++      ]);
 +    });
 +
 +    it.each([
 +      ["from another repository", { kind: "git" as const, repo: "https://github.com/someone/1ma-brand.git" }, "not from 1ma's repository"],
++      ["from a repository whose name only starts like 1ma's", { kind: "git" as const, repo: "https://github.com/1ma-ai/1ma-fork" }, "not from 1ma's repository"],
++      ["from 1ma's path on another host", { kind: "git" as const, repo: "https://gitlab.com/1ma-ai/1ma" }, "not from 1ma's repository"],
 +      ["from a folder the release script did not install", { kind: "path" as const }, "not a 1ma release install"],
 +      ["newer than the built-in", { kind: "git" as const, version: "0.5.0" }, "newer than the built-in 0.4.0"],
-+      ["when the database cannot be copied first", { kind: "git" as const, backupFails: true }, "could not save the database first: disk full"],
++      ["when its install cannot be saved first", { kind: "git" as const, backupFails: true }, "could not save the installs from before first: disk full"],
 +    ])("leaves a copy %s in place and says why", async (_case, copy, reason) => {
 +      const { row, lines, backups } = await start(copy);
 +      expect(row?.source.startsWith("builtin:")).toBe(false);
 +      expect(getPluginSettingsValues(db, "1ma-brand")).toEqual({ accent: "#ff6600" });
 +      expect(lines.some((line) => line.startsWith("warn built-in 1ma plugin 1ma-brand left the installed copy in place") && line.includes(reason))).toBe(true);
 +      expect(backups).toEqual([]);
++    });
++
++    it("saves the state before the first built-in row on a clean install too", async () => {
++      const { row } = await start({ kind: "none" });
++      expect(row).toMatchObject({ source: "builtin:1ma-brand" });
++      expect((await readRollback()).plugins).toEqual([]);
++    });
++
++    it("waits with a clean install when the state cannot be saved first", async () => {
++      const { row, lines } = await start({ kind: "none", backupFails: true });
++      expect(row).toBeUndefined();
++      expect(lines.some((line) => line.startsWith("warn built-in 1ma plugin 1ma-brand is not installed yet") && line.includes("disk full"))).toBe(true);
++    });
++
++    it("saves every copy once, before the first takeover, even when the transition takes two starts", async () => {
++      const brand = await writeBuiltin("1ma-brand");
++      const theme = join(workDir, "builtin", "bb-plugin-1ma-theme");
++      await mkdir(theme, { recursive: true });
++      await installCopy("1ma-brand", { kind: "git" });
++      await installCopy("1ma-theme", { kind: "git" });
++      await launch({ "1ma-brand": brand, "1ma-theme": theme });
++      expect(getInstalledPluginRegistration(db, "1ma-brand")?.source).toBe("builtin:1ma-brand");
++      expect(getInstalledPluginRegistration(db, "1ma-theme")?.source).toBe(`git:${repository}@^0`);
++      await service.stop();
++
++      await writeBuiltin("1ma-theme");
++      await launch({ "1ma-brand": brand, "1ma-theme": theme });
++      expect(getInstalledPluginRegistration(db, "1ma-theme")?.source).toBe("builtin:1ma-theme");
++      expect(await readdir(join(dataDir(), "backups"))).toEqual(["before-1ma-builtins"]);
++      expect((await readRollback()).plugins.map((plugin) => [plugin.id, plugin.registration.source])).toEqual([
++        ["1ma-brand", `git:${repository}@^0`],
++        ["1ma-theme", `git:${repository}@^0`],
++      ]);
++    });
++
++    it("puts a taken-over git copy back after bb's GC removed its checkout, with settings, secrets and schedules", async () => {
++      const { row, copyRoot } = await start({ kind: "git", artifact: true });
++      expect(row).toMatchObject({ source: "builtin:1ma-brand", activeArtifactId: null });
++      await garbageCollectPluginArtifacts({
++        db,
++        dataDir: dataDir(),
++        now: Date.now() + 30 * DAY,
++        retentionMs: 7 * DAY,
++        snapshotsCreatedBefore: Date.now(),
++        warn: () => {},
++      });
++      expect(getPluginArtifact(db, "artifact-1ma-brand")).toBeUndefined();
++      await expect(readdir(checkout())).rejects.toThrow();
++
++      const lines: string[] = [];
++      await restoreOneMaRollbackSet({ db, dataDir: dataDir(), log: (line) => lines.push(line) });
++
++      expect(getInstalledPluginRegistration(db, "1ma-brand")).toMatchObject({
++        source: `git:${repository}@^0`,
++        activeArtifactId: "artifact-1ma-brand",
++        version: "0.3.1",
++        enabled: false,
++      });
++      expect(getInstalledPlugin(db, "1ma-brand")?.rootDir).toBe(copyRoot);
++      expect(JSON.parse(await readFile(join(copyRoot ?? "", "package.json"), "utf8"))).toMatchObject({ version: "0.3.1" });
++      expect(getPluginSettingsValues(db, "1ma-brand")).toEqual({ accent: "#ff6600" });
++      expect(await readSecret(dataDir(), "1ma-brand", "token")).toBe("s3cret");
++      expect(listPluginSchedules(db, "1ma-brand")).toMatchObject([{ name: "nightly", cron: "0 3 * * *" }]);
++      expect(lines).toEqual([`1ma-brand: installed from git:${repository}@^0 again`]);
++    });
++
++    it("refuses to restore once an older version has removed the plugin, and names the database copy", async () => {
++      await start({ kind: "git" });
++      db.delete(installedPlugins).where(eq(installedPlugins.id, "1ma-brand")).run();
++      await expect(
++        restoreOneMaRollbackSet({ db, dataDir: dataDir(), log: () => {} }),
++      ).rejects.toThrow(join(rollbackDir(), "bb.db"));
 +    });
 +  });
 +
