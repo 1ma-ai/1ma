@@ -69,3 +69,13 @@ export const fontOf = (locator) =>
 
 export const screenshot = (page, name) =>
   page.screenshot({ path: path.join(screenshotDir, `${name}.png`) });
+
+export async function waitDrawn(page, locator, label) {
+  try {
+    await locator.waitFor({ timeout: 60_000 });
+  } catch (error) {
+    await screenshot(page, `failed-${label}`);
+    const text = await page.locator("body").innerText();
+    throw new Error(`${label}: ${error.message}\npage text: ${text.slice(0, 2000)}`);
+  }
+}

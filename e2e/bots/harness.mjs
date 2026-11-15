@@ -114,3 +114,12 @@ export async function completedOf(botId, threadId) {
 export function stubCall(tool, args) {
   return `[stub:call ${tool} ${JSON.stringify(args)}]`;
 }
+
+// What a failed wait needs to be read from the log alone.
+export function diagnose(extra = {}) {
+  return JSON.stringify(
+    { ...extra, stub: stubRecords().slice(-12).map((entry) => ({ ...entry, text: entry.text?.slice(-400) })) },
+    null,
+    1,
+  );
+}

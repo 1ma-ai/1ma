@@ -4,6 +4,7 @@ import { waitFor } from "../lib/servers.mjs";
 import {
   BOTS,
   completedOf,
+  diagnose,
   createBot,
   fleet,
   projects,
@@ -29,6 +30,7 @@ import {
   sectionIds,
   selectSidebar,
   threadLink,
+  waitDrawn,
 } from "./sidebar.mjs";
 
 const SECOND = 1000;
@@ -99,9 +101,12 @@ describe("1ma-bots on a real server", () => {
       ],
     };
     const threadId = await startConversation(bot, stubCall("AskUserQuestion", question));
-    const card = await waitFor("the pending question", 120 * SECOND, async () => {
+    const card = await waitFor("the pending question", 60 * SECOND, async () => {
       const cards = await server.api("GET", `/threads/${threadId}/interactions`);
       return cards.find((candidate) => candidate.status === "pending") ?? null;
+    }).catch(async (error) => {
+      const cards = await server.api("GET", `/threads/${threadId}/interactions`);
+      throw new Error(`${error.message}\n${diagnose({ cards, thread: await thread(threadId) })}`);
     });
     await assert.rejects(
       rpc("bots.v1.setCompleted", { threadId, completed: true }),
@@ -177,13 +182,17 @@ describe("1ma-bots on a real server", () => {
       const queued = await server.api("GET", `/threads/${brunoThread}/queued-messages`);
       return queued.length === 1;
     });
+    const observed = {
+      queued: await server.api("GET", `/threads/${brunoThread}/queued-messages`),
+      status: (await thread(brunoThread)).status,
+    };
     const mine = await waitFor("Bruno's own letter", 120 * SECOND, async () =>
       lettersToAlice(known).find(Boolean),
     );
     assert.match(
       mine.output,
       /^Letter 1\//,
-      "Bruno's turn is still in his own exchange while Alice's letter waits in the queue",
+      `Bruno's turn is still in his own exchange while Alice's letter waits in the queue\n${diagnose(observed)}`,
     );
 
     await waitFor(
@@ -246,7 +255,7 @@ describe("1ma-sidebar with the bots block", () => {
     it(`shows the bots above the projects in the ${theme} theme`, async () => {
       const { context, page, problems } = await openApp(browser, theme);
       try {
-        await threadLink(page, fixture.plain).waitFor({ timeout: 90 * SECOND });
+        await waitDrawn(page, threadLink(page, fixture.plain), "plain-thread");
         await expandBot(page, "Visual Bot");
         await threadLink(page, fixture.v1).waitFor({ timeout: 30 * SECOND });
         await screenshot(page, `sidebar-${theme}`);
@@ -316,7 +325,7 @@ describe("1ma-sidebar with the bots block", () => {
     server.bb(["plugin", "disable", BOTS]);
     const { context, page } = await openApp(browser, "light");
     try {
-      await threadLink(page, fixture.plain).waitFor({ timeout: 90 * SECOND });
+      await waitDrawn(page, threadLink(page, fixture.plain), "plain-thread");
       await Promise.all(
         [fixture.v1, fixture.v2, fixture.h1].map((id) =>
           threadLink(page, id).waitFor({ timeout: 30 * SECOND }),
