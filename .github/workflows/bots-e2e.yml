@@ -25,7 +25,7 @@ env:
 jobs:
   e2e:
     name: One 1ma server with the bots and sidebar plugins
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Choose the scratch directories
