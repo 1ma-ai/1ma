@@ -296,7 +296,6 @@ describe("1ma-superagent bot actions with a model turn", () => {
   });
 
   it("shows the executor's result once as a card, starts no bot turn and acts on nothing in it", async () => {
-    await clearCards();
     const turnsBefore = await turnsDone(control, ids.bot);
     const actionsBefore = await knownActions();
     const card = await waitCard(
@@ -400,8 +399,9 @@ describe("1ma-superagent bot actions with a model turn", () => {
       return actions.filter((candidate) => !known.has(candidate.id)).length === 2;
     });
     const card = await waitCard("first of two", (data) => data.quote === "[stub:reply queued one]");
-    assert.equal((await pendingCards()).length, 1);
-    assert.equal(card.payload.data.waiting, 1);
+    assert.equal((await pendingCards()).length, 1, "one card open in the chat");
+    const waiting = await control.rpc(PLUGIN, "work.v1.waiting", null);
+    assert.equal(waiting.questions.filter((question) => question.kind === "start_chat").length, 2);
     await respond(card, "no");
     const second = await waitCard(
       "second of two",
