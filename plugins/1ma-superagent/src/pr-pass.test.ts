@@ -109,7 +109,7 @@ function setup(options: {
       now,
       signal: new AbortController().signal,
     });
-  return { prStore, run, reads };
+  return { db, prStore, run, reads };
 }
 
 describe("runPrPass", () => {
@@ -167,6 +167,20 @@ describe("runPrPass", () => {
       complete: true,
       models: [{ providerId: "claude-code", model: "model-after" }],
     });
+  });
+
+  it("hides and stops using a link once its repository is excluded", async () => {
+    const { db, prStore, run } = setup({
+      threads: { mac: [], linux: [{ id: "thr_linux", branch: "feature/7" }] },
+      metadata: { thr_linux: claimsOf(7) },
+      pulls: [pull(7)],
+    });
+    await run(10_000);
+    expect(prStore.forThread("linux", "thr_linux")).toHaveLength(1);
+    const excluded = new PrStore(db, () => repoPolicy([], ["example/app"]));
+    expect(excluded.get("example/app", 7)).toBeNull();
+    expect(excluded.all()).toEqual([]);
+    expect(excluded.forThread("linux", "thr_linux")).toEqual([]);
   });
 
   it("refuses a claim made before the pull request was opened", async () => {

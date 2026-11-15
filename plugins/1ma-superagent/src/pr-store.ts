@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import type { PullRequest } from "./github/reader.js";
 import type { ServerId } from "./observation.js";
+import { type RepoPolicy, isExcludedRepo } from "./repos.js";
 
 export interface PrLinkRow {
   repo: string;
@@ -80,9 +81,19 @@ export type LinkDecision =
 
 export class PrStore {
   readonly #db: Database.Database;
+  readonly #policy: () => Pick<RepoPolicy, "excluded">;
 
-  constructor(db: Database.Database) {
+  constructor(
+    db: Database.Database,
+    policy: () => Pick<RepoPolicy, "excluded"> = () => ({ excluded: new Set() }),
+  ) {
     this.#db = db;
+    this.#policy = policy;
+  }
+
+  #active(links: PrLinkRow[]): PrLinkRow[] {
+    const policy = this.#policy();
+    return links.filter((link) => !isExcludedRepo(policy, link.repo));
   }
 
   cursor(repo: string): number | null {
@@ -114,7 +125,9 @@ export class PrStore {
     const raw = this.#db
       .prepare(`SELECT * FROM pr_links WHERE repo = ? AND number = ?`)
       .get(repo, number) as RawLink | undefined;
-    return raw === undefined ? null : toLink(raw);
+    if (raw === undefined) return null;
+    const [link] = this.#active([toLink(raw)]);
+    return link ?? null;
   }
 
   forThread(serverId: ServerId, threadId: string): PrLinkRow[] {
@@ -123,13 +136,15 @@ export class PrStore {
         `SELECT * FROM pr_links WHERE delivery_server_id = ? AND delivery_thread_id = ? ORDER BY repo, number`,
       )
       .all(serverId, threadId) as RawLink[];
-    return rows.map(toLink);
+    return this.#active(rows.map(toLink));
   }
 
   all(): PrLinkRow[] {
-    return (
-      this.#db.prepare(`SELECT * FROM pr_links ORDER BY pr_updated_at DESC`).all() as RawLink[]
-    ).map(toLink);
+    return this.#active(
+      (
+        this.#db.prepare(`SELECT * FROM pr_links ORDER BY pr_updated_at DESC`).all() as RawLink[]
+      ).map(toLink),
+    );
   }
 
   record(pull: PullRequest, decision: LinkDecision, branchHint: string | null, now: number): void {

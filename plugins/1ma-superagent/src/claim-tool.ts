@@ -3,7 +3,7 @@ import { z } from "zod";
 import { strings } from "../strings.js";
 import { addClaim, readClaims } from "./claims.js";
 import { parsePullRequestUrl, repoFromRemoteUrl } from "./github/names.js";
-import { type RepoPolicy, isWatchedRepo } from "./repos.js";
+import { type RepoPolicy, isExcludedRepo, isWatchedRepo } from "./repos.js";
 
 export const CLAIM_TOOL = "sa_claim_pr";
 
@@ -32,7 +32,7 @@ export function registerClaimTool(
       const project = await bb.sdk.projects.get({ projectId: ctx.projectId, signal: ctx.signal });
       const projectRepo = repoFromRemoteUrl(project.gitRemoteUrl);
       const current = policy();
-      if (projectRepo !== null && current.excluded.has(projectRepo)) {
+      if (isExcludedRepo(current, projectRepo)) {
         return refuse("This project is excluded from the superagent; nothing was claimed.");
       }
       if (!isWatchedRepo(current, projectRepo) || projectRepo !== ref.repo) {

@@ -10,7 +10,7 @@ import {
   type ThreadMetadataRow,
 } from "./observation.js";
 import type { Card, QuestionKind, QuestionStore } from "./questions.js";
-import type { RepoPolicy } from "./repos.js";
+import { type RepoPolicy, isExcludedRepo } from "./repos.js";
 
 export const UNKNOWN_AFTER_MS = 10 * 60 * 1000;
 export const WAIT_MS = 30 * 60 * 1000;
@@ -120,12 +120,12 @@ async function targetChange(
   action: ActionRow,
 ): Promise<string | null> {
   const proposed = action.params.repo ?? null;
-  if (proposed !== null && deps.policy.excluded.has(proposed)) return strings.targetExcluded;
+  if (isExcludedRepo(deps.policy, proposed)) return strings.targetExcluded;
   const repo = repoFromRemoteUrl(
     await executor.projectRemote(action.params.projectId, deps.signal),
   );
   if (repo !== proposed) return strings.targetMoved;
-  if (repo !== null && deps.policy.excluded.has(repo)) return strings.targetExcluded;
+  if (isExcludedRepo(deps.policy, repo)) return strings.targetExcluded;
   return null;
 }
 

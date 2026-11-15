@@ -74,6 +74,10 @@ export function repoPolicy(
   };
 }
 
+export function isExcludedRepo(policy: Pick<RepoPolicy, "excluded">, repo: string | null): boolean {
+  return repo !== null && policy.excluded.has(repo);
+}
+
 export function isWatchedRepo(policy: RepoPolicy, repo: string | null): repo is string {
-  return repo !== null && !policy.excluded.has(repo) && policy.connected.has(repo);
+  return repo !== null && !isExcludedRepo(policy, repo) && policy.connected.has(repo);
 }

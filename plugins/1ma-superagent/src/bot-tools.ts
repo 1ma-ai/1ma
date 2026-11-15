@@ -1,6 +1,7 @@
 import type { BbPluginApi, PluginAgentToolResult } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { strings } from "../strings.js";
+import type { BotGate } from "./bot.js";
 import { claimProblemCode } from "./claims.js";
 import { isRepoName, parsePullRequestUrl, repoFromRemoteUrl } from "./github/names.js";
 import type { PullRequestDto, WorkDto } from "./work-rpc.js";
@@ -145,7 +146,7 @@ function refuse(text: string): PluginAgentToolResult {
 export function registerBotReadTools(
   bb: BbPluginApi,
   source: BotReadSource,
-  allowed: (threadId: string) => Promise<boolean>,
+  allowed: BotGate,
 ): void {
   bb.agents.registerTool({
     name: OVERVIEW_TOOL,
@@ -156,7 +157,7 @@ export function registerBotReadTools(
     },
     parameters: z.object({}).strict(),
     async execute(_input, ctx) {
-      if (!(await allowed(ctx.threadId))) return refuse(strings.notMainBot);
+      if (!(await allowed(ctx))) return refuse(strings.notMainBot);
       const [list, waiting, pulls] = await Promise.all([
         source.list(),
         source.waiting(),
@@ -175,7 +176,7 @@ export function registerBotReadTools(
     },
     parameters: z.object({ ref: z.string().min(1).max(300) }).strict(),
     async execute({ ref }, ctx) {
-      if (!(await allowed(ctx.threadId))) return refuse(strings.notMainBot);
+      if (!(await allowed(ctx))) return refuse(strings.notMainBot);
       const pr = parsePullRequestUrl(ref);
       if (pr !== null) {
         const found = (await source.pullRequests()).pullRequests.find(

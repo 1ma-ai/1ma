@@ -1,5 +1,5 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { isMainBot, mayBeMainBot } from "./src/bot.js";
+import { type BotGate, isBotChat } from "./src/bot.js";
 import { READ_TOOLS, registerBotReadTools } from "./src/bot-tools.js";
 import { claimSelection, registerClaimTool } from "./src/claim-tool.js";
 import { createLocalExecutor } from "./src/executors/local.js";
@@ -111,8 +111,8 @@ export function createPlugin(options: SuperagentOptions = {}) {
     const db = bb.storage.database();
     bb.storage.migrate(db, MIGRATIONS);
     const store = new Store(db);
-    const prStore = new PrStore(db);
     const policy = () => repoPolicy(config.repos, config.excludedRepos);
+    const prStore = new PrStore(db, policy);
     const host = hostClient(bb);
     const gh = options.gh?.(bb) ?? hostGh(bb, host);
     const github: GitHubReader = createGitHubReader(gh);
@@ -258,8 +258,19 @@ export function createPlugin(options: SuperagentOptions = {}) {
     registerClaimTool(bb, policy, (threadId) => {
       if (isControl()) void runner.request(threadScope("mac", threadId));
     });
-    const botAllowed = async (threadId: string) =>
-      isControl() && (await isMainBot(bb, threadId, config.mainBotThreadId));
+    const botAllowed: BotGate = async ({ threadId, projectId, signal }) => {
+      if (!isControl() || threadId !== config.mainBotThreadId) return false;
+      try {
+        const project = await bb.sdk.projects.get({ projectId, signal });
+        return isBotChat(
+          { threadId, gitRemoteUrl: project.gitRemoteUrl },
+          config.mainBotThreadId,
+          policy(),
+        );
+      } catch {
+        return false;
+      }
+    };
     registerBotReadTools(
       bb,
       {
@@ -292,9 +303,10 @@ export function createPlugin(options: SuperagentOptions = {}) {
       const claim = claimSelection(policy(), context.project.gitRemoteUrl);
       const bot =
         isControl() &&
-        mayBeMainBot(
-          { threadId: context.thread.id, originPluginId: context.origin.pluginId },
+        isBotChat(
+          { threadId: context.thread.id, gitRemoteUrl: context.project.gitRemoteUrl },
           config.mainBotThreadId,
+          policy(),
         );
       const tools = [...claim.tools, ...(bot ? [...READ_TOOLS, START_TOOL] : [])];
       const instructions = [claim.instructions, bot ? strings.botInstruction : undefined].filter(

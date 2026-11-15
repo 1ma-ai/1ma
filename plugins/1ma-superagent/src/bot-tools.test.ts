@@ -3,7 +3,6 @@ import {
   makePluginAgentConfigurationContext,
 } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
 import { createPlugin, PASS_SCHEDULE_NAME } from "../server.js";
 import type { Executor } from "./observation.js";
 import { fakeExecutor, snapshot, threadSummary } from "./test-helpers.js";
@@ -25,17 +24,17 @@ function executor(): Executor {
   });
 }
 
-async function setup(options: { forThread?: (input: { threadId: string }) => unknown } = {}) {
+const BOT_REMOTE = "https://github.com/example/bot.git";
+
+async function setup(settings: Record<string, string> = {}) {
   const { bb, harness } = createFakePluginHost({
     pluginId: "1ma-superagent",
-    settings: { role: "control", mainBotThreadId: BOT },
+    settings: { role: "control", mainBotThreadId: BOT, ...settings },
     sdk: {
       plugins: {
-        callRpc: async (args: { input?: unknown }) => {
-          if (options.forThread === undefined) throw new Error("plugin 1ma-bots is not installed");
-          return options.forThread(z.object({ threadId: z.string() }).parse(args.input));
-        },
+        callRpc: async () => ({ botId: "main", capabilities: ["dev"] }),
       },
+      projects: { get: async () => ({ id: "proj_bot", gitRemoteUrl: BOT_REMOTE }) },
     },
   });
   await createPlugin({
@@ -51,10 +50,13 @@ function names(tools: ReadonlyArray<string | { name: string }>) {
 }
 
 describe("main bot tools", () => {
-  it("are offered to the pinned bot chat and to chats of the bots plugin, and to nobody else", async () => {
+  it("are offered to the pinned bot chat only, not to chats of the bots plugin", async () => {
     const harness = await setup();
     const pinned = await harness.behavior.resolveAgentConfiguration(
-      makePluginAgentConfigurationContext({ thread: { id: BOT } }),
+      makePluginAgentConfigurationContext({
+        thread: { id: BOT },
+        project: { gitRemoteUrl: BOT_REMOTE },
+      }),
     );
     expect(names(pinned.tools)).toEqual([OVERVIEW_TOOL, DETAIL_TOOL, "sa_start_chat"]);
     const fromBots = await harness.behavior.resolveAgentConfiguration(
@@ -63,11 +65,30 @@ describe("main bot tools", () => {
         origin: { kind: null, pluginId: "1ma-bots" },
       }),
     );
-    expect(names(fromBots.tools)).toEqual([OVERVIEW_TOOL, DETAIL_TOOL, "sa_start_chat"]);
+    expect(fromBots.tools).toEqual([]);
     const ordinary = await harness.behavior.resolveAgentConfiguration(
       makePluginAgentConfigurationContext({ thread: { id: "thr_other" } }),
     );
     expect(ordinary.tools).toEqual([]);
+    await harness.lifecycle.dispose();
+  });
+
+  it("give a pinned bot chat inside an excluded project neither tools nor answers", async () => {
+    const harness = await setup({ excludedRepos: "example/bot" });
+    const pinned = await harness.behavior.resolveAgentConfiguration(
+      makePluginAgentConfigurationContext({
+        thread: { id: BOT },
+        project: { gitRemoteUrl: BOT_REMOTE },
+      }),
+    );
+    expect(pinned.tools).toEqual([]);
+    expect(pinned.instructions).toBeUndefined();
+    const result = await harness.behavior.callAgentTool(
+      OVERVIEW_TOOL,
+      {},
+      { threadId: BOT, projectId: "proj_bot" },
+    );
+    expect(result).toMatchObject({ isError: true });
     await harness.lifecycle.dispose();
   });
 
@@ -84,32 +105,18 @@ describe("main bot tools", () => {
     await harness.lifecycle.dispose();
   });
 
-  it("refuse a chat of the bots plugin that the plugin does not give the dev capability", async () => {
-    const harness = await setup({
-      forThread: () => ({ botId: "marketing", capabilities: ["marketing"] }),
-    });
+  it("refuse a chat that the bots plugin calls a dev bot", async () => {
+    const harness = await setup();
     const result = await harness.behavior.callAgentTool(
-      OVERVIEW_TOOL,
-      {},
-      { threadId: "thr_marketing", projectId: "p" },
+      DETAIL_TOOL,
+      { ref: "mac:thr_work" },
+      { threadId: "thr_main", projectId: "proj_bot" },
     );
     expect(result).toMatchObject({ isError: true });
     await harness.lifecycle.dispose();
   });
 
-  it("serve a chat that the bots plugin gives the dev capability", async () => {
-    const harness = await setup({ forThread: () => ({ botId: "main", capabilities: ["dev"] }) });
-    const result = await harness.behavior.callAgentTool(
-      DETAIL_TOOL,
-      { ref: "mac:thr_work" },
-      { threadId: "thr_main", projectId: "p" },
-    );
-    expect(JSON.stringify(result)).toContain("mac:thr_work");
-    expect(result).not.toMatchObject({ isError: true });
-    await harness.lifecycle.dispose();
-  });
-
-  it("refuse any other chat when the bots plugin is missing", async () => {
+  it("refuse any other chat", async () => {
     const harness = await setup();
     const result = await harness.behavior.callAgentTool(
       OVERVIEW_TOOL,

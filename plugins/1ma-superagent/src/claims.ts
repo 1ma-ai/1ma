@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { PullRequest } from "./github/reader.js";
 import type { ServerId } from "./observation.js";
-import { type RepoPolicy, isWatchedRepo } from "./repos.js";
+import { type RepoPolicy, isExcludedRepo, isWatchedRepo } from "./repos.js";
 
 export const MAX_CLAIMS_PER_CHAT = 20;
 
@@ -66,10 +66,10 @@ export function checkClaim(
   claim: Claim,
   pull: PullRequest,
 ): ClaimVerdict {
-  if (chat.projectRepo !== null && policy.excluded.has(chat.projectRepo)) {
+  if (isExcludedRepo(policy, chat.projectRepo)) {
     return { ok: false, problem: "the chat belongs to an excluded project" };
   }
-  if (policy.excluded.has(claim.repo)) {
+  if (isExcludedRepo(policy, claim.repo)) {
     return { ok: false, problem: "the pull request is in an excluded project" };
   }
   if (chat.projectRepo !== claim.repo) {
