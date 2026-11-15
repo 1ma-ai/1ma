@@ -10,6 +10,7 @@ const recordSchema = z
     event: z.string().optional(),
     type: z.string().optional(),
     final_sha: z.string().optional(),
+    base_sha: z.string().optional(),
   })
   .loose();
 
@@ -18,6 +19,7 @@ export interface TrainRecord {
   readonly attempt: string;
   readonly event: string;
   readonly finalSha: string | null;
+  readonly baseSha: string | null;
 }
 
 export function parseJournal(text: string): TrainRecord[] {
@@ -42,39 +44,70 @@ export function parseJournal(text: string): TrainRecord[] {
       attempt: String(attempt),
       event,
       finalSha: parsed.data.final_sha ?? null,
+      baseSha: parsed.data.base_sha ?? null,
     });
   }
   return records;
 }
 
+export const MAX_CHAIN = 20;
+
 export type MainVerdict =
   | { kind: "explained" }
   | { kind: "needs_reconcile"; detail: string }
-  | { kind: "unexplained" };
+  | { kind: "rollback"; attempt: string }
+  | { kind: "unexplained"; detail: string };
 
-export function judgeMainHead(
+function sameSha(left: string | null, right: string): boolean {
+  if (left === null) return false;
+  const a = left.toLowerCase();
+  const b = right.toLowerCase();
+  return Math.min(a.length, b.length) >= 7 && (a.startsWith(b) || b.startsWith(a));
+}
+
+export function judgeMainMove(
   records: readonly TrainRecord[],
   repo: string,
+  previous: string,
   head: string,
+  truncated: boolean,
 ): MainVerdict {
   const ofRepo = records.filter((record) => record.repo === repo);
-  const matches = (record: TrainRecord) =>
-    record.finalSha !== null && head.startsWith(record.finalSha.slice(0, 40));
-  const merged = ofRepo.filter((record) => record.event === "merged" && matches(record));
-  const latest = ofRepo.at(-1);
-  if (latest?.event === "rolled-back") {
-    return {
-      kind: "needs_reconcile",
-      detail: `main moved after a rollback of attempt ${latest.attempt}`,
-    };
+  const lastMerge = (sha: string) =>
+    ofRepo.filter((record) => record.event === "merged" && sameSha(record.finalSha, sha)).at(-1);
+  const missing = (detail: string): MainVerdict =>
+    truncated
+      ? { kind: "needs_reconcile", detail: `the journal tail is incomplete: ${detail}` }
+      : { kind: "unexplained", detail };
+
+  if (lastMerge(head) === undefined) {
+    const rollback = ofRepo
+      .filter((record) => record.event === "rolled-back" && sameSha(record.finalSha, previous))
+      .at(-1);
+    if (rollback !== undefined) return { kind: "rollback", attempt: rollback.attempt };
+    const intent = ofRepo
+      .filter((record) => record.event === "push-intent" && sameSha(record.finalSha, head))
+      .at(-1);
+    if (intent !== undefined)
+      return {
+        kind: "needs_reconcile",
+        detail: `push-intent of attempt ${intent.attempt} without merged`,
+      };
+    return missing("no train record ends at the new head");
   }
-  if (merged.length > 0) return { kind: "explained" };
-  const intent = ofRepo.find((record) => record.event === "push-intent" && matches(record));
-  if (intent !== undefined) {
-    return {
-      kind: "needs_reconcile",
-      detail: `push-intent of attempt ${intent.attempt} without merged`,
-    };
+
+  let cursor = head;
+  for (let step = 0; step < MAX_CHAIN; step += 1) {
+    if (sameSha(previous, cursor)) return { kind: "explained" };
+    const merge = lastMerge(cursor);
+    if (merge === undefined)
+      return missing(`a train was built on ${cursor.slice(0, 12)}, which no train wrote`);
+    if (merge.baseSha === null)
+      return {
+        kind: "needs_reconcile",
+        detail: `merged record of attempt ${merge.attempt} has no base`,
+      };
+    cursor = merge.baseSha;
   }
-  return { kind: "unexplained" };
+  return { kind: "needs_reconcile", detail: `more than ${MAX_CHAIN} trains since the last check` };
 }

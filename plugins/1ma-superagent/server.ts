@@ -28,9 +28,11 @@ import { QuestionDispatcher } from "./src/dispatcher.js";
 import {
   BYPASS_KIND,
   JOURNAL_STATE_KEY,
+  ROLLBACK_KIND,
   type JournalObservation,
   type ReadJournal,
   mainWatchRows,
+  rollbackKind,
   runMainWatch,
 } from "./src/main-watch.js";
 import { runSteps } from "./src/pass-steps.js";
@@ -135,6 +137,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
       [NOTICE_KIND, noticeKind()],
       [RESULT_KIND, noticeKind()],
       [BYPASS_KIND, noticeKind()],
+      [ROLLBACK_KIND, rollbackKind(db)],
     ]);
     const readJournal = options.readJournal?.(bb) ?? hostJournal(bb, host);
     const handlers = workRpcHandlers(

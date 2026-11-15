@@ -115,9 +115,16 @@ export const strings = {
     "the check of main is on, but this machine's host settings name no train journal",
   bypassTitle: (repo: string) => `Коммит в main мимо поезда: ${repo}`,
   bypassObserved: (repo: string, sha: string) =>
-    `main в ${repo} теперь указывает на ${sha.slice(0, 12)}. В журнале поезда нет ни записи merged, ни намерения записи с этим коммитом.`,
+    `main в ${repo} теперь указывает на ${sha.slice(0, 12)}. Цепочка журнала поезда от прежней головы до неё не сходится: коммит записан мимо поезда или поезд собран поверх такого коммита.`,
   bypassAffected:
     "main изменён без поезда: проверки итогового дерева и выкладки этот коммит не проходил.",
   bypassRecommendation: "Посмотрите, кто записал коммит, и при необходимости откатите его.",
   bypassAck: "Понятно, разберусь",
+  rollbackTitle: (repo: string) => `Это откат поезда? ${repo}`,
+  rollbackObserved: (repo: string, from: string, to: string, attempt: string) =>
+    `main в ${repo} перешёл с ${from.slice(0, 12)} на ${to.slice(0, 12)}. В журнале поезда попытка ${attempt}, записавшая ${from.slice(0, 12)}, отмечена как откатанная, но журнал не говорит, чем стала голова после отката.`,
+  rollbackAffected: "Пока вы не ответите, новая голова не считается опорной для проверки main.",
+  rollbackRecommendation: "Сверьте новую голову с откатом поезда и ответьте.",
+  rollbackYes: "Да, это откат поезда",
+  rollbackNo: "Нет, это не откат",
 } as const;
