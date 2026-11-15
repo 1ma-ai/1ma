@@ -12,23 +12,22 @@ const { chromium } = createRequire(path.join(requireEnv("E2E_PLAYWRIGHT_DIR"), "
 
 export const VIEWPORT = { width: 1440, height: 900 };
 const PROVIDER_KEY = `${SIDEBAR}/thread-list`;
+const PROVIDER_PREFERENCE = "sidebar.threadListProvider";
 
 const preferences = async () => (await server.api("GET", "/preferences/ui")).preferences ?? {};
 
+// The copy keeps its list preferences in its own storage, so the grouping is
+// set through its CLI; only the choice of the list itself is a UI preference.
 export async function selectSidebar() {
-  const put = async (key, value) => {
-    const current = (await preferences())[key];
-    await server.api("PUT", `/preferences/ui/${key}`, {
-      expectedRevision: current?.revision ?? 0,
-      value,
-    });
-  };
-  await put("sidebar.organizationMode", "project");
-  await put("sidebar.threadListProvider", PROVIDER_KEY);
-  const after = await preferences();
+  const current = (await preferences())[PROVIDER_PREFERENCE];
+  await server.api("PUT", `/preferences/ui/${PROVIDER_PREFERENCE}`, {
+    expectedRevision: current?.revision ?? 0,
+    value: PROVIDER_KEY,
+  });
+  server.bb([SIDEBAR, "prefs", "set", "organizationMode", "project"]);
   return {
-    provider: after["sidebar.threadListProvider"]?.value,
-    mode: after["sidebar.organizationMode"]?.value,
+    provider: (await preferences())[PROVIDER_PREFERENCE]?.value,
+    mode: server.bb([SIDEBAR, "prefs", "get", "organizationMode"]).trim(),
   };
 }
 
