@@ -27,7 +27,7 @@ export async function selectSidebar() {
   server.bb([SIDEBAR, "prefs", "set", "organizationMode", "project"]);
   return {
     provider: (await preferences())[PROVIDER_PREFERENCE]?.value,
-    mode: server.bb([SIDEBAR, "prefs", "get", "organizationMode"]).trim(),
+    mode: JSON.parse(server.bb([SIDEBAR, "prefs", "get", "organizationMode"])),
   };
 }
 
