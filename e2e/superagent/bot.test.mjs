@@ -87,10 +87,10 @@ async function sayToBot(text) {
   );
 }
 
-function startCall(prompt, title) {
+function startCall(prompt, title, projectId = ids.executorProject) {
   return `[stub:call sa_start_chat ${JSON.stringify({
     server: "linux",
-    projectId: ids.executorProject,
+    projectId,
     providerId: PROVIDER,
     model: MODEL,
     prompt,
@@ -204,6 +204,11 @@ describe("1ma-superagent bot actions with a model turn", () => {
     ids.executorProject = await executor.createProject(
       "exec-app",
       path.join(root, "repos/exec-app"),
+    );
+    ids.excludableProject = await executor.createProject(
+      "exec-excludable",
+      path.join(root, "repos/exec-excludable"),
+      "https://github.com/example/excludable.git",
     );
     ids.bot = await spawnChat(control, home, "Main bot", "[stub:reply hello]", {
       pending: true,
@@ -428,6 +433,32 @@ describe("1ma-superagent bot actions with a model turn", () => {
       matching.map((row) => row.threadId),
       [bound.threadId],
     );
+  });
+
+  it("cancels a start whose project was excluded while its card was open", async () => {
+    await clearCards();
+    const known = await knownActions();
+    const prompt = "[stub:reply excluded task]";
+    await sayToBot(startCall(prompt, "excluded task", ids.excludableProject));
+    const created = await newestAction(known);
+    const card = await waitCard("start card", (data) => data.quote === prompt);
+    const postsBefore = proxy.spawnPosts().length;
+    control.bb(["plugin", "config", PLUGIN, "set", "excludedRepos", "example/excludable"]);
+    try {
+      await respond(card, "start");
+      await waitFor("excluded start canceled", PASS, async () => {
+        const current = await action(created.id);
+        return current?.state === "canceled" ? current : null;
+      });
+      await waitCard("target changed card", (data) => data.title === "Запуск чата отменён");
+    } finally {
+      control.bb(["plugin", "config", PLUGIN, "set", "excludedRepos", ""]);
+    }
+    assert.equal(proxy.spawnPosts().length, postsBefore);
+    const matching = (await spawnedOnExecutor()).filter(
+      (row) => row.label?.actionId === created.id,
+    );
+    assert.deepEqual(matching, []);
   });
 
   it("keeps a decision recorded before its card closed through a crash, and starts the chat once", async () => {

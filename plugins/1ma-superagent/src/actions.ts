@@ -10,6 +10,7 @@ export const spawnParamsSchema = z
     model: z.string().min(1).max(100),
     prompt: z.string().min(1).max(4000),
     title: z.string().min(1).max(120),
+    repo: z.string().max(200).nullable().optional(),
   })
   .strict();
 

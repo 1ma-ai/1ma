@@ -79,6 +79,13 @@ export const strings = {
   ambiguousAffected: "Оба чата могут работать над одним поручением.",
   ambiguousRecommendation: "Посмотрите чаты и остановьте лишний вручную.",
   acknowledge: "Понятно",
+  targetChangedTitle: "Запуск чата отменён",
+  targetChangedObserved: (server: string, reason: string) =>
+    `Перед отправкой на ${server} цель запуска проверена заново: ${reason}`,
+  targetChangedAffected: "Чат не создан.",
+  targetChangedRecommendation: "Если запуск всё ещё нужен, попросите бота предложить его заново.",
+  targetExcluded: "проект теперь в исключённых.",
+  targetMoved: "проект указывает на другой репозиторий, чем при предложении.",
   lateTitle: "Отменённый чат всё-таки создан",
   lateObserved: (chat: string) =>
     `Чат отменённой попытки появился позже: ${chat}. Его очередь сообщений удалена, чат остановлен.`,

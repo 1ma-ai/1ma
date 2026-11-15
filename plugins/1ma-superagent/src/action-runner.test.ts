@@ -15,6 +15,7 @@ import {
   type ThreadMetadataRow,
 } from "./observation.js";
 import { QuestionStore } from "./questions.js";
+import { repoPolicy } from "./repos.js";
 import { MIGRATIONS } from "./schema.js";
 import { fakeExecutor } from "./test-helpers.js";
 
@@ -24,6 +25,7 @@ const params: SpawnParams = {
   model: "claude-opus-5-5",
   prompt: "Fix the flaky test, exactly as I said.",
   title: "Fix the flaky test",
+  repo: "example/app",
 };
 
 function setup() {
@@ -35,6 +37,7 @@ function setup() {
   const spawned: SpawnRequest[] = [];
   const existing: ThreadMetadataRow[] = [];
   const stopped: string[] = [];
+  const target = { remote: "https://github.com/example/app.git", excluded: [] as string[] };
   let spawnBehavior: (request: SpawnRequest) => Promise<{ threadId: string }> = async (request) => {
     const threadId = `thr_${spawned.length}`;
     existing.push({ threadId, metadata: { spawn: { ...request.label } } });
@@ -46,6 +49,7 @@ function setup() {
       return spawnBehavior(request);
     },
     findSpawned: async () => [...existing],
+    projectRemote: async () => target.remote,
     clearQueueAndStop: async (threadId) => {
       stopped.push(threadId);
     },
@@ -56,6 +60,10 @@ function setup() {
       questions,
       executors: new Map([["linux", executor]]),
       observed: new Map([["linux", "complete"]]),
+      policy: repoPolicy(
+        [{ repo: "example/app", accounts: { mac: [], linux: [] } }],
+        target.excluded,
+      ),
       claimant,
       now: () => clock,
       signal: new AbortController().signal,
@@ -74,6 +82,7 @@ function setup() {
     spawned,
     existing,
     stopped,
+    target,
     advance: (ms: number) => {
       clock += ms;
     },
@@ -85,6 +94,27 @@ function setup() {
 }
 
 describe("spawn actions", () => {
+  it("cancels a confirmed start whose project was excluded while its card was open", async () => {
+    const t = setup();
+    const id = t.confirmed();
+    t.target.excluded.push("example/app");
+    await t.run("gen_b");
+    expect(t.spawned).toEqual([]);
+    expect(t.actions.get(id)).toMatchObject({ state: "canceled" });
+    expect(t.questions.waiting().map((question) => question.card.title)).toEqual([
+      "Запуск чата отменён",
+    ]);
+  });
+
+  it("cancels a confirmed start whose project now points at another repository", async () => {
+    const t = setup();
+    const id = t.confirmed();
+    t.target.remote = "https://github.com/example/other.git";
+    await t.run();
+    expect(t.spawned).toEqual([]);
+    expect(t.actions.get(id)?.state).toBe("canceled");
+  });
+
   it("creates exactly one chat for a confirmed action, even with two runners at once", async () => {
     const t = setup();
     const id = t.confirmed();

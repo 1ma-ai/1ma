@@ -171,6 +171,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
                 questions,
                 executors,
                 observed,
+                policy: policy(),
                 claimant,
                 now: Date.now,
                 signal: lifecycle.signal,

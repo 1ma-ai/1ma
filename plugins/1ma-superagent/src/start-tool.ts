@@ -65,6 +65,7 @@ export function registerStartTool(deps: StartToolDeps): void {
           model: input.model,
           prompt: input.prompt,
           title: input.title ?? input.prompt.slice(0, 80),
+          repo,
         },
         ctx.threadId,
         now,

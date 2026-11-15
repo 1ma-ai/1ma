@@ -1,6 +1,7 @@
 import { strings } from "../strings.js";
 import { type ActionRow, type ActionStore, labelOf, labelSchema } from "./actions.js";
 import { describeError } from "./executors/paging.js";
+import { repoFromRemoteUrl } from "./github/names.js";
 import {
   type Completeness,
   DefiniteSpawnFailure,
@@ -9,6 +10,7 @@ import {
   type ThreadMetadataRow,
 } from "./observation.js";
 import type { Card, QuestionKind, QuestionStore } from "./questions.js";
+import type { RepoPolicy } from "./repos.js";
 
 export const UNKNOWN_AFTER_MS = 10 * 60 * 1000;
 export const WAIT_MS = 30 * 60 * 1000;
@@ -23,6 +25,7 @@ export interface ActionDeps {
   readonly questions: QuestionStore;
   readonly executors: ReadonlyMap<ServerId, Executor>;
   readonly observed: ReadonlyMap<ServerId, Completeness>;
+  readonly policy: RepoPolicy;
   readonly claimant: string;
   readonly now: () => number;
   readonly signal: AbortSignal;
@@ -111,12 +114,58 @@ export function ambiguousKind(): QuestionKind {
   return { currentVersion: () => "1", onAnswer: () => {} };
 }
 
+async function targetChange(
+  deps: ActionDeps,
+  executor: Executor,
+  action: ActionRow,
+): Promise<string | null> {
+  const proposed = action.params.repo ?? null;
+  if (proposed !== null && deps.policy.excluded.has(proposed)) return strings.targetExcluded;
+  const repo = repoFromRemoteUrl(
+    await executor.projectRemote(action.params.projectId, deps.signal),
+  );
+  if (repo !== proposed) return strings.targetMoved;
+  if (repo !== null && deps.policy.excluded.has(repo)) return strings.targetExcluded;
+  return null;
+}
+
 async function send(deps: ActionDeps, action: ActionRow): Promise<void> {
   const executor = deps.executors.get(action.serverId);
   if (executor === undefined) {
     deps.actions.transition(action.id, ["confirmed"], "failed", deps.now(), {
       result: "server not configured",
     });
+    return;
+  }
+  let changed: string | null;
+  try {
+    changed = await targetChange(deps, executor, action);
+  } catch (error) {
+    deps.warn(`checking the target of ${action.id}: ${describeError(error)}`);
+    return;
+  }
+  if (changed !== null) {
+    if (
+      deps.actions.transition(action.id, ["confirmed"], "canceled", deps.now(), {
+        result: changed,
+      })
+    )
+      deps.questions.ask(
+        {
+          key: `${NOTICE_KIND}:target:${action.id}`,
+          kind: NOTICE_KIND,
+          subject: action.id,
+          expectedVersion: "1",
+          card: ackCard(
+            strings.targetChangedTitle,
+            strings.targetChangedObserved(action.serverId, changed),
+            strings.targetChangedAffected,
+            strings.targetChangedRecommendation,
+          ),
+          priority: 40,
+        },
+        deps.now(),
+      );
     return;
   }
   if (!deps.actions.claim(action.id, deps.claimant, deps.now())) return;
