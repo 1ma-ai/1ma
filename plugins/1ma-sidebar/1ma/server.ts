@@ -10,6 +10,9 @@ import { strings } from "./strings.js";
 export const BUILT_IN_THREAD_LIST = "thread-list";
 const COPIED_KV_KEY = "1ma/copied-built-in-preferences";
 const CHOSEN_KV_KEY = "1ma/keys-the-owner-chose";
+const DEFAULT_LIST_KV_KEY = "1ma/chose-default-thread-list";
+const THREAD_LIST_PREFERENCE = "sidebar.threadListProvider";
+export const OWN_THREAD_LIST = "1ma-sidebar/thread-list";
 
 interface PreferenceStore {
   write(key: PreferenceKey, value: unknown, origin: string | null): Promise<unknown>;
@@ -68,9 +71,18 @@ export function register1maSidebar<Store extends PreferenceStore>(bb: BbPluginAp
     });
     return pending;
   };
+  const chooseDefaultThreadList = () =>
+    chooseDefaultOnce(bb).catch((error: unknown) => {
+      bb.log.warn(
+        `could not make the 1ma sidebar the default thread list: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
   return {
     store,
     copyBuiltInPreferences,
+    chooseDefaultThreadList,
     copiedFromBuiltIn: async () => (await bb.storage.kv.get<boolean>(COPIED_KV_KEY)) === true,
   };
 }
@@ -122,4 +134,31 @@ async function copyOnce(
     if (copied.length > 0) bb.log.info(strings.migratedPreferences(copied));
   }
   await bb.storage.kv.set(COPIED_KV_KEY, true);
+}
+
+// 1ma's sidebar is the default thread list (owner decision, 16.11.2026). bb
+// cannot be told that from a plugin: its Automatic choice skips built-in
+// plugins, onInstall does not run for them, and installation defaults come
+// only from bb's migrations. So the list is chosen once, and only where
+// nobody ever chose one: revision 0 means the preference was never stored.
+// Any stored value, the stock list, Automatic or another plugin's list, is
+// someone's choice and stays.
+async function chooseDefaultOnce(bb: BbPluginApi): Promise<void> {
+  if ((await bb.storage.kv.get<boolean>(DEFAULT_LIST_KV_KEY)) === true) return;
+  const revision = async () =>
+    (await bb.sdk.system.uiPreferences.list()).preferences[THREAD_LIST_PREFERENCE].revision;
+  if ((await revision()) === 0) {
+    try {
+      await bb.sdk.system.uiPreferences.set({
+        key: THREAD_LIST_PREFERENCE,
+        value: OWN_THREAD_LIST,
+        expectedRevision: 0,
+      });
+    } catch (error) {
+      // A conflict means a choice was stored meanwhile, and it wins. Any
+      // other failure leaves the preference unstored: try at the next start.
+      if ((await revision()) === 0) throw error;
+    }
+  }
+  await bb.storage.kv.set(DEFAULT_LIST_KV_KEY, true);
 }

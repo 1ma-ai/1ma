@@ -310,6 +310,7 @@ export default async function threadListPlugin(bb: BbPluginApi) {
     }),
   );
 
+  await oneMa.chooseDefaultThreadList();
   await oneMa.copyBuiltInPreferences();
   if (await oneMa.copiedFromBuiltIn()) return;
   const { migrated } = await migrateFromUiPreferences(bb);

@@ -244,3 +244,92 @@ describe("Codex review at b02a4ce: no built-in list to copy from", () => {
     }
   });
 });
+
+describe("the 1ma sidebar is the default thread list", () => {
+  const KEY = "sidebar.threadListProvider";
+  function setupPreference(stored: { revision: number; value: string }) {
+    const preference: { revision: number; value: unknown } = { ...stored };
+    const writes: unknown[] = [];
+    let beforeWrite: (() => void) | null = null;
+    const host = createFakePluginHost({
+      pluginId: "1ma-sidebar",
+      sdk: {
+        plugins: { list: async () => ({ plugins: [] }) },
+        system: {
+          uiPreferences: {
+            list: async () => ({ preferences: { [KEY]: { ...preference } } }),
+            set: async (args: { key: string; value: unknown; expectedRevision: number }) => {
+              writes.push(args);
+              beforeWrite?.();
+              if (args.expectedRevision !== preference.revision)
+                throw new Error("409 ui_preference_conflict");
+              preference.revision += 1;
+              preference.value = args.value;
+              return { key: args.key, ...preference };
+            },
+          },
+        },
+      },
+    });
+    return {
+      host,
+      preference,
+      writes,
+      before: (run: () => void) => (beforeWrite = run),
+    };
+  }
+
+  it("is chosen where nobody ever chose a list", async () => {
+    const t = setupPreference({ revision: 0, value: "__automatic__" });
+    await plugin(t.host.bb);
+    expect(t.preference).toEqual({ revision: 1, value: "1ma-sidebar/thread-list" });
+    expect(t.writes).toEqual([{ key: KEY, value: "1ma-sidebar/thread-list", expectedRevision: 0 }]);
+  });
+
+  it("keeps any stored choice: the stock list, Automatic or another plugin's list", async () => {
+    for (const value of [
+      "thread-list/thread-list",
+      "__automatic__",
+      "cursor-sidebar/thread-list",
+    ]) {
+      const t = setupPreference({ revision: 3, value });
+      await plugin(t.host.bb);
+      expect(t.preference).toEqual({ revision: 3, value });
+      expect(t.writes).toEqual([]);
+    }
+  });
+
+  it("keeps a choice stored between the read and the write", async () => {
+    const t = setupPreference({ revision: 0, value: "__automatic__" });
+    t.before(() => {
+      if (t.preference.revision === 0)
+        Object.assign(t.preference, { revision: 1, value: "thread-list/thread-list" });
+    });
+    await plugin(t.host.bb);
+    expect(t.preference).toEqual({ revision: 1, value: "thread-list/thread-list" });
+    await t.host.harness.lifecycle.reload(plugin);
+    expect(t.writes).toHaveLength(1);
+  });
+
+  it("is chosen once: a preference later cleared from the database is not chosen again", async () => {
+    const t = setupPreference({ revision: 0, value: "__automatic__" });
+    await plugin(t.host.bb);
+    Object.assign(t.preference, { revision: 0, value: "__automatic__" });
+    await t.host.harness.lifecycle.reload(plugin);
+    expect(t.preference.value).toBe("__automatic__");
+    expect(t.writes).toHaveLength(1);
+  });
+
+  it("a failed write is tried again at the next start", async () => {
+    const t = setupPreference({ revision: 0, value: "__automatic__" });
+    let fail = true;
+    t.before(() => {
+      if (fail) throw new Error("server is restarting");
+    });
+    await plugin(t.host.bb);
+    expect(t.preference.revision).toBe(0);
+    fail = false;
+    await t.host.harness.lifecycle.reload(plugin);
+    expect(t.preference).toEqual({ revision: 1, value: "1ma-sidebar/thread-list" });
+  });
+});
