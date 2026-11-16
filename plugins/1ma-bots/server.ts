@@ -321,30 +321,48 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   const accepted = (args: { threadId: string; texts: readonly string[] }) => {
     if (store.botOfThread(args.threadId) === null) return;
     acceptDelivery(store, args.threadId, letterTokens(args.texts), false);
-    reopen(args.threadId);
   };
 
-  // The request bb recorded for the turn now running in a conversation, when
-  // the owner sent it. bb records a request only after every dispatch hook
-  // and wait let it through (dispatch-attempt.ts runs the hook pass before
-  // sendThreadMessage), and marks a request the provider refused as rejected.
+  // The turn now running in a conversation, when the owner started it: the
+  // latest turn the provider confirmed (turn/started) and the request bb
+  // recorded just before it (client/turn/requested, not rejected). bb records
+  // a request only after every dispatch hook and wait let it through, and a
+  // message steered into a running turn is recorded after its start, so it
+  // never counts as a new turn.
   const ownerTurnOf = async (threadId: string): Promise<number | null> => {
     const rows = await bb.sdk.threads.events.list({
       threadId,
-      types: ["client/turn/requested", "client/turn/rejected"],
+      types: ["turn/started", "client/turn/requested", "client/turn/rejected"],
       order: "desc",
-      limit: "20",
+      limit: "50",
     });
-    const rejected = new Set<string>();
+    const started = rows.find((row) => row.type === "turn/started");
+    if (started === undefined) return null;
+    const rejected = new Set(
+      rows.flatMap((row) => (row.type === "client/turn/rejected" ? [row.data.requestId] : [])),
+    );
     for (const row of rows) {
-      if (row.type === "client/turn/rejected") {
-        rejected.add(row.data.requestId);
-        continue;
-      }
-      if (row.type !== "client/turn/requested" || rejected.has(row.data.requestId)) continue;
-      return row.data.initiator === "user" && row.data.senderThreadId === null ? row.seq : null;
+      if (row.seq >= started.seq || row.type !== "client/turn/requested") continue;
+      if (rejected.has(row.data.requestId)) continue;
+      return row.data.initiator === "user" && row.data.senderThreadId === null ? started.seq : null;
     }
     return null;
+  };
+
+  // Done is cleared by input the provider actually took after the mark (a new
+  // turn, or a message steered into the running one), checked when the
+  // conversation settles. bb marks a thread active while it still prepares
+  // the request, and the provider may refuse it.
+  const reopenIfTurnStarted = async (threadId: string) => {
+    const completedAt = store.completedAt(threadId);
+    if (completedAt === null) return;
+    const [latest] = await bb.sdk.threads.events.list({
+      threadId,
+      types: ["turn/started", "turn/input/accepted"],
+      order: "desc",
+      limit: "1",
+    });
+    if (latest !== undefined && latest.createdAt > completedAt) reopen(threadId);
   };
   const textsOf = (blocks: ReadonlyArray<{ type: string; text?: string }>) =>
     blocks.flatMap((block) =>
@@ -361,7 +379,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   bb.events.on("message.dispatched", ({ entry }) =>
     accepted({ threadId: entry.threadId, texts: textsOf(entry.content) }),
   );
-  bb.events.on("thread.active", ({ thread }) => reopen(thread.id));
+  bb.events.on("thread.idle", ({ thread }) => reopenIfTurnStarted(thread.id));
 
   bb.events.on("interaction.pending", ({ thread }) => reopen(thread.id));
   bb.events.on("thread.failed", ({ thread }) => reopen(thread.id));

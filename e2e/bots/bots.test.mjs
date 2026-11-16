@@ -15,6 +15,7 @@ import {
   say,
   server,
   setUp,
+  signal,
   startConversation,
   stubCall,
   stubRecords,
@@ -135,7 +136,9 @@ describe("1ma-bots on a real server", () => {
     await server.api("POST", `/threads/${threadId}/queued-messages/${queued.id}/send`, {
       mode: "auto",
     });
-    await waitFor("the conversation to reopen", 60 * SECOND, async () => {
+    // 1ma-bots clears done once the provider took the message and the
+    // conversation settles, after the 45-second turn.
+    await waitFor("the conversation to reopen", 180 * SECOND, async () => {
       return (await completedOf(bot.id, threadId)) === false;
     });
     await waitFor("the queued message to reach the agent", 120 * SECOND, async () =>
@@ -161,7 +164,7 @@ describe("1ma-bots on a real server", () => {
     const second = stubCall("bot_message", toAlice("second-from-bruno"));
     await say(
       brunoThread,
-      `[stub:wait 45] ${stubCall("bot_message", toAlice("first-from-bruno"))}`,
+      `[stub:until bruno-may-write] ${stubCall("bot_message", toAlice("first-from-bruno"))}`,
     );
     await waitStatus(brunoThread, "active");
     // Bruno's own exchange starts with his first letter in this turn.
@@ -188,6 +191,8 @@ describe("1ma-bots on a real server", () => {
     );
     const alicesExchange = exchangeOf(aliceThread).chain;
     assert.ok(alicesExchange);
+    // Bruno's turn waits for this signal, so the queue is read while it runs.
+    signal("bruno-may-write");
     const observed = {
       queued: await server.api("GET", `/threads/${brunoThread}/queued-messages`),
       status: (await thread(brunoThread)).status,

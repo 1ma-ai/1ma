@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
+import path from "node:path";
 import { createInterface } from "node:readline";
 
 const log = process.env.E2E_STUB_LOG;
@@ -8,6 +9,17 @@ const record = (entry) => {
   if (log !== undefined)
     appendFileSync(log, `${JSON.stringify({ at: Date.now(), pid: process.pid, ...entry })}\n`);
 };
+
+// [stub:until NAME] holds the turn until the test writes the file NAME in
+// the signals directory next to the stub log, or five minutes pass.
+const signals = log === undefined ? null : path.join(path.dirname(log), "signals");
+async function untilSignal(name) {
+  const deadline = Date.now() + 5 * 60 * 1000;
+  while (signals !== null && !existsSync(path.join(signals, name)) && Date.now() < deadline) {
+    await sleep(200);
+  }
+  record({ kind: "signal", name, seen: signals !== null && existsSync(path.join(signals, name)) });
+}
 
 const send = (message) =>
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
@@ -115,9 +127,11 @@ async function handlePrompt(message) {
   const call = /\[stub:call (\S+) (\{.*\})\]/s.exec(text);
   const reply = /\[stub:reply ([^\]]*)\]/s.exec(text);
   const wait = /\[stub:wait (\d+)\]/.exec(text);
+  const until = /\[stub:until ([\w-]+)\]/.exec(text);
   const fail = /\[stub:fail ([^\]]*)\]/.exec(text);
   const ask = /\[stub:ask ([^\]]*)\]/.exec(text);
   if (wait !== null) await sleep(Number(wait[1]) * 1000);
+  if (until !== null) await untilSignal(until[1]);
   if (fail !== null) {
     send({ id: message.id, error: { code: -32603, message: fail[1] } });
     return;

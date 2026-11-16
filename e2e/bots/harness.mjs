@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { Fleet, STUB_MODEL, STUB_PROVIDER, requireEnv, waitFor } from "../lib/servers.mjs";
@@ -9,6 +9,13 @@ const scratch = requireEnv("E2E_ROOT");
 const root = path.join(scratch, "bots");
 export const screenshotDir = path.join(root, "screenshots");
 export const stubLog = path.join(root, "stub.log");
+
+// Lets a turn held by [stub:until NAME] go on.
+export function signal(name) {
+  const dir = path.join(root, "signals");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, name), "");
+}
 export const pluginDirs = {
   bots: path.resolve(import.meta.dirname, "../../plugins/1ma-bots"),
   sidebar: path.resolve(import.meta.dirname, "../../plugins/1ma-sidebar"),

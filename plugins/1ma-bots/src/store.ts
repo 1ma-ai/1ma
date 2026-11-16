@@ -326,6 +326,15 @@ export class BotStore {
     return row?.bot_id ?? null;
   }
 
+  completedAt(threadId: string): number | null {
+    const row = this.db
+      .prepare<[string], { completed_at: number | null }>(
+        "SELECT completed_at FROM bot_threads WHERE thread_id = ?",
+      )
+      .get(threadId);
+    return row?.completed_at ?? null;
+  }
+
   threadInfo(threadId: string): BotThread | null {
     const row = this.db
       .prepare<[string], ThreadRow>("SELECT * FROM bot_threads WHERE thread_id = ?")

@@ -78,6 +78,8 @@ export function BotsBlock({ selectedThreadId, onProjectSelect }: BotsBlockProps)
   );
 }
 
+const RUNNING: ReadonlySet<string> = new Set(["starting", "active", "stopping"]);
+
 function useBotThreads(bot: SidebarBot) {
   const lifecycles = useAtomValue(sidebarThreadLifecyclesAtom);
   const { threads } = useSidebarThreads({ experimental_lifecycles: lifecycles });
@@ -101,8 +103,12 @@ function useBotThreads(bot: SidebarBot) {
       );
       return threads.filter((thread) => shown.has(thread.id));
     };
-    const open = bot.threads.filter((thread) => !thread.completed).map((thread) => thread.threadId);
-    const done = bot.threads.filter((thread) => thread.completed).map((thread) => thread.threadId);
+    // A done conversation that is working again shows with the open ones; the
+    // done mark itself is cleared by 1ma-bots once the turn has really run.
+    const isOpen = (item: SidebarBot["threads"][number]) =>
+      !item.completed || RUNNING.has(byId.get(item.threadId)?.status ?? "idle");
+    const open = bot.threads.filter(isOpen).map((thread) => thread.threadId);
+    const done = bot.threads.filter((thread) => !isOpen(thread)).map((thread) => thread.threadId);
     const compare: ThreadComparator = (left: PluginSidebarThread, right: PluginSidebarThread) =>
       (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
         (order.get(right.id) ?? Number.MAX_SAFE_INTEGER) || right.createdAt - left.createdAt;

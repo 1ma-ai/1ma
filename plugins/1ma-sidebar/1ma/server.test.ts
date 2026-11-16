@@ -217,3 +217,30 @@ describe("Codex review: copied row actions belong to 1ma Sidebar", () => {
     expect((await list(host)).preferences.rowActions).toEqual(["1ma-sidebar/move", "bb--core/pin"]);
   });
 });
+
+describe("Codex review at b02a4ce: no built-in list to copy from", () => {
+  it("keeps the old sidebar layout when the stock list is disabled or missing", async () => {
+    for (const plugins of [[{ id: "thread-list", enabled: false }], []]) {
+      const host = createFakePluginHost({
+        pluginId: "1ma-sidebar",
+        sdk: {
+          plugins: {
+            list: async () => ({ plugins }),
+            callRpc: async () => {
+              throw new Error("must not be called");
+            },
+          },
+          system: {
+            uiPreferences: {
+              list: async () => ({
+                preferences: { "sidebar.organizationMode": { value: "project" } },
+              }),
+            },
+          },
+        },
+      });
+      await plugin(host.bb);
+      expect((await list(host)).preferences.organizationMode).toBe("project");
+    }
+  });
+});

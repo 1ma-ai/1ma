@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createFakePluginHost,
+  makeMessageDispatchHookContext,
   makePluginAgentConfigurationContext,
   makeQueueEntry,
   makeThreadResponse,
@@ -18,27 +19,41 @@ interface SentLetter {
 
 function setup(settings: Record<string, number> = {}) {
   const delivery = { immediate: true, queued: [] as SentLetter[] };
-  // The turn requests bb records per conversation, newest last.
-  const requests = new Map<
-    string,
-    Array<{ seq: number; initiator: string; sender: string | null; id: string; rejected?: true }>
-  >();
+  // The thread events bb records per conversation: turn requests, refusals
+  // and provider-confirmed turn starts, in order.
+  type Row = { seq: number; createdAt: number; type: string; data: Record<string, unknown> };
+  const events = new Map<string, Row[]>();
   let seq = 0;
+  const push = (threadId: string, type: string, data: Record<string, unknown>) => {
+    // Every event happens a moment after whatever came before it.
+    clock += 1;
+    seq += 1;
+    events.set(threadId, [...(events.get(threadId) ?? []), { seq, createdAt: clock, type, data }]);
+  };
+  // kind "start": the provider starts a new turn; "steer": the message joins
+  // the running turn; "rejected": the provider refuses the request.
   const recordTurn = (
     threadId: string,
     initiator: "user" | "agent",
     sender: string | null,
-    rejected?: true,
+    kind: "start" | "steer" | "rejected" = "start",
   ) => {
-    seq += 1;
-    requests.set(threadId, [
-      ...(requests.get(threadId) ?? []),
-      { seq, initiator, sender, id: `req_${seq}`, ...(rejected ? { rejected } : {}) },
-    ]);
+    const requestId = `req_${seq + 1}`;
+    push(threadId, "client/turn/requested", { initiator, senderThreadId: sender, requestId });
+    if (kind === "rejected")
+      push(threadId, "client/turn/rejected", { requestId, message: "refused", reason: "provider" });
+    if (kind === "start") push(threadId, "turn/started", {});
+    if (kind === "steer") push(threadId, "turn/input/accepted", { clientRequestId: requestId });
   };
+  const settle = (threadId: string) =>
+    host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: threadId, status: "idle" }),
+      lastAssistantText: null,
+    });
   // Stands in for bb taking a queued letter out of the queue into a turn.
   const deliver = async (letter: SentLetter) => {
     recordTurn(letter.threadId, "agent", letter.senderThreadId ?? null);
+    await settle(letter.threadId);
     await host.harness.behavior.emitThreadEvent("message.dispatched", {
       entry: makeQueueEntry({
         threadId: letter.threadId,
@@ -71,6 +86,7 @@ function setup(settings: Record<string, number> = {}) {
           };
           if (delivery.immediate) {
             recordTurn(letter.threadId, "agent", letter.senderThreadId ?? null);
+            await settle(letter.threadId);
             return { delivery: "sent" };
           }
           delivery.queued.push(letter);
@@ -82,35 +98,20 @@ function setup(settings: Record<string, number> = {}) {
           threads.get(threadId) ?? makeThreadResponse({ id: threadId }),
         interactions: { list: async () => [] },
         events: {
-          list: async ({ threadId }: { threadId: string }) =>
-            (requests.get(threadId) ?? []).toReversed().flatMap((request) => [
-              ...(request.rejected
-                ? [
-                    {
-                      id: `${request.id}_rejected`,
-                      scope: "thread",
-                      threadId,
-                      seq: request.seq + 0.5,
-                      createdAt: request.seq,
-                      type: "client/turn/rejected",
-                      data: { requestId: request.id, message: "refused", reason: "provider" },
-                    },
-                  ]
-                : []),
-              {
-                id: request.id,
-                scope: "thread",
-                threadId,
-                seq: request.seq,
-                createdAt: request.seq,
-                type: "client/turn/requested",
-                data: {
-                  initiator: request.initiator,
-                  senderThreadId: request.sender,
-                  requestId: request.id,
-                },
-              },
-            ]),
+          list: async ({
+            threadId,
+            types,
+            limit,
+          }: {
+            threadId: string;
+            types?: readonly string[];
+            limit?: string;
+          }) =>
+            (events.get(threadId) ?? [])
+              .filter((row) => types === undefined || types.includes(row.type))
+              .toReversed()
+              .slice(0, limit === undefined ? undefined : Number(limit))
+              .map((row) => ({ id: `evt_${row.seq}`, scope: "thread", threadId, ...row })),
         },
       },
     },
@@ -139,10 +140,27 @@ function setup(settings: Record<string, number> = {}) {
     initiator: "user" | "agent",
     senderThreadId: string | null,
   ) => {
+    await attempt(threadId, initiator, senderThreadId);
     recordTurn(threadId, initiator, senderThreadId);
     await harness.behavior.emitThreadEvent("thread.active", {
       thread: makeThreadResponse({ id: threadId, status: "active" }),
     });
+    await settle(threadId);
+  };
+  // bb runs every plugin's dispatch hook for a message before it decides; a
+  // message another hook then holds or rejects stops here.
+  const attempt = async (
+    threadId: string,
+    initiator: "user" | "agent",
+    senderThreadId: string | null,
+  ) => {
+    await harness.registrations.hooks["message.dispatch"]?.(
+      makeMessageDispatchHookContext({
+        thread: { id: threadId, status: "idle" },
+        initiator,
+        senderThreadId,
+      }),
+    );
   };
   const list = () =>
     rpc<{
@@ -153,6 +171,8 @@ function setup(settings: Record<string, number> = {}) {
     }>("bots.v1.list");
   return {
     recordTurn,
+    attempt,
+    settle,
     delivery,
     deliver,
     harness,
@@ -773,7 +793,9 @@ describe("Codex re-review of stage 2: the owner's message counts only once bb le
     await t.dispatch("thr_a", "user", null);
     for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
     await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: true });
-    // A held or rejected message: bb records no turn request and starts no turn.
+    // bb runs the dispatch hooks for the owner's message; another plugin's hook
+    // then holds or rejects it, so bb records no request and starts no turn.
+    await t.attempt("thr_a", "user", null);
     const doneOf = async () =>
       (await t.list()).bots.find((bot) => bot.id === t.a.id)!.threads[0]!.completed;
     expect(await doneOf()).toBe(true);
@@ -784,9 +806,56 @@ describe("Codex re-review of stage 2: the owner's message counts only once bb le
     const t = await threeBots();
     await t.dispatch("thr_a", "user", null);
     for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
-    t.recordTurn("thr_a", "user", null, true);
+    t.recordTurn("thr_a", "user", null, "rejected");
     await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
     await t.dispatch("thr_a", "user", null);
     expect(await t.letter("thr_a", t.b.id)).toContain("Letter 1/4");
+  });
+});
+
+describe("Codex review of stage 2 at b02a4ce", () => {
+  it("a message steered into the running turn gives that turn no new exchange", async () => {
+    const t = await threeBots();
+    await t.dispatch("thr_a", "user", null);
+    for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+    t.recordTurn("thr_a", "user", null, "steer");
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+  });
+
+  it("a turn the provider refuses keeps done and the spent exchange", async () => {
+    const t = await threeBots();
+    await t.dispatch("thr_a", "user", null);
+    for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: true });
+    await t.attempt("thr_a", "user", null);
+    t.recordTurn("thr_a", "user", null, "rejected");
+    await t.harness.behavior.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: "thr_a", status: "active" }),
+    });
+    await t.settle("thr_a");
+    const done = (await t.list()).bots.find((bot) => bot.id === t.a.id)!.threads[0]!.completed;
+    expect(done).toBe(true);
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+  });
+
+  it("a turn the provider started reopens a done conversation once it settles", async () => {
+    const t = await threeBots();
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: true });
+    t.advance(1000);
+    await t.dispatch("thr_a", "user", null);
+    const done = (await t.list()).bots.find((bot) => bot.id === t.a.id)!.threads[0]!.completed;
+    expect(done).toBe(false);
+  });
+});
+
+describe("the owner's message steered into a running turn", () => {
+  it("reopens a done conversation once the provider took it", async () => {
+    const t = await threeBots();
+    await t.dispatch("thr_a", "user", null);
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: true });
+    t.recordTurn("thr_a", "user", null, "steer");
+    await t.settle("thr_a");
+    const done = (await t.list()).bots.find((bot) => bot.id === t.a.id)!.threads[0]!.completed;
+    expect(done).toBe(false);
   });
 });

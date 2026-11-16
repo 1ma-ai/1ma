@@ -150,3 +150,40 @@ describe("Codex review of stage 2: a bot with only done conversations", () => {
     await screen.findByText("Creatives");
   });
 });
+
+describe("a done conversation that is working again", () => {
+  it("shows with the open conversations while it runs", async () => {
+    const running = THREADS.map((thread) =>
+      thread.id === "thr_bot" ? { ...thread, status: "active" as const } : thread,
+    );
+    renderSlot(
+      registration,
+      {
+        activeThreadId: null,
+        activeProjectId: null,
+        isCompactViewport: false,
+        onNavigate: vi.fn(),
+        searchQuery: "",
+      },
+      {
+        sidebarThreads: { projects: PROJECTS, sections: [], threads: running },
+        sidebarNavigation: { items: [BOTS_PANEL] },
+        rpc: {
+          listPreferences: () => ({ preferences: defaultPreferences() }),
+          setPreference: (input: unknown) => input,
+          "bots.v1.list": () => ({
+            bots: [
+              {
+                ...marketer(),
+                threads: [{ threadId: "thr_bot", startedFromBot: true, completed: true }],
+              },
+            ],
+          }),
+        },
+      },
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Marketer: 1 conversations" }));
+    await screen.findByText("Creatives");
+    expect(screen.queryByText(strings.done(1))).toBeNull();
+  });
+});

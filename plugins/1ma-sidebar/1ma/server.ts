@@ -98,7 +98,11 @@ async function copyOnce(
   if ((await bb.storage.kv.get<boolean>(COPIED_KV_KEY)) === true) return;
   const installed = await bb.sdk.plugins.list();
   const builtIn = installed.plugins.find((plugin) => plugin.id === BUILT_IN_THREAD_LIST);
-  if (builtIn !== undefined && builtIn.enabled !== false) {
+  // Nothing to copy from a missing or disabled list: the copy is not done,
+  // so bb's old sidebar.* settings still migrate, and a list enabled later
+  // is copied then.
+  if (builtIn === undefined || builtIn.enabled === false) return;
+  {
     const result = await bb.sdk.plugins.callRpc({
       pluginId: BUILT_IN_THREAD_LIST,
       method: "listPreferences",
