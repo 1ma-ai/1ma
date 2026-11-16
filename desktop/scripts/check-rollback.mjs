@@ -4,7 +4,8 @@
 // and from a release folder (Linux); the new one takes them over, adds one
 // they did not have and refuses the way back while it runs;
 // server/dist/one-ma-rollback.js removes the built-in rows; the new release
-// started again by habit leaves the 1ma plugins out; the older release
+// started again by habit leaves the 1ma plugins out and refuses one installed
+// by hand; the older release
 // starts, the plugins are installed again and find their settings and
 // secrets, the one it never had keeps its secret; the new release keeps those
 // copies as they are until --resume, then takes them over again. Run in CI
@@ -169,7 +170,18 @@ try {
       back.length === 0,
       `the new release built ${back.join(", ")} in again after the way back`,
     );
-    console.log("it leaves the 1ma plugins out while the way back is prepared");
+    let installed = false;
+    try {
+      server.bb(["plugin", "install", "builtin:1ma-brand", "--yes"]);
+      installed = true;
+    } catch (error) {
+      check(
+        error.message.includes("the way back to an older 1ma is prepared"),
+        `installing builtin:1ma-brand by hand failed for another reason: ${error.message}`,
+      );
+    }
+    check(!installed, "builtin:1ma-brand was installed by hand while the way back was prepared");
+    console.log("it leaves the 1ma plugins out while the way back is prepared, also by hand");
   });
 
   await run("older release again: install the 1ma plugins again", older, async (server) => {
