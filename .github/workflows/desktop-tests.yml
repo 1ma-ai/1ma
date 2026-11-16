@@ -13,7 +13,11 @@ on:
       - "desktop/**"
       - "!desktop/**/*.md"
       - "brand/**"
-      - "plugins/1ma-brand/assets/**"
+      - "plugins/1ma-brand/**"
+      - "plugins/1ma-theme/**"
+      - "plugins/1ma-server-switcher/**"
+      - "plugins/1ma-auto-updates/**"
+      - "pnpm-lock.yaml"
       - ".github/workflows/desktop.yml"
       - ".github/workflows/desktop-tests.yml"
   pull_request:
@@ -21,7 +25,11 @@ on:
       - "desktop/**"
       - "!desktop/**/*.md"
       - "brand/**"
-      - "plugins/1ma-brand/assets/**"
+      - "plugins/1ma-brand/**"
+      - "plugins/1ma-theme/**"
+      - "plugins/1ma-server-switcher/**"
+      - "plugins/1ma-auto-updates/**"
+      - "pnpm-lock.yaml"
       - ".github/workflows/desktop.yml"
       - ".github/workflows/desktop-tests.yml"
   workflow_dispatch:
@@ -112,6 +120,9 @@ jobs:
             filters=(--filter '!@bb/mobile')
           fi
           bash .github/actions/setup-workspace/install-dependencies.sh "${filters[@]}"
+      - name: Put the 1ma plugins in as built-in plugins (patch 0014)
+        working-directory: ${{ runner.temp }}/bb-src
+        run: node "$GITHUB_WORKSPACE/desktop/scripts/embed-plugins.mjs" "$PWD"
       - name: Regenerate the PWA icon variants from the 1ma icons, as bb's app build does
         if: startsWith(matrix.shard, 'app-')
         working-directory: ${{ runner.temp }}/bb-src

@@ -4,6 +4,10 @@
   "private": true,
   "description": "Бренд 1ma вместо bb внутри окна: заголовок, favicon и иконка приложения с человечком, логотип 1ma, PWA-манифест.",
   "license": "MIT",
+  "files": [
+    "assets",
+    "PLUGIN_OVERVIEW.md"
+  ],
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

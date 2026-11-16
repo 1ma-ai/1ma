@@ -84,7 +84,7 @@ index abe6698..6883612 100644
        if (finalized || killStarted) {
          return Promise.reject(
 diff --git a/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts b/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts
-index 14a88d4..a05615b 100644
+index 14a88d4..f3e8674 100644
 --- a/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts
 +++ b/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts
 @@ -1,4 +1,11 @@
@@ -110,6 +110,7 @@ index 14a88d4..a05615b 100644
 +
 +it.for([VERSIONED_LINK, SAME_PATH, REMOVED])(
 +  "resumes the same thread once when an update %s",
++  { timeout: 30_000 },
 +  async (update, { skip }) => {
 +    skip(process.platform === "win32", "Uses POSIX executables");
 +
@@ -199,7 +200,6 @@ index 14a88d4..a05615b 100644
 +      ),
 +    );
 +  },
-+  30_000,
 +);
 +
  it("rebuilds the session only when a turn changes or removes an env var", async () => {
