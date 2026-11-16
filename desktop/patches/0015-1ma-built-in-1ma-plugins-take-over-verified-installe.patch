@@ -37,14 +37,17 @@ source 1ma can take over (taken over at the next start, or left installed
 when newer than the built-in, by the takeover's own rule). A copy from any
 other source is a conflict: nothing changes and the command fails, until
 --replace-other-copies unregisters such copies keeping the data under their
-ids (a plain removal would delete it) and brings the built-ins back.
+ids (a plain removal would delete it) and brings the built-ins back. It
+also changes nothing while bb has not finished putting back a failed update
+of such a copy (that snapshot would restore it at the next start) or when a
+built-in's version cannot be read.
 ---
  apps/server/package.json                      |   2 +-
- apps/server/src/one-ma-rollback.ts            |  75 ++++
- .../src/services/plugins/one-ma-rollback.ts   | 374 ++++++++++++++++
- .../services/plugins/plugin-registration.ts   | 170 ++++++--
- .../services/plugins/plugin-service.test.ts   | 407 ++++++++++++++++++
- 5 files changed, 1001 insertions(+), 27 deletions(-)
+ apps/server/src/one-ma-rollback.ts            |  75 +++
+ .../src/services/plugins/one-ma-rollback.ts   | 407 ++++++++++++++++
+ .../services/plugins/plugin-registration.ts   | 170 ++++++-
+ .../services/plugins/plugin-service.test.ts   | 459 ++++++++++++++++++
+ 5 files changed, 1086 insertions(+), 27 deletions(-)
  create mode 100644 apps/server/src/one-ma-rollback.ts
  create mode 100644 apps/server/src/services/plugins/one-ma-rollback.ts
 
@@ -144,14 +147,14 @@ index 0000000..f502ca2
 +}
 diff --git a/apps/server/src/services/plugins/one-ma-rollback.ts b/apps/server/src/services/plugins/one-ma-rollback.ts
 new file mode 100644
-index 0000000..2fb6922
+index 0000000..c6e726d
 --- /dev/null
 +++ b/apps/server/src/services/plugins/one-ma-rollback.ts
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,407 @@
 +import { readFileSync } from "node:fs";
 +import { mkdir, rename, rm, stat } from "node:fs/promises";
 +import { join } from "node:path";
-+import { eq } from "drizzle-orm";
++import { and, eq, inArray } from "drizzle-orm";
 +import semver from "semver";
 +import {
 +  claimBbAppRuntimeFile,
@@ -161,6 +164,7 @@ index 0000000..2fb6922
 +import {
 +  appSettingsValues,
 +  installedPlugins,
++  pluginStateSnapshots,
 +  type DbConnection,
 +  type DbQueryConnection,
 +} from "@bb/db";
@@ -439,7 +443,10 @@ index 0000000..2fb6922
 +// own rule), and records it anew. Installed again from any other source, it
 +// is a conflict: nothing changes and the rollback stays prepared, unless
 +// replaceOtherCopies, which unregisters that copy, keeping the data under its
-+// id (a plain removal would delete it), and brings the built-in back.
++// id (a plain removal would delete it), and brings the built-in back. Nothing
++// changes either while bb has not finished putting back a failed update of
++// such a copy (a snapshot rolling back would restore it at the next start), or
++// when the built-in's version cannot be read.
 +export async function resumeOneMa(args: {
 +  db: DbConnection;
 +  dataDir: string;
@@ -457,8 +464,31 @@ index 0000000..2fb6922
 +        type Step =
 +          | { id: string; kind: "restore"; row: PluginRow; replacing: PluginRow | null }
 +          | { id: string; kind: "take-over" | "stays"; note: string }
-+          | { id: string; kind: "conflict"; note: string };
++          | { id: string; kind: "conflict" | "blocked"; note: string };
++        const ids = Object.keys(pending.rows);
++        const unfinished = new Set(
++          ids.length === 0
++            ? []
++            : tx
++                .select({ pluginId: pluginStateSnapshots.pluginId })
++                .from(pluginStateSnapshots)
++                .where(
++                  and(
++                    inArray(pluginStateSnapshots.pluginId, ids),
++                    inArray(pluginStateSnapshots.status, ["rollback-pending", "restoring"]),
++                  ),
++                )
++                .all()
++                .map((snapshot) => snapshot.pluginId),
++        );
 +        const steps: Step[] = Object.entries(pending.rows).map(([id, row]) => {
++          if (unfinished.has(id)) {
++            return {
++              id,
++              kind: "blocked",
++              note: "bb has not finished putting back a failed update of the copy the older 1ma installed; start the older 1ma once so it finishes, then run this again",
++            };
++          }
 +          const current = tx.select().from(installedPlugins).where(eq(installedPlugins.id, id)).get();
 +          if (current === undefined) return { id, kind: "restore", row, replacing: null };
 +          const problem = oneMaCopySourceProblem(current, id);
@@ -468,6 +498,9 @@ index 0000000..2fb6922
 +              : { id, kind: "conflict", note: problem };
 +          }
 +          const shipped = args.builtinVersions?.[id];
++          if (args.builtinVersions !== undefined && shipped === undefined) {
++            return { id, kind: "blocked", note: "the version of the built-in cannot be read from this 1ma package" };
++          }
 +          const installed = semver.valid(current.version);
 +          if (shipped !== undefined) {
 +            const why =
@@ -486,13 +519,16 @@ index 0000000..2fb6922
 +          }
 +          return { id, kind: "take-over", note: "installed by the older 1ma; built in again at the next start" };
 +        });
++        const blocked = steps.filter((step) => step.kind === "blocked");
 +        const conflicts = steps.filter((step) => step.kind === "conflict");
-+        if (conflicts.length > 0) {
++        if (blocked.length > 0 || conflicts.length > 0) {
 +          return {
 +            finished: false,
 +            lines: [
-+              ...conflicts.map((step) => `${step.id}: ${step.note}`),
-+              "not resumed, nothing changed: the way back stays prepared. Run this again with --replace-other-copies to unregister those copies, keeping the data of their ids, and bring the built-in plugins back",
++              ...[...blocked, ...conflicts].map((step) => `${step.id}: ${step.note}`),
++              conflicts.length > 0
++                ? "not resumed, nothing changed: the way back stays prepared. Run this again with --replace-other-copies to unregister those copies, keeping the data of their ids, and bring the built-in plugins back"
++                : "not resumed, nothing changed: the way back stays prepared",
 +            ],
 +          };
 +        }
@@ -509,7 +545,7 @@ index 0000000..2fb6922
 +                ? `${step.id}: back as it was`
 +                : `${step.id}: the copy from ${step.replacing.source} was unregistered, its data kept; back as it was`,
 +            );
-+          } else if (step.kind !== "conflict") {
++          } else if (step.kind === "take-over" || step.kind === "stays") {
 +            delete previous[step.id];
 +            lines.push(`${step.id}: ${step.note}`);
 +          }
@@ -753,7 +789,7 @@ index 8fa9e84..30b7061 100644
      }
    }
 diff --git a/apps/server/test/services/plugins/plugin-service.test.ts b/apps/server/test/services/plugins/plugin-service.test.ts
-index 5dd296e..e8a519e 100644
+index 5dd296e..9fbb168 100644
 --- a/apps/server/test/services/plugins/plugin-service.test.ts
 +++ b/apps/server/test/services/plugins/plugin-service.test.ts
 @@ -3,6 +3,7 @@ import {
@@ -764,7 +800,7 @@ index 5dd296e..e8a519e 100644
    rename,
    rm,
    symlink,
-@@ -16,12 +17,21 @@ import {
+@@ -16,12 +17,22 @@ import {
    createEnvironment,
    createProject,
    getInstalledPlugin,
@@ -777,6 +813,7 @@ index 5dd296e..e8a519e 100644
 +  setPluginSettingsValues,
 +  appSettingsValues,
 +  createPluginArtifact,
++  pluginStateSnapshots,
 +  installedPlugins,
 +  listPluginSchedules,
 +  upsertPluginSchedule,
@@ -786,7 +823,7 @@ index 5dd296e..e8a519e 100644
  import { createMigratedConnection } from "@bb/db/testing";
  import { PLUGIN_SDK_VERSION, type SystemChangeKind } from "@bb/domain";
  import type { Logger } from "@bb/logger";
-@@ -33,6 +43,8 @@ import {
+@@ -33,6 +44,8 @@ import {
  } from "../../../src/services/plugins/plugin-service.js";
  import { testLogger } from "../../helpers/test-app.js";
  import { pluginInstalledTelemetryEvent } from "../../../src/services/plugins/plugin-registration.js";
@@ -795,7 +832,7 @@ index 5dd296e..e8a519e 100644
  import type { TelemetryEvent } from "../../../src/services/system/telemetry.js";
  import { createNoopTelemetryService } from "../../../src/services/system/telemetry.js";
  import { createProviderRegistryService } from "../../../src/services/providers/provider-registry.js";
-@@ -230,6 +242,401 @@ describe("plugin service", () => {
+@@ -230,6 +243,452 @@ describe("plugin service", () => {
      expect(order).toEqual(["zz-provider", "aa-installed"]);
    });
  
@@ -1154,6 +1191,57 @@ index 5dd296e..e8a519e 100644
 +      expect(await readSecret(dataDir(), "1ma-brand", "token")).toBe("s3cret");
 +      expect(listPluginSchedules(db, "1ma-brand")).toMatchObject([{ name: "nightly" }]);
 +      expect(rollbackPending()).toBe(false);
++    });
++
++    it("--resume changes nothing, even with --replace-other-copies, while bb has not finished putting back a failed update of the copy", async () => {
++      await moveToBuiltIns();
++      await prepareOneMaRollback({ db, dataDir: dataDir(), pluginIds: oneMaIds });
++      const foreign = "git:https://github.com/someone/1ma-brand.git@^0";
++      await installCopy("1ma-brand", { kind: "git", repo: "https://github.com/someone/1ma-brand.git", withData: false });
++      db.insert(pluginStateSnapshots)
++        .values({
++          id: "snapshot-1",
++          pluginId: "1ma-brand",
++          fromArtifactId: null,
++          toArtifactId: "artifact-next",
++          snapshotPath: join(dataDir(), "plugins", "snapshots", "1ma-brand", "1"),
++          databasePath: null,
++          statePath: join(dataDir(), "plugins", "snapshots", "1ma-brand", "1", "host-state.json"),
++          secretsPath: null,
++          registrationPath: null,
++          status: "rollback-pending",
++          rollbackCandidateVersion: null,
++          rollbackSourceFingerprint: null,
++          rollbackBbVersion: null,
++          rollbackSdkVersion: null,
++          rollbackDetail: null,
++          createdAt: 1,
++          retainedUntil: 2,
++          updatedAt: 1,
++        })
++        .run();
++      const result = await resumeOneMa({ db, dataDir: dataDir(), replaceOtherCopies: true });
++      expect(result.finished).toBe(false);
++      expect(result.lines[0]).toContain("1ma-brand: bb has not finished putting back a failed update");
++      expect(getInstalledPluginRegistration(db, "1ma-brand")?.source).toBe(foreign);
++      expect(getInstalledPluginRegistration(db, "1ma-server-switcher")).toBeUndefined();
++      expect(rollbackPending()).toBe(true);
++    });
++
++    it("--resume changes nothing when the built-in's version cannot be read", async () => {
++      await moveToBuiltIns();
++      await prepareOneMaRollback({ db, dataDir: dataDir(), pluginIds: oneMaIds });
++      await installCopy("1ma-brand", { kind: "git", withData: false });
++      const result = await resumeOneMa({ db, dataDir: dataDir(), builtinVersions: {} });
++      expect(result).toEqual({
++        finished: false,
++        lines: [
++          "1ma-brand: the version of the built-in cannot be read from this 1ma package",
++          "not resumed, nothing changed: the way back stays prepared",
++        ],
++      });
++      expect(rollbackPending()).toBe(true);
++      expect(getInstalledPluginRegistration(db, "1ma-server-switcher")).toBeUndefined();
 +    });
 +
 +    it("--resume says a copy newer than the built-in stays installed, as the next start then leaves it", async () => {
