@@ -6,8 +6,9 @@
 // server/dist/one-ma-rollback.js removes the built-in rows; the new release
 // started again by habit leaves the 1ma plugins out; the older release
 // starts, the plugins are installed again and find their settings and
-// secrets, the one it never had keeps its secret; the new one takes them over
-// again. Run in CI only (it starts servers):
+// secrets, the one it never had keeps its secret; the new release keeps those
+// copies as they are until --resume, then takes them over again. Run in CI
+// only (it starts servers):
 //
 //   node desktop/scripts/check-rollback.mjs <older server tgz> <new server tgz>
 import { spawnSync } from "node:child_process";
@@ -45,10 +46,10 @@ const older = installTarball(path.resolve(olderTarball), path.join(root, "older"
 const newer = installTarball(path.resolve(newTarball), path.join(root, "new"));
 const releaseFolder = path.join(root, "release", "plugins", FROM_FOLDER);
 
-function rollback() {
+function rollback(...flags) {
   return spawnSync(
     process.execPath,
-    [path.join(newer.serverDist, "one-ma-rollback.js"), "--data-dir", dataDir],
+    [path.join(newer.serverDist, "one-ma-rollback.js"), "--data-dir", dataDir, ...flags],
     { encoding: "utf8" },
   );
 }
@@ -184,7 +185,19 @@ try {
     );
   });
 
-  await run("new release again", newer, async (server) => {
+  await run("new release before --resume", newer, async (server) => {
+    const plugins = await pluginsRunning(server, COPIES);
+    for (const id of COPIES) {
+      check(!plugins.get(id).source.startsWith("builtin:"), `${id} was built in before --resume`);
+    }
+    console.log("it keeps the copies the older release installed until --resume");
+  });
+
+  const resumed = rollback("--resume");
+  process.stdout.write(resumed.stdout);
+  check(resumed.status === 0, `one-ma-rollback.js --resume failed:\n${resumed.stderr}`);
+
+  await run("new release after --resume", newer, async (server) => {
     expectBuiltIn(await pluginsRunning(server, EMBEDDED));
     check((await settingsOf(server, "1ma-auto-updates")).providers === false, "a setting was lost");
     check(readSecret(NEW_ONLY) === "new", `the secret of ${NEW_ONLY} was lost`);
