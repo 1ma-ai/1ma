@@ -75,6 +75,21 @@ export function register1maSidebar<Store extends PreferenceStore>(bb: BbPluginAp
   };
 }
 
+// The built-in list's own row actions (thread-list/move) are this plugin's
+// own here (1ma-sidebar/move); a copied key must not depend on the built-in
+// plugin staying enabled.
+const BUILT_IN_ACTION_PREFIX = `${BUILT_IN_THREAD_LIST}/`;
+const OWN_ACTION_PREFIX = "1ma-sidebar/";
+
+export function ownActionKeys(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map((item: unknown) =>
+    typeof item === "string" && item.startsWith(BUILT_IN_ACTION_PREFIX)
+      ? `${OWN_ACTION_PREFIX}${item.slice(BUILT_IN_ACTION_PREFIX.length)}`
+      : item,
+  );
+}
+
 async function copyOnce(
   bb: BbPluginApi,
   store: PreferenceStore,
@@ -93,7 +108,7 @@ async function copyOnce(
     const ownerChose = await chosen();
     const copied: string[] = [];
     for (const key of PREFERENCE_KEYS) {
-      const value = result.preferences[key];
+      const value = ownActionKeys(result.preferences[key]);
       if (value === undefined || ownerChose.has(key)) continue;
       if (JSON.stringify(value) === JSON.stringify(getPreferenceDefault(key)))
         await store.reset(key);

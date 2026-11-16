@@ -198,3 +198,22 @@ describe("Codex re-review of stage 2: the built-in list's layout once it is read
     expect((await list(t.host)).preferences.organizationMode).toBe("chronological");
   });
 });
+
+describe("Codex review: copied row actions belong to 1ma Sidebar", () => {
+  it("maps the built-in list's own Move action to this plugin's", async () => {
+    const host = createFakePluginHost({
+      pluginId: "1ma-sidebar",
+      sdk: {
+        plugins: {
+          list: async () => ({ plugins: [{ id: "thread-list", enabled: true }] }),
+          callRpc: async () => ({
+            preferences: { rowActions: ["thread-list/move", "bb--core/pin"] },
+          }),
+        },
+        system: { uiPreferences: { list: async () => ({ preferences: {} }) } },
+      },
+    });
+    await plugin(host.bb);
+    expect((await list(host)).preferences.rowActions).toEqual(["1ma-sidebar/move", "bb--core/pin"]);
+  });
+});

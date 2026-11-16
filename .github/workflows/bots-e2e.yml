@@ -8,6 +8,11 @@ on:
       - "e2e/bots/**"
       - "e2e/lib/**"
       - ".github/workflows/bots-e2e.yml"
+      # How the plugins are installed and built: bb-app's own SDK comes from
+      # packageExtensions in pnpm-workspace.yaml.
+      - "package.json"
+      - "pnpm-workspace.yaml"
+      - "pnpm-lock.yaml"
   workflow_dispatch:
 
 concurrency:
