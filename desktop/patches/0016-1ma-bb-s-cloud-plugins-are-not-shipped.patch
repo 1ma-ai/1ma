@@ -25,11 +25,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  apps/desktop/src/connect-server-sync.ts       | 15 ++++
  apps/desktop/test/connect-server-sync.test.ts | 78 +++++++++++++++++++
  .../src/services/plugins/builtin-registry.ts  | 23 +++++-
+ .../public/public-host-management.test.ts     | 50 ++----------
  .../plugin-catalog-routes.test.ts             |  9 ++-
- .../plugin-catalog-service.test.ts            | 15 ++--
+ .../plugin-catalog-service.test.ts            | 22 ++++--
  .../services/plugins/builtin-registry.test.ts | 38 ++++++++-
  .../services/plugins/plugin-install.test.ts   | 26 ++++---
- 9 files changed, 179 insertions(+), 29 deletions(-)
+ 10 files changed, 193 insertions(+), 72 deletions(-)
 
 diff --git a/apps/app/src/components/settings/AiServicesSettingsSection.tsx b/apps/app/src/components/settings/AiServicesSettingsSection.tsx
 index 3b38568..a7f3ab4 100644
@@ -235,6 +236,79 @@ index 9822203..a28829e 100644
      ...plugin,
      rootDir: resolveBuiltinPluginRootPath(plugin.name),
    }));
+diff --git a/apps/server/test/public/public-host-management.test.ts b/apps/server/test/public/public-host-management.test.ts
+index ee6494b..f9cdaa5 100644
+--- a/apps/server/test/public/public-host-management.test.ts
++++ b/apps/server/test/public/public-host-management.test.ts
+@@ -840,7 +840,7 @@ describe("public host management", () => {
+     });
+   });
+ 
+-  it("asks the connect plugin to revoke the removed host's cloud machine", async () => {
++  it("removes a host enrolled through bb connect, which 1ma does not ship", async () => {
+     await withTestHarness(async (harness) => {
+       const primary = seedHost(harness.deps, { id: "host_primary" });
+       seedPrimaryHost(harness.deps, primary.id);
+@@ -848,53 +848,17 @@ describe("public host management", () => {
+         connectMachineId: "machine-cloud-remove",
+         id: "host_cloud_remove",
+       });
+-      const connectPlugin = await harness.pluginService.install(
+-        "builtin:connect",
+-        { kind: "root" },
+-      );
+-      expect(connectPlugin).toMatchObject({
+-        source: "builtin:connect",
+-        status: "running",
+-      });
+-      const revokeHandler = vi.fn(async () => ({ ok: true }));
+-      const revokeRecord = {
+-        publication: null,
+-        declarations: {},
+-        inputSchema: z.object({ machineId: z.string() }),
+-        outputSchema: z.object({ ok: z.literal(true) }),
+-        handler: revokeHandler,
+-      };
+-      const live = harness.pluginService.getRpcHandler(
+-        connectPlugin.id,
+-        "revokeMachine",
+-      );
+-      if (live.outcome !== "found") {
+-        throw new Error("connect plugin registers no revokeMachine handler");
+-      }
+-      vi.spyOn(harness.pluginService, "getRpcHandler").mockReturnValue({
+-        outcome: "found",
+-        value: revokeRecord,
+-        owner: live.owner,
+-      });
+-      const invoke = vi
+-        .spyOn(harness.pluginService, "invokeRpcHandler")
+-        .mockResolvedValue({
+-          ok: true,
+-          result: { ok: true },
+-        });
++      await expect(
++        harness.pluginService.install("builtin:connect", { kind: "root" }),
++      ).rejects.toThrow('unknown builtin plugin "connect"');
++      const invoke = vi.spyOn(harness.pluginService, "invokeRpcHandler");
+ 
+       const response = await harness.app.request(`${API}/hosts/${host.id}`, {
+         method: "DELETE",
+       });
+       expect(response.status).toBe(200);
+-      expect(invoke).toHaveBeenCalledWith(
+-        live.owner,
+-        "revokeMachine",
+-        revokeRecord,
+-        { machineId: "machine-cloud-remove" },
+-        { kind: "client" },
+-        null,
+-      );
++      expect(getHost(harness.db, host.id)?.destroyedAt).not.toBeNull();
++      expect(invoke).not.toHaveBeenCalled();
+     });
+   }, 30_000);
+ });
 diff --git a/apps/server/test/services/plugin-catalog/plugin-catalog-routes.test.ts b/apps/server/test/services/plugin-catalog/plugin-catalog-routes.test.ts
 index c511876..357c7fb 100644
 --- a/apps/server/test/services/plugin-catalog/plugin-catalog-routes.test.ts
@@ -263,20 +337,35 @@ index c511876..357c7fb 100644
        },
      });
 diff --git a/apps/server/test/services/plugin-catalog/plugin-catalog-service.test.ts b/apps/server/test/services/plugin-catalog/plugin-catalog-service.test.ts
-index d87db4e..7085681 100644
+index d87db4e..c5b9262 100644
 --- a/apps/server/test/services/plugin-catalog/plugin-catalog-service.test.ts
 +++ b/apps/server/test/services/plugin-catalog/plugin-catalog-service.test.ts
-@@ -31,8 +31,7 @@ import {
+@@ -31,8 +31,9 @@ import {
  import { BUNDLED_CURATED_MARKETPLACE } from "../../../src/services/plugin-catalog/curated-marketplace.js";
  import { loadBundledMarketplace } from "../../../src/services/plugin-catalog/bundled-marketplace.js";
  import {
 -  BUILTIN_PLUGINS,
--  BUNDLED_PLUGINS,
+   BUNDLED_PLUGINS,
++  CLOUD_PLUGIN_NAMES,
 +  SHIPPED_BB_PLUGINS,
    OFFICIAL_PLUGINS,
    listBundledPluginRegistrations,
  } from "../../../src/services/plugins/builtin-registry.js";
-@@ -180,15 +179,17 @@ describe("plugin catalog service", () => {
+@@ -48,7 +49,12 @@ const SEED_ENTRY_COUNT = BUNDLED_CURATED_MARKETPLACE.plugins.length;
+ const BUNDLED_CATALOG = loadBundledMarketplace(
+   listBundledPluginRegistrations(),
+ ).catalog;
+-const OFFICIAL_ORDER = BUNDLED_CATALOG.collections?.[0]?.pluginIds ?? [];
++const CLOUD_PLUGIN_IDS = BUNDLED_PLUGINS.filter((plugin) =>
++  CLOUD_PLUGIN_NAMES.includes(plugin.name),
++).map((plugin) => plugin.pluginId);
++const OFFICIAL_ORDER = (
++  BUNDLED_CATALOG.collections?.[0]?.pluginIds ?? []
++).filter((pluginId) => !CLOUD_PLUGIN_IDS.includes(pluginId));
+ 
+ const VALID_SVG = Buffer.from(
+   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M0 0h16v16H0z"/></svg>',
+@@ -180,15 +186,17 @@ describe("plugin catalog service", () => {
    it("lists bundled plugins and the seeded official catalog", async () => {
      const catalog = service();
      expect(catalog.status()).toEqual({
@@ -297,7 +386,7 @@ index d87db4e..7085681 100644
          ...BUNDLED_CURATED_MARKETPLACE.plugins.map((entry) => entry.id),
        ].sort(),
      );
-@@ -221,7 +222,7 @@ describe("plugin catalog service", () => {
+@@ -221,7 +229,7 @@ describe("plugin catalog service", () => {
        ),
      ).toEqual({
        ...Object.fromEntries(
@@ -306,7 +395,7 @@ index d87db4e..7085681 100644
        ),
        ...Object.fromEntries(
          BUNDLED_CURATED_MARKETPLACE.plugins.map((entry) => [entry.id, false]),
-@@ -774,7 +775,7 @@ describe("plugin catalog service", () => {
+@@ -774,7 +782,7 @@ describe("plugin catalog service", () => {
          "HTTP 503",
        );
        expect((await catalog.search("")).length).toBe(
