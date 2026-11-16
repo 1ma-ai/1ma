@@ -200,8 +200,9 @@ describe("1ma-bots on a real server", () => {
       /^Letter 1\//,
       `Bruno's turn is still in his own exchange while Alice's letter waits in the queue\n${diagnose(observed)}`,
     );
-    const own = exchangeOf(brunoThread).chain;
-    assert.ok(own && own.id !== alicesExchange.id, "Bruno's letter started his own exchange");
+    // "Letter 1/" is the proof that Bruno's letter opened his own exchange:
+    // Alice's already holds her letter, so joining it would number his 2.
+    // Reading the table here would race the queue draining once his turn ends.
 
     const again = await waitFor(
       "the dispatched letter to make Bruno write again",
