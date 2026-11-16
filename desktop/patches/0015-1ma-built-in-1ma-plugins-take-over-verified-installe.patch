@@ -147,7 +147,7 @@ index 0000000..f502ca2
 +}
 diff --git a/apps/server/src/services/plugins/one-ma-rollback.ts b/apps/server/src/services/plugins/one-ma-rollback.ts
 new file mode 100644
-index 0000000..c6e726d
+index 0000000..066a6f9
 --- /dev/null
 +++ b/apps/server/src/services/plugins/one-ma-rollback.ts
 @@ -0,0 +1,407 @@
@@ -486,7 +486,7 @@ index 0000000..c6e726d
 +            return {
 +              id,
 +              kind: "blocked",
-+              note: "bb has not finished putting back a failed update of the copy the older 1ma installed; start the older 1ma once so it finishes, then run this again",
++              note: "1ma has not finished putting back a failed update of the copy the older 1ma installed; start the older 1ma once so it finishes, then run this again",
 +            };
 +          }
 +          const current = tx.select().from(installedPlugins).where(eq(installedPlugins.id, id)).get();
@@ -789,7 +789,7 @@ index 8fa9e84..30b7061 100644
      }
    }
 diff --git a/apps/server/test/services/plugins/plugin-service.test.ts b/apps/server/test/services/plugins/plugin-service.test.ts
-index 5dd296e..9fbb168 100644
+index 5dd296e..072ac3a 100644
 --- a/apps/server/test/services/plugins/plugin-service.test.ts
 +++ b/apps/server/test/services/plugins/plugin-service.test.ts
 @@ -3,6 +3,7 @@ import {
@@ -1193,7 +1193,7 @@ index 5dd296e..9fbb168 100644
 +      expect(rollbackPending()).toBe(false);
 +    });
 +
-+    it("--resume changes nothing, even with --replace-other-copies, while bb has not finished putting back a failed update of the copy", async () => {
++    it("--resume changes nothing, even with --replace-other-copies, while 1ma has not finished putting back a failed update of the copy", async () => {
 +      await moveToBuiltIns();
 +      await prepareOneMaRollback({ db, dataDir: dataDir(), pluginIds: oneMaIds });
 +      const foreign = "git:https://github.com/someone/1ma-brand.git@^0";
@@ -1222,7 +1222,7 @@ index 5dd296e..9fbb168 100644
 +        .run();
 +      const result = await resumeOneMa({ db, dataDir: dataDir(), replaceOtherCopies: true });
 +      expect(result.finished).toBe(false);
-+      expect(result.lines[0]).toContain("1ma-brand: bb has not finished putting back a failed update");
++      expect(result.lines[0]).toContain("1ma-brand: 1ma has not finished putting back a failed update");
 +      expect(getInstalledPluginRegistration(db, "1ma-brand")?.source).toBe(foreign);
 +      expect(getInstalledPluginRegistration(db, "1ma-server-switcher")).toBeUndefined();
 +      expect(rollbackPending()).toBe(true);
