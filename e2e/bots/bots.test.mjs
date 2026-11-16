@@ -164,9 +164,8 @@ describe("1ma-bots on a real server", () => {
       `[stub:wait 45] ${stubCall("bot_message", toAlice("first-from-bruno"))}`,
     );
     await waitStatus(brunoThread, "active");
-    const own = exchangeOf(brunoThread);
-    assert.ok(own.chain, "Bruno's own message started an exchange");
-    assert.equal(own.chain.letters, 0);
+    // Bruno's own exchange starts with his first letter in this turn.
+    const before = exchangeOf(brunoThread);
     await say(
       aliceThread,
       stubCall("bot_message", { to: bruno.id, threadId: brunoThread, text: second }),
@@ -179,7 +178,7 @@ describe("1ma-bots on a real server", () => {
     const waiting = exchangeOf(brunoThread);
     assert.deepEqual(
       waiting,
-      { chain: own.chain, waiting: 1 },
+      { chain: before.chain, waiting: 1 },
       `a queued letter leaves Bruno's exchange alone; the queue: ${JSON.stringify(
         (await server.api("GET", `/threads/${brunoThread}/queued-messages`)).map((row) => [
           row.state,
@@ -188,7 +187,7 @@ describe("1ma-bots on a real server", () => {
       )}; Alice's exchange: ${JSON.stringify(exchangeOf(aliceThread))}`,
     );
     const alicesExchange = exchangeOf(aliceThread).chain;
-    assert.ok(alicesExchange && alicesExchange.id !== own.chain.id);
+    assert.ok(alicesExchange);
     const observed = {
       queued: await server.api("GET", `/threads/${brunoThread}/queued-messages`),
       status: (await thread(brunoThread)).status,
@@ -201,6 +200,8 @@ describe("1ma-bots on a real server", () => {
       /^Letter 1\//,
       `Bruno's turn is still in his own exchange while Alice's letter waits in the queue\n${diagnose(observed)}`,
     );
+    const own = exchangeOf(brunoThread).chain;
+    assert.ok(own && own.id !== alicesExchange.id, "Bruno's letter started his own exchange");
 
     const again = await waitFor(
       "the dispatched letter to make Bruno write again",
