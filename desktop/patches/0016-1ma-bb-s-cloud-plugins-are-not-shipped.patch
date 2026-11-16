@@ -1,0 +1,434 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Mon, 16 Nov 2026 21:00:07 +0100
+Subject: [PATCH] 1ma: bb's cloud plugins are not shipped
+
+1ma does not ship bb's cloud services, which send data to getbb.app, until
+1ma runs its own. The bb-account, bb-ai, connect and connect-next plugins
+stay in BUNDLED_PLUGINS, because bb's catalog generator needs an entry for
+each item there, but SHIPPED_PLUGINS and the bundled registrations leave
+them out. They are not built into the app, not installed, and not listed in
+the store (the bundled marketplace filters by registration names).
+
+The desktop Server menu offered "Sign in to bb Connect" whenever there was
+no saved credential, even when the local server said the connect plugin was
+disabled or not installed. A 404 "unknown plugin" answer now maps to
+"plugin-disabled", and that reason wins over "no-credential", so the menu
+shows no sign-in item.
+
+The AI services text and search keyword no longer mention bb cloud.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../settings/AiServicesSettingsSection.tsx    |  2 +-
+ .../components/settings/settings-search.ts    |  2 +-
+ apps/desktop/src/connect-server-sync.ts       | 15 ++++
+ apps/desktop/test/connect-server-sync.test.ts | 78 +++++++++++++++++++
+ .../src/services/plugins/builtin-registry.ts  | 23 +++++-
+ .../plugin-catalog-routes.test.ts             |  9 ++-
+ .../plugin-catalog-service.test.ts            | 15 ++--
+ .../services/plugins/builtin-registry.test.ts | 38 ++++++++-
+ .../services/plugins/plugin-install.test.ts   | 26 ++++---
+ 9 files changed, 179 insertions(+), 29 deletions(-)
+
+diff --git a/apps/app/src/components/settings/AiServicesSettingsSection.tsx b/apps/app/src/components/settings/AiServicesSettingsSection.tsx
+index 3b38568..a7f3ab4 100644
+--- a/apps/app/src/components/settings/AiServicesSettingsSection.tsx
++++ b/apps/app/src/components/settings/AiServicesSettingsSection.tsx
+@@ -203,7 +203,7 @@ export function AiServicesSettingsSection() {
+   return (
+     <SettingsSection
+       title="AI services"
+-      description="Choose services for thread titles, commit messages, and voice input. Automatic prefers bb cloud, then other available services. A service you choose stays selected."
++      description="Choose services for thread titles, commit messages, and voice input. Automatic picks an available service. A service you choose stays selected."
+     >
+       <div className="space-y-5">
+         {AI_TASK_ROWS.map((row) => {
+diff --git a/apps/app/src/components/settings/settings-search.ts b/apps/app/src/components/settings/settings-search.ts
+index c7d16a5..9f08062 100644
+--- a/apps/app/src/components/settings/settings-search.ts
++++ b/apps/app/src/components/settings/settings-search.ts
+@@ -126,7 +126,7 @@ export const SETTINGS_SEARCH_INDEX: Record<
+     ],
+   },
+   "ai-services": {
+-    keywords: ["bb cloud", "llm"],
++    keywords: ["llm"],
+     settings: [
+       {
+         title: "Thread titles",
+diff --git a/apps/desktop/src/connect-server-sync.ts b/apps/desktop/src/connect-server-sync.ts
+index 4450fd3..ce5830d 100644
+--- a/apps/desktop/src/connect-server-sync.ts
++++ b/apps/desktop/src/connect-server-sync.ts
+@@ -107,6 +107,14 @@ export async function fetchConnectAccountServers(
+   if (response.status === 503) {
+     return { ok: false, reason: "plugin-disabled" };
+   }
++  // The RPC route answers 404 with a plain-string error for a plugin the
++  // server does not have at all; a missing method is a 404 with an object.
++  if (response.status === 404) {
++    const missing = rpcFailureSchema.safeParse(body);
++    if (missing.success && typeof missing.data.error === "string") {
++      return { ok: false, reason: "plugin-disabled" };
++    }
++  }
+   const failure = rpcFailureSchema.safeParse(body);
+   if (
+     failure.success &&
+@@ -217,6 +225,13 @@ export function createConnectServerSync(
+       firstFailure ??= outcome;
+     }
+     if (credential === null && session === null) {
++      if (
++        firstFailure !== null &&
++        !firstFailure.ok &&
++        firstFailure.reason === "plugin-disabled"
++      ) {
++        return firstFailure;
++      }
+       return { ok: false, reason: "no-credential" };
+     }
+     return firstFailure ?? { ok: false, reason: "no-credential" };
+diff --git a/apps/desktop/test/connect-server-sync.test.ts b/apps/desktop/test/connect-server-sync.test.ts
+index 1e7fc72..1e9247b 100644
+--- a/apps/desktop/test/connect-server-sync.test.ts
++++ b/apps/desktop/test/connect-server-sync.test.ts
+@@ -78,6 +78,33 @@ describe("fetchConnectAccountServers", () => {
+       }),
+     ).resolves.toEqual({ ok: false, reason: "plugin-disabled" });
+ 
++    await expect(
++      fetchConnectAccountServers({
++        serverUrl: "http://127.0.0.1:38886",
++        fetchImpl: async () => ({
++          ok: false,
++          status: 404,
++          json: async () => ({ ok: false, error: 'unknown plugin "connect"' }),
++          text: async () => "",
++        }),
++      }),
++    ).resolves.toEqual({ ok: false, reason: "plugin-disabled" });
++
++    await expect(
++      fetchConnectAccountServers({
++        serverUrl: "http://127.0.0.1:38886",
++        fetchImpl: async () => ({
++          ok: false,
++          status: 404,
++          json: async () => ({
++            ok: false,
++            error: { code: "unknown_method", message: "no such method" },
++          }),
++          text: async () => "",
++        }),
++      }),
++    ).resolves.toEqual({ ok: false, reason: "unavailable" });
++
+     await expect(
+       fetchConnectAccountServers({
+         serverUrl: "http://127.0.0.1:38886",
+@@ -124,6 +151,57 @@ describe("fetchConnectAccountServers", () => {
+ });
+ 
+ describe("createConnectServerSync", () => {
++  it.each([
++    [
++      503,
++      "plugin-disabled",
++      'plugin "connect" is not running (status: disabled)',
++    ],
++    [404, "plugin-disabled", 'unknown plugin "connect"'],
++  ] as const)(
++    "offers no sign-in when the local server answers %i for the connect plugin and nothing is signed in",
++    async (status, reason, error) => {
++      const skipped: string[] = [];
++      const sync = createConnectServerSync({
++        getAccountSession: async () => null,
++        getCredential: () => null,
++        getLocalServerUrl: () => "http://127.0.0.1:38886",
++        onServers: () => undefined,
++        onSkipped: (skippedReason) => skipped.push(skippedReason),
++        onUnauthorized: () => undefined,
++        fetchImpl: async () => ({
++          ok: false,
++          status,
++          json: async () => ({ ok: false, error }),
++          text: async () => "",
++        }),
++        setIntervalFn: () => 0,
++      });
++
++      await sync.syncNow();
++      expect(skipped).toEqual([reason]);
++    },
++  );
++
++  it("still offers sign-in when nothing is signed in and the local server is only unreachable", async () => {
++    const skipped: string[] = [];
++    const sync = createConnectServerSync({
++      getAccountSession: async () => null,
++      getCredential: () => null,
++      getLocalServerUrl: () => "http://127.0.0.1:38886",
++      onServers: () => undefined,
++      onSkipped: (reason) => skipped.push(reason),
++      onUnauthorized: () => undefined,
++      fetchImpl: async () => {
++        throw new Error("down");
++      },
++      setIntervalFn: () => 0,
++    });
++
++    await sync.syncNow();
++    expect(skipped).toEqual(["no-credential"]);
++  });
++
+   it("hands fresh servers to onServers and skips list trigger within the min interval", async () => {
+     let now = 1_000_000;
+     let received: ConnectAccountServer[] | null = null;
+diff --git a/apps/server/src/services/plugins/builtin-registry.ts b/apps/server/src/services/plugins/builtin-registry.ts
+index 9822203..a28829e 100644
+--- a/apps/server/src/services/plugins/builtin-registry.ts
++++ b/apps/server/src/services/plugins/builtin-registry.ts
+@@ -291,6 +291,23 @@ export const BUNDLED_PLUGINS: readonly BundledPluginDefinition[] = [
+   ...OFFICIAL_PLUGINS,
+ ];
+ 
++/**
++ * bb's cloud plugins: they sign in to and send data to bb's own services
++ * (getbb.app). 1ma does not ship them until it runs its own cloud. They stay
++ * in BUNDLED_PLUGINS because bb's catalog generator needs an entry for every
++ * item there.
++ */
++export const CLOUD_PLUGIN_NAMES: readonly string[] = [
++  "bb-account",
++  "bb-ai",
++  "connect",
++  "connect-next",
++];
++
++/** The bundled bb plugins 1ma ships: BUNDLED_PLUGINS without the cloud ones. */
++export const SHIPPED_BB_PLUGINS: readonly BundledPluginDefinition[] =
++  BUNDLED_PLUGINS.filter((plugin) => !CLOUD_PLUGIN_NAMES.includes(plugin.name));
++
+ /**
+  * The 1ma plugins. They live in the 1ma repository, not in this workspace:
+  * the 1ma build prepares each one with this tree's prepare-bundled and puts
+@@ -310,9 +327,9 @@ export const ONE_MA_PLUGINS: readonly BundledPluginDefinition[] = [
+   autoInstall: true,
+ }));
+ 
+-/** Every plugin that ships inside the app: bb's bundled ones and 1ma's. */
++/** Every plugin that ships inside the app: bb's bundled ones (minus its cloud plugins) and 1ma's. */
+ export const SHIPPED_PLUGINS: readonly BundledPluginDefinition[] = [
+-  ...BUNDLED_PLUGINS,
++  ...SHIPPED_BB_PLUGINS,
+   ...ONE_MA_PLUGINS,
+ ];
+ 
+@@ -384,7 +401,7 @@ export function resolveBuiltinPluginRootPath(name: string): string {
+ }
+ 
+ export function listBundledPluginRegistrations(): BundledPluginRegistration[] {
+-  return BUNDLED_PLUGINS.map((plugin) => ({
++  return SHIPPED_BB_PLUGINS.map((plugin) => ({
+     ...plugin,
+     rootDir: resolveBuiltinPluginRootPath(plugin.name),
+   }));
+diff --git a/apps/server/test/services/plugin-catalog/plugin-catalog-routes.test.ts b/apps/server/test/services/plugin-catalog/plugin-catalog-routes.test.ts
+index c511876..357c7fb 100644
+--- a/apps/server/test/services/plugin-catalog/plugin-catalog-routes.test.ts
++++ b/apps/server/test/services/plugin-catalog/plugin-catalog-routes.test.ts
+@@ -11,8 +11,7 @@ import { createPluginCatalogService } from "../../../src/services/plugin-catalog
+ import { refreshCuratedMarketplace } from "../../helpers/plugin-catalog.js";
+ import { BUNDLED_CURATED_MARKETPLACE } from "../../../src/services/plugin-catalog/curated-marketplace.js";
+ import {
+-  BUILTIN_PLUGINS,
+-  BUNDLED_PLUGINS,
++  SHIPPED_BB_PLUGINS,
+   OFFICIAL_PLUGINS,
+ } from "../../../src/services/plugins/builtin-registry.js";
+ 
+@@ -74,8 +73,10 @@ describe("plugin catalog routes", () => {
+     const status = await app.request("/plugin-catalog");
+     await expect(status.json()).resolves.toMatchObject({
+       catalog: {
+-        pluginCount: BUNDLED_PLUGINS.length + SEED_ENTRY_COUNT,
+-        includedPluginCount: BUILTIN_PLUGINS.length,
++        pluginCount: SHIPPED_BB_PLUGINS.length + SEED_ENTRY_COUNT,
++        includedPluginCount: SHIPPED_BB_PLUGINS.filter(
++          (plugin) => plugin.autoInstall,
++        ).length,
+         optionalPluginCount: OFFICIAL_PLUGINS.length + SEED_ENTRY_COUNT,
+       },
+     });
+diff --git a/apps/server/test/services/plugin-catalog/plugin-catalog-service.test.ts b/apps/server/test/services/plugin-catalog/plugin-catalog-service.test.ts
+index d87db4e..7085681 100644
+--- a/apps/server/test/services/plugin-catalog/plugin-catalog-service.test.ts
++++ b/apps/server/test/services/plugin-catalog/plugin-catalog-service.test.ts
+@@ -31,8 +31,7 @@ import {
+ import { BUNDLED_CURATED_MARKETPLACE } from "../../../src/services/plugin-catalog/curated-marketplace.js";
+ import { loadBundledMarketplace } from "../../../src/services/plugin-catalog/bundled-marketplace.js";
+ import {
+-  BUILTIN_PLUGINS,
+-  BUNDLED_PLUGINS,
++  SHIPPED_BB_PLUGINS,
+   OFFICIAL_PLUGINS,
+   listBundledPluginRegistrations,
+ } from "../../../src/services/plugins/builtin-registry.js";
+@@ -180,15 +179,17 @@ describe("plugin catalog service", () => {
+   it("lists bundled plugins and the seeded official catalog", async () => {
+     const catalog = service();
+     expect(catalog.status()).toEqual({
+-      pluginCount: BUNDLED_PLUGINS.length + SEED_ENTRY_COUNT,
+-      includedPluginCount: BUILTIN_PLUGINS.length,
++      pluginCount: SHIPPED_BB_PLUGINS.length + SEED_ENTRY_COUNT,
++      includedPluginCount: SHIPPED_BB_PLUGINS.filter(
++          (plugin) => plugin.autoInstall,
++        ).length,
+       optionalPluginCount: OFFICIAL_PLUGINS.length + SEED_ENTRY_COUNT,
+     });
+ 
+     const results = await catalog.search("");
+     expect(results.map((entry) => entry.entryId).sort()).toEqual(
+       [
+-        ...BUNDLED_PLUGINS.map((plugin) => plugin.name),
++        ...SHIPPED_BB_PLUGINS.map((plugin) => plugin.name),
+         ...BUNDLED_CURATED_MARKETPLACE.plugins.map((entry) => entry.id),
+       ].sort(),
+     );
+@@ -221,7 +222,7 @@ describe("plugin catalog service", () => {
+       ),
+     ).toEqual({
+       ...Object.fromEntries(
+-        BUNDLED_PLUGINS.map((plugin) => [plugin.name, plugin.autoInstall]),
++        SHIPPED_BB_PLUGINS.map((plugin) => [plugin.name, plugin.autoInstall]),
+       ),
+       ...Object.fromEntries(
+         BUNDLED_CURATED_MARKETPLACE.plugins.map((entry) => [entry.id, false]),
+@@ -774,7 +775,7 @@ describe("plugin catalog service", () => {
+         "HTTP 503",
+       );
+       expect((await catalog.search("")).length).toBe(
+-        BUNDLED_PLUGINS.length + SEED_ENTRY_COUNT,
++        SHIPPED_BB_PLUGINS.length + SEED_ENTRY_COUNT,
+       );
+       expect(getPluginMarketplace(db, "bb-community")?.lastError).toContain(
+         "HTTP 503",
+diff --git a/apps/server/test/services/plugins/builtin-registry.test.ts b/apps/server/test/services/plugins/builtin-registry.test.ts
+index 0599b3e..23c8ba3 100644
+--- a/apps/server/test/services/plugins/builtin-registry.test.ts
++++ b/apps/server/test/services/plugins/builtin-registry.test.ts
+@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
+ import {
+   BUILTIN_PLUGIN_ID_PREFIX,
+   BUNDLED_PLUGINS,
++  CLOUD_PLUGIN_NAMES,
+   ONE_MA_PLUGINS,
++  SHIPPED_PLUGINS,
+   listBundledPluginRegistrations,
+   listShippedPluginRegistrations,
+   resolveBuiltinPluginRootPathForModuleDir,
+@@ -77,14 +79,46 @@ describe("1ma plugins", () => {
+     }
+     expect(
+       listShippedPluginRegistrations().map((plugin) => plugin.pluginId),
+-    ).toEqual([...BUNDLED_PLUGINS, ...ONE_MA_PLUGINS].map((plugin) => plugin.pluginId));
++    ).toEqual(
++      [
++        ...BUNDLED_PLUGINS.filter(
++          (plugin) => !CLOUD_PLUGIN_NAMES.includes(plugin.name),
++        ),
++        ...ONE_MA_PLUGINS,
++      ].map((plugin) => plugin.pluginId),
++    );
+     expect(
+       listBundledPluginRegistrations().map((plugin) => plugin.pluginId),
+-    ).toEqual(BUNDLED_PLUGINS.map((plugin) => plugin.pluginId));
++    ).toEqual(
++      BUNDLED_PLUGINS.filter(
++        (plugin) => !CLOUD_PLUGIN_NAMES.includes(plugin.name),
++      ).map((plugin) => plugin.pluginId),
++    );
+     expect(BUNDLED_PLUGINS.some((plugin) => plugin.pluginId.startsWith("1ma-"))).toBe(false);
+   });
+ });
+ 
++describe("bb's cloud plugins", () => {
++  const CLOUD_NAMES = ["bb-account", "bb-ai", "connect", "connect-next"];
++
++  it("stay in bb's bundled list but are not shipped or registered", () => {
++    expect([...CLOUD_PLUGIN_NAMES]).toEqual(CLOUD_NAMES);
++    const bundledNames = BUNDLED_PLUGINS.map((plugin) => plugin.name);
++    const shippedNames = SHIPPED_PLUGINS.map((plugin) => plugin.name);
++    const registeredNames = listBundledPluginRegistrations().map(
++      (plugin) => plugin.name,
++    );
++    for (const name of CLOUD_NAMES) {
++      expect(bundledNames).toContain(name);
++      expect(shippedNames).not.toContain(name);
++      expect(registeredNames).not.toContain(name);
++      expect(
++        listShippedPluginRegistrations().map((plugin) => plugin.name),
++      ).not.toContain(name);
++    }
++  });
++});
++
+ describe("bundled plugin artifact resolution", () => {
+   let root: string;
+ 
+diff --git a/apps/server/test/services/plugins/plugin-install.test.ts b/apps/server/test/services/plugins/plugin-install.test.ts
+index 0cbdb4c..ea7b52f 100644
+--- a/apps/server/test/services/plugins/plugin-install.test.ts
++++ b/apps/server/test/services/plugins/plugin-install.test.ts
+@@ -773,15 +773,17 @@ describe("plugin install flows", () => {
+     });
+ 
+     it("refuses a git plugin that shadows a builtin after materialization", async () => {
+-      const repoDir = join(workDir, "repo-connect");
+-      await writePluginFixture(repoDir, { name: "bb-plugin-connect" });
++      const repoDir = join(workDir, "repo-automations");
++      await writePluginFixture(repoDir, { name: "bb-plugin-automations" });
+       await initGitRepo(repoDir);
+       await commitAll(repoDir, "init");
+ 
+       await expect(
+         service.install(`git:${repoDir}@main`, { kind: "root" }),
+-      ).rejects.toThrowError(/reserved by the bundled plugin.*builtin:connect/);
+-      expect(getInstalledPluginRegistration(db, "connect")).toBeUndefined();
++      ).rejects.toThrowError(
++        /reserved by the bundled plugin.*builtin:automations/,
++      );
++      expect(getInstalledPluginRegistration(db, "automations")).toBeUndefined();
+     });
+ 
+     it("installs a pinned commit sha via clone + checkout", async () => {
+@@ -1769,18 +1771,20 @@ describe("plugin install flows", () => {
+ 
+   it("refuses an npm package whose derived id shadows a builtin before install", async () => {
+     await expect(
+-      service.install("npm:bb-plugin-connect@1.2.3", { kind: "root" }),
+-    ).rejects.toThrowError(/reserved by the bundled plugin.*builtin:connect/);
+-    expect(getInstalledPluginRegistration(db, "connect")).toBeUndefined();
++      service.install("npm:bb-plugin-automations@1.2.3", { kind: "root" }),
++    ).rejects.toThrowError(
++      /reserved by the bundled plugin.*builtin:automations/,
++    );
++    expect(getInstalledPluginRegistration(db, "automations")).toBeUndefined();
+   });
+ 
+   it("refuses a path plugin whose manifest id shadows a builtin", async () => {
+-    const rootDir = join(workDir, "bb-plugin-connect");
+-    await writePluginFixture(rootDir, { name: "bb-plugin-connect" });
++    const rootDir = join(workDir, "bb-plugin-automations");
++    await writePluginFixture(rootDir, { name: "bb-plugin-automations" });
+     await expect(service.installPath(rootDir)).rejects.toThrowError(
+-      /reserved by the bundled plugin.*builtin:connect/,
++      /reserved by the bundled plugin.*builtin:automations/,
+     );
+-    expect(getInstalledPluginRegistration(db, "connect")).toBeUndefined();
++    expect(getInstalledPluginRegistration(db, "automations")).toBeUndefined();
+   });
+ 
+   it("refuses a path plugin whose id uses the reserved bb-- prefix", async () => {
