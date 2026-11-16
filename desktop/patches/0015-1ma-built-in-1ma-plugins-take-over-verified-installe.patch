@@ -44,10 +44,10 @@ built-in's version cannot be read.
 ---
  apps/server/package.json                      |   2 +-
  apps/server/src/one-ma-rollback.ts            |  75 +++
- .../src/services/plugins/one-ma-rollback.ts   | 407 ++++++++++++++++
+ .../src/services/plugins/one-ma-rollback.ts   | 408 ++++++++++++++++
  .../services/plugins/plugin-registration.ts   | 170 ++++++-
  .../services/plugins/plugin-service.test.ts   | 459 ++++++++++++++++++
- 5 files changed, 1086 insertions(+), 27 deletions(-)
+ 5 files changed, 1087 insertions(+), 27 deletions(-)
  create mode 100644 apps/server/src/one-ma-rollback.ts
  create mode 100644 apps/server/src/services/plugins/one-ma-rollback.ts
 
@@ -147,10 +147,10 @@ index 0000000..f502ca2
 +}
 diff --git a/apps/server/src/services/plugins/one-ma-rollback.ts b/apps/server/src/services/plugins/one-ma-rollback.ts
 new file mode 100644
-index 0000000..066a6f9
+index 0000000..89f5626
 --- /dev/null
 +++ b/apps/server/src/services/plugins/one-ma-rollback.ts
-@@ -0,0 +1,407 @@
+@@ -0,0 +1,408 @@
 +import { readFileSync } from "node:fs";
 +import { mkdir, rename, rm, stat } from "node:fs/promises";
 +import { join } from "node:path";
@@ -519,8 +519,9 @@ index 0000000..066a6f9
 +          }
 +          return { id, kind: "take-over", note: "installed by the older 1ma; built in again at the next start" };
 +        });
-+        const blocked = steps.filter((step) => step.kind === "blocked");
-+        const conflicts = steps.filter((step) => step.kind === "conflict");
++        type Stop = Extract<Step, { kind: "conflict" | "blocked" }>;
++        const blocked = steps.filter((step): step is Stop => step.kind === "blocked");
++        const conflicts = steps.filter((step): step is Stop => step.kind === "conflict");
 +        if (blocked.length > 0 || conflicts.length > 0) {
 +          return {
 +            finished: false,
