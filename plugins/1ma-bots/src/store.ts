@@ -84,6 +84,7 @@ export const MIGRATIONS = [
     bot_id TEXT NOT NULL,
     created_at INTEGER NOT NULL
   );`,
+  `ALTER TABLE thread_chains ADD COLUMN owner_turn INTEGER`,
 ];
 
 interface BotRow {

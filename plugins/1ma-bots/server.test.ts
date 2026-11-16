@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   createFakePluginHost,
-  makeMessageDispatchHookContext,
   makePluginAgentConfigurationContext,
   makeQueueEntry,
   makeThreadResponse,
@@ -19,10 +18,28 @@ interface SentLetter {
 
 function setup(settings: Record<string, number> = {}) {
   const delivery = { immediate: true, queued: [] as SentLetter[] };
-  // Stands in for bb starting the recipient's turn with the queued letter.
+  // The turn requests bb records per conversation, newest last.
+  const requests = new Map<
+    string,
+    Array<{ seq: number; initiator: string; sender: string | null; id: string; rejected?: true }>
+  >();
+  let seq = 0;
+  const recordTurn = (
+    threadId: string,
+    initiator: "user" | "agent",
+    sender: string | null,
+    rejected?: true,
+  ) => {
+    seq += 1;
+    requests.set(threadId, [
+      ...(requests.get(threadId) ?? []),
+      { seq, initiator, sender, id: `req_${seq}`, ...(rejected ? { rejected } : {}) },
+    ]);
+  };
   // Stands in for bb taking a queued letter out of the queue into a turn.
-  const deliver = (letter: SentLetter) =>
-    host.harness.behavior.emitThreadEvent("message.dispatched", {
+  const deliver = async (letter: SentLetter) => {
+    recordTurn(letter.threadId, "agent", letter.senderThreadId ?? null);
+    await host.harness.behavior.emitThreadEvent("message.dispatched", {
       entry: makeQueueEntry({
         threadId: letter.threadId,
         initiator: "agent",
@@ -34,6 +51,7 @@ function setup(settings: Record<string, number> = {}) {
         })) as never,
       }),
     });
+  };
   let clock = START;
   let nextThread = 100;
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
@@ -51,7 +69,10 @@ function setup(settings: Record<string, number> = {}) {
               block.type === "text" ? [{ type: "text", text: block.text }] : [],
             ),
           };
-          if (delivery.immediate) return { delivery: "sent" };
+          if (delivery.immediate) {
+            recordTurn(letter.threadId, "agent", letter.senderThreadId ?? null);
+            return { delivery: "sent" };
+          }
           delivery.queued.push(letter);
           return { delivery: "queued" };
         },
@@ -60,6 +81,37 @@ function setup(settings: Record<string, number> = {}) {
         get: async ({ threadId }: { threadId: string }) =>
           threads.get(threadId) ?? makeThreadResponse({ id: threadId }),
         interactions: { list: async () => [] },
+        events: {
+          list: async ({ threadId }: { threadId: string }) =>
+            (requests.get(threadId) ?? []).toReversed().flatMap((request) => [
+              ...(request.rejected
+                ? [
+                    {
+                      id: `${request.id}_rejected`,
+                      scope: "thread",
+                      threadId,
+                      seq: request.seq + 0.5,
+                      createdAt: request.seq,
+                      type: "client/turn/rejected",
+                      data: { requestId: request.id, message: "refused", reason: "provider" },
+                    },
+                  ]
+                : []),
+              {
+                id: request.id,
+                scope: "thread",
+                threadId,
+                seq: request.seq,
+                createdAt: request.seq,
+                type: "client/turn/requested",
+                data: {
+                  initiator: request.initiator,
+                  senderThreadId: request.sender,
+                  requestId: request.id,
+                },
+              },
+            ]),
+        },
       },
     },
   });
@@ -81,10 +133,17 @@ function setup(settings: Record<string, number> = {}) {
       { to, text: "Please check the landing copy", ...(threadId ? { threadId } : {}) },
       { threadId: fromThreadId },
     );
-  const dispatch = (threadId: string, initiator: "user" | "agent", senderThreadId: string | null) =>
-    harness.registrations.hooks["message.dispatch"]!(
-      makeMessageDispatchHookContext({ thread: { id: threadId }, initiator, senderThreadId }),
-    );
+  // A message bb let through: it records the turn request and the turn starts.
+  const dispatch = async (
+    threadId: string,
+    initiator: "user" | "agent",
+    senderThreadId: string | null,
+  ) => {
+    recordTurn(threadId, initiator, senderThreadId);
+    await harness.behavior.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: threadId, status: "active" }),
+    });
+  };
   const list = () =>
     rpc<{
       bots: Array<{
@@ -93,6 +152,7 @@ function setup(settings: Record<string, number> = {}) {
       }>;
     }>("bots.v1.list");
   return {
+    recordTurn,
     delivery,
     deliver,
     harness,
@@ -590,6 +650,7 @@ describe("Codex review of stage 1", () => {
     const t = await threeBots();
     for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
     await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: true });
+    await t.dispatch("thr_a", "user", null);
     await t.harness.behavior.emitThreadEvent("message.dispatched", {
       entry: makeQueueEntry({
         threadId: "thr_a",
@@ -635,15 +696,6 @@ describe("end-to-end finding: a letter meets a running turn", () => {
     t.delivery.immediate = false;
     await t.letter("thr_a", b.id);
     const queued = t.delivery.queued[0]!;
-    await t.harness.registrations.hooks["message.dispatch"]!(
-      makeMessageDispatchHookContext({
-        thread: { id: "thr_b", status: "active" },
-        attempt: "start-turn",
-        initiator: "agent",
-        senderThreadId: "thr_a",
-        input: { text: queued.input[0]!.text, blocks: queued.input as never },
-      }),
-    );
     expect(await t.letter("thr_b", a.id)).toContain("Letter 1/3");
     await t.harness.behavior.emitThreadEvent("message.dispatched", {
       entry: makeQueueEntry({
@@ -671,15 +723,6 @@ describe("Codex review of stage 2", () => {
     t.delivery.immediate = false;
     await t.letter("thr_a", b.id, "thr_b2");
     const queued = t.delivery.queued[0]!;
-    await t.harness.registrations.hooks["message.dispatch"]!(
-      makeMessageDispatchHookContext({
-        thread: { id: "thr_b2", status: "idle" },
-        attempt: "start-turn",
-        initiator: "agent",
-        senderThreadId: "thr_a",
-        input: { text: queued.input[0]!.text, blocks: queued.input as never },
-      }),
-    );
     const doneOf = async () =>
       (await t.list()).bots
         .find((bot) => bot.id === b.id)!
@@ -721,5 +764,29 @@ describe("Codex review of stage 2", () => {
       "thr_1",
       "thr_2",
     ]);
+  });
+});
+
+describe("Codex re-review of stage 2: the owner's message counts only once bb lets it through", () => {
+  it("a message another hook holds or rejects leaves done and the spent exchange as they were", async () => {
+    const t = await threeBots();
+    await t.dispatch("thr_a", "user", null);
+    for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: true });
+    // A held or rejected message: bb records no turn request and starts no turn.
+    const doneOf = async () =>
+      (await t.list()).bots.find((bot) => bot.id === t.a.id)!.threads[0]!.completed;
+    expect(await doneOf()).toBe(true);
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+  });
+
+  it("a request the provider refused is not the owner's turn", async () => {
+    const t = await threeBots();
+    await t.dispatch("thr_a", "user", null);
+    for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+    t.recordTurn("thr_a", "user", null, true);
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+    await t.dispatch("thr_a", "user", null);
+    expect(await t.letter("thr_a", t.b.id)).toContain("Letter 1/4");
   });
 });

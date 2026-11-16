@@ -194,11 +194,8 @@ const JSON_OPTION = {
 } as const;
 
 export default async function threadListPlugin(bb: BbPluginApi) {
-  const store = createPreferenceStore(bb);
-  const oneMa = register1maSidebar(bb, {
-    write: store.write,
-    stored: (key) => bb.storage.kv.get<unknown>(kvKey(key)),
-  });
+  const oneMa = register1maSidebar(bb, createPreferenceStore(bb));
+  const store = oneMa.store;
 
   bb.rpc.register(threadListRpcContract, {
     async listPreferences() {
@@ -314,6 +311,7 @@ export default async function threadListPlugin(bb: BbPluginApi) {
   );
 
   await oneMa.copyBuiltInPreferences();
+  if (await oneMa.copiedFromBuiltIn()) return;
   const { migrated } = await migrateFromUiPreferences(bb);
   if (migrated.length > 0) {
     bb.log.info(

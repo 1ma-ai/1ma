@@ -17,7 +17,7 @@ import {
 } from "./src/contract.js";
 import { BotsError } from "./src/errors.js";
 import { botInstructions } from "./src/instructions.js";
-import { acceptDelivery, letterTokens, routeLetter, startOwnerExchange } from "./src/letters.js";
+import { acceptDelivery, letterTokens, routeLetter } from "./src/letters.js";
 import {
   CHAIN_LETTERS_DEFAULT,
   HOUR_MS,
@@ -44,7 +44,6 @@ const SPAWN_FIELDS = [
   "input",
   "sendAt",
 ] as const;
-const BUSY_STATUSES: ReadonlySet<string> = new Set(["active", "starting", "stopping"]);
 const TOOLS = ["bot_read", "bot_memory_update", "bot_update_identity", "bot_message"] as const;
 
 const positiveCount = (fallback: number) => z.number().int().min(1).max(1000).catch(fallback);
@@ -236,7 +235,13 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       try {
         route = routeLetter(
           store,
-          { fromThreadId: ctx.threadId, to: input.to, toThreadId: input.threadId, now: now() },
+          {
+            fromThreadId: ctx.threadId,
+            to: input.to,
+            toThreadId: input.threadId,
+            now: now(),
+            ownerTurn: await ownerTurnOf(ctx.threadId),
+          },
           limits,
         );
       } catch (error) {
@@ -303,12 +308,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         throw error;
       }
       if (delivery === "sent") {
-        accepted({
-          threadId: route.toThreadId,
-          fromOwner: false,
-          texts: [`<<<letter ${route.token}`],
-          joinsRunningTurn: false,
-        });
+        accepted({ threadId: route.toThreadId, texts: [`<<<letter ${route.token}`] });
       }
       return agentText.sent(to.name, route.toThreadId, route.letterNumber, limits.chainLetters);
     },
@@ -318,16 +318,33 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   // when the owner presses Send now on a queued row (which skips the hook),
   // through message.dispatched. Both paths do the same, and repeating it is
   // harmless: tokens are claimed once and an owner exchange starts empty.
-  const accepted = (args: {
-    threadId: string;
-    fromOwner: boolean;
-    texts: readonly string[];
-    joinsRunningTurn: boolean;
-  }) => {
+  const accepted = (args: { threadId: string; texts: readonly string[] }) => {
     if (store.botOfThread(args.threadId) === null) return;
-    if (args.fromOwner) startOwnerExchange(store, args.threadId, now());
-    acceptDelivery(store, args.threadId, letterTokens(args.texts), args.joinsRunningTurn);
+    acceptDelivery(store, args.threadId, letterTokens(args.texts), false);
     reopen(args.threadId);
+  };
+
+  // The request bb recorded for the turn now running in a conversation, when
+  // the owner sent it. bb records a request only after every dispatch hook
+  // and wait let it through (dispatch-attempt.ts runs the hook pass before
+  // sendThreadMessage), and marks a request the provider refused as rejected.
+  const ownerTurnOf = async (threadId: string): Promise<number | null> => {
+    const rows = await bb.sdk.threads.events.list({
+      threadId,
+      types: ["client/turn/requested", "client/turn/rejected"],
+      order: "desc",
+      limit: "20",
+    });
+    const rejected = new Set<string>();
+    for (const row of rows) {
+      if (row.type === "client/turn/rejected") {
+        rejected.add(row.data.requestId);
+        continue;
+      }
+      if (row.type !== "client/turn/requested" || rejected.has(row.data.requestId)) continue;
+      return row.data.initiator === "user" && row.data.senderThreadId === null ? row.seq : null;
+    }
+    return null;
   };
   const textsOf = (blocks: ReadonlyArray<{ type: string; text?: string }>) =>
     blocks.flatMap((block) =>
@@ -336,26 +353,15 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
 
   // A letter is accepted only once bb confirms it reached a turn: send()
   // answers "sent" (handled in bot_message), or a queued row leaves the
-  // queue (message.dispatched). The dispatch hook cannot know: other plugins'
-  // hooks and bb's own waits are decided after it.
-  // The owner's own message on an idle conversation starts a new exchange
-  // here already: no turn runs there, so nothing can write a letter before
-  // it is dispatched, and reopening it follows the owner's action.
-  bb.experimental_hooks.on("message.dispatch", (ctx) => {
-    const fromOwner = ctx.initiator === "user" && ctx.senderThreadId === null;
-    if (fromOwner && !BUSY_STATUSES.has(ctx.thread.status)) {
-      accepted({ threadId: ctx.thread.id, fromOwner, texts: [], joinsRunningTurn: false });
-    }
-    return { action: "proceed" };
-  });
+  // queue (message.dispatched). The dispatch hook could not know: other
+  // plugins' hooks and bb's own waits are decided after it. The owner's own
+  // message needs no hook either: bot_message reads the request bb recorded
+  // for the current turn (ownerTurnOf), and a started turn reopens a done
+  // conversation (thread.active).
   bb.events.on("message.dispatched", ({ entry }) =>
-    accepted({
-      threadId: entry.threadId,
-      fromOwner: entry.initiator === "user" && entry.senderThreadId === null,
-      texts: textsOf(entry.content),
-      joinsRunningTurn: false,
-    }),
+    accepted({ threadId: entry.threadId, texts: textsOf(entry.content) }),
   );
+  bb.events.on("thread.active", ({ thread }) => reopen(thread.id));
 
   bb.events.on("interaction.pending", ({ thread }) => reopen(thread.id));
   bb.events.on("thread.failed", ({ thread }) => reopen(thread.id));

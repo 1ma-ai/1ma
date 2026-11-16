@@ -125,3 +125,76 @@ describe("Codex review of stage 2: the first read never overwrites stored prefer
     expect((await list(host)).preferences.organizationMode).toBe("machine");
   });
 });
+
+describe("Codex re-review of stage 2: the built-in list's layout once it is ready", () => {
+  function coldStart(builtIn: Record<string, unknown>, legacy: Record<string, unknown>) {
+    let ready = false;
+    const host = createFakePluginHost({
+      pluginId: "1ma-sidebar",
+      sdk: {
+        plugins: {
+          list: async () => ({ plugins: [{ id: "thread-list", enabled: true }] }),
+          callRpc: async () => {
+            if (!ready) throw new Error("thread-list is not loaded yet");
+            return { preferences: builtIn };
+          },
+        },
+        system: {
+          uiPreferences: {
+            list: async () => ({
+              preferences: Object.fromEntries(
+                Object.entries(legacy).map(([key, value]) => [key, { value }]),
+              ),
+            }),
+          },
+        },
+      },
+    });
+    return { host, ready: () => (ready = true) };
+  }
+
+  it("replaces values taken from old sidebar settings and keeps what the owner chose here", async () => {
+    const t = coldStart(
+      { organizationMode: "machine", sortDirection: "ascending" },
+      { "sidebar.organizationMode": "project" },
+    );
+    await plugin(t.host.bb);
+    expect((await list(t.host)).preferences.organizationMode).toBe("project");
+    await t.host.harness.behavior.callRpc("setPreference", {
+      key: "sortDirection",
+      value: "descending",
+    });
+    t.ready();
+    const { preferences } = await list(t.host);
+    expect(preferences.organizationMode).toBe("machine");
+    expect(preferences.sortDirection).toBe("descending");
+  });
+
+  it("keeps an old-settings key once the owner chose it here, even back to the default", async () => {
+    const t = coldStart({ organizationMode: "machine" }, { "sidebar.organizationMode": "project" });
+    await plugin(t.host.bb);
+    await t.host.harness.behavior.callRpc("resetPreference", { key: "organizationMode" });
+    t.ready();
+    expect((await list(t.host)).preferences.organizationMode).toBe("chronological");
+  });
+
+  it("a default in the built-in list wins over an old non-default setting", async () => {
+    const t = coldStart(
+      { organizationMode: "chronological" },
+      { "sidebar.organizationMode": "project" },
+    );
+    await plugin(t.host.bb);
+    t.ready();
+    expect((await list(t.host)).preferences.organizationMode).toBe("chronological");
+  });
+
+  it("when the built-in list answers at load, old sidebar settings are not migrated at all", async () => {
+    const t = coldStart(
+      { organizationMode: "chronological" },
+      { "sidebar.organizationMode": "project" },
+    );
+    t.ready();
+    await plugin(t.host.bb);
+    expect((await list(t.host)).preferences.organizationMode).toBe("chronological");
+  });
+});

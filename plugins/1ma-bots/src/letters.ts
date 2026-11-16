@@ -31,7 +31,14 @@ export function resolveBot(store: BotStore, reference: string): string {
 // One transaction: the limit check and the count it guards cannot interleave.
 export function routeLetter(
   store: BotStore,
-  args: { fromThreadId: string; to: string; toThreadId?: string | null; now: number },
+  args: {
+    fromThreadId: string;
+    to: string;
+    toThreadId?: string | null;
+    now: number;
+    /** The owner's request that started the sender's current turn, if it was the owner's. */
+    ownerTurn: number | null;
+  },
   limits: LetterLimits,
 ): LetterRoute {
   return store.transaction(() => {
@@ -81,6 +88,8 @@ export function routeLetter(
     // A conversation the owner wrote in carries its own exchange; one that
     // never had one joins the recipient's, so a fresh conversation cannot
     // restart an exchange that ran out.
+    if (args.ownerTurn !== null)
+      startOwnerExchange(store, args.fromThreadId, args.now, args.ownerTurn);
     const current = chainOf.get(args.fromThreadId) ?? chainOf.get(toThreadId);
     if (current && current.letters >= limits.chainLetters) {
       throw new BotsError(
@@ -177,13 +186,32 @@ export function acceptDelivery(
   });
 }
 
-// The owner's own message starts a new, empty exchange in that conversation.
-export function startOwnerExchange(store: BotStore, threadId: string, now: number): void {
+// A turn the owner started gives its conversation one new, empty exchange,
+// the first time that conversation writes a letter during it. The anchor is
+// the owner's request as bb recorded it, so a held or rejected message, which
+// bb never records, changes nothing.
+export function startOwnerExchange(
+  store: BotStore,
+  threadId: string,
+  now: number,
+  ownerTurn: number,
+): void {
   store.transaction(() => {
+    const anchored = store.database
+      .prepare<[string], { owner_turn: number | null }>(
+        "SELECT owner_turn FROM thread_chains WHERE thread_id = ?",
+      )
+      .get(threadId);
+    if (anchored?.owner_turn === ownerTurn) return;
     const chainId = `chain_${randomUUID()}`;
     store.database
       .prepare("INSERT INTO chains (id, letters, created_at) VALUES (?, 0, ?)")
       .run(chainId, now);
-    setChain(store, threadId, chainId);
+    store.database
+      .prepare(
+        `INSERT INTO thread_chains (thread_id, chain_id, owner_turn) VALUES (?, ?, ?)
+         ON CONFLICT(thread_id) DO UPDATE SET chain_id = excluded.chain_id, owner_turn = excluded.owner_turn`,
+      )
+      .run(threadId, chainId, ownerTurn);
   });
 }
