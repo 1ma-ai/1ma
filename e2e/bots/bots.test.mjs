@@ -356,7 +356,10 @@ describe("1ma-sidebar with the bots block", () => {
       const stock = await parentRowGeometry(page, {
         row: stockRow,
         title: stockRow.locator(".bb-thread-title"),
-        chevron: page.getByRole("button", { name: "Collapse Stock parent threads" }),
+        chevron: stockRow.getByRole("button", {
+          name: "Collapse Stock parent threads",
+          exact: true,
+        }),
         child: threadLink(page, fixture.parentChild),
       });
       await page.screenshot({
@@ -368,7 +371,10 @@ describe("1ma-sidebar with the bots block", () => {
       const bot = await parentRowGeometry(page, {
         row: botRow,
         title: botRow.locator(".bb-thread-title"),
-        chevron: page.getByRole("button", { name: "Collapse Visual Bot conversations" }),
+        chevron: botRow.getByRole("button", {
+          name: "Collapse Visual Bot conversations",
+          exact: true,
+        }),
         child: threadLink(page, fixture.v1),
       });
       await page.screenshot({
@@ -381,6 +387,11 @@ describe("1ma-sidebar with the bots block", () => {
         JSON.stringify({ bot, stock }),
       );
       assert.deepEqual(bot.chevronSize, stock.chevronSize, "the chevron is bb's");
+      assert.equal(
+        bot.background,
+        stock.background,
+        "a hovered bot row is highlighted like a thread row",
+      );
       assert.ok(Math.abs(bot.childIndent - stock.childIndent) <= 1, JSON.stringify({ bot, stock }));
       assert.equal(
         bot.childPadding,

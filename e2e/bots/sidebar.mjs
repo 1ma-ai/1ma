@@ -88,7 +88,11 @@ export async function parentRowGeometry(page, { row, title, chevron, child }) {
     }
     return null;
   });
+  const background = await row
+    .first()
+    .evaluate((element) => getComputedStyle(element).backgroundColor);
   return {
+    background,
     chevronAfterTitle: Math.round(chevronBox.x - (titleBox.x + titleBox.width)),
     chevronSize: [Math.round(chevronBox.width), Math.round(chevronBox.height)],
     childIndent: Math.round(childBox.x - rowBox.x),
