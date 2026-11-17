@@ -1714,6 +1714,10 @@ function ProjectListComponent({
         <BotsBlock
           selectedThreadId={selectedThreadId}
           onProjectSelect={onProjectSelect}
+          collapsedThreadIds={collapsedThreadIds}
+          collapsedEnvironmentIds={collapsedEnvironmentIds}
+          onToggleThreadCollapsed={toggleThreadCollapsed}
+          onToggleEnvironmentCollapsed={toggleEnvironmentCollapsed}
         />
         <ActiveSidebarModeSections
           mode={organizationMode}

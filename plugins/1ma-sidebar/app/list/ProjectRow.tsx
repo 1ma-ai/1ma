@@ -219,6 +219,7 @@ interface ProjectThreadTreeProps {
   onProjectSelect?: () => void;
   onToggleThreadCollapsed: (threadId: string) => void;
   onToggleEnvironmentCollapsed: (environmentId: string) => void;
+  depthOffset?: number;
 }
 
 interface SectionThreadTreeProps {
@@ -267,6 +268,7 @@ const PROJECT_THREAD_TREE_EMPTY_STATE_CLASS = "py-0.5 px-2";
 
 interface ProjectThreadTreeGroupProps {
   children: ReactNode;
+  nested?: boolean;
   onClickCapture?: ProjectThreadListClickCaptureHandler;
 }
 
@@ -481,7 +483,9 @@ function getThreadNodeStickyLevel({
   return level < SIDEBAR_STICKY_PARENT_DEPTH_CAP ? level : undefined;
 }
 
-function ThreadTreeGroupLine({ parentRowDepth }: ThreadTreeGroupLineProps) {
+export function ThreadTreeGroupLine({
+  parentRowDepth,
+}: ThreadTreeGroupLineProps) {
   return (
     <span
       className="pointer-events-none absolute bottom-0 top-0 z-30 w-px bg-border-hairline opacity-70"
@@ -505,12 +509,13 @@ function ThreadTreeLineContinuation({
 
 function ProjectThreadTreeGroup({
   children,
+  nested = false,
   onClickCapture,
 }: ProjectThreadTreeGroupProps) {
   return (
     <div
       data-sidebar-sticky-section=""
-      className="relative space-y-0.5"
+      className={nested ? "relative space-y-px" : "relative space-y-0.5"}
       onClickCapture={onClickCapture}
     >
       {children}
@@ -1789,7 +1794,10 @@ function SectionThreadTreeItems({
   );
 
   return (
-    <ProjectThreadTreeGroup onClickCapture={sectionDnd?.onClickCapture}>
+    <ProjectThreadTreeGroup
+      nested={depthOffset > 0}
+      onClickCapture={sectionDnd?.onClickCapture}
+    >
       {sortableParentKey !== undefined ? (
         <SectionDndSortableList
           sectionDnd={sectionDnd}
@@ -1816,6 +1824,7 @@ export const ProjectThreadTree = memo(function ProjectThreadTree({
   onProjectSelect,
   onToggleThreadCollapsed,
   onToggleEnvironmentCollapsed,
+  depthOffset,
 }: ProjectThreadTreeProps) {
   const projectThreads =
     threadListState.status === "ready"
@@ -1864,6 +1873,7 @@ export const ProjectThreadTree = memo(function ProjectThreadTree({
       sectionDnd={dndParentKey !== undefined ? sectionDnd : null}
       projectId={projectId}
       sortableParentKey={projectId}
+      depthOffset={depthOffset}
       selectedThreadId={selectedThreadId}
       collapsedThreadIds={collapsedThreadIds}
       collapsedEnvironmentIds={collapsedEnvironmentIds}

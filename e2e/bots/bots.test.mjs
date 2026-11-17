@@ -3,6 +3,7 @@ import { after, before, describe, it } from "node:test";
 import { waitFor } from "../lib/servers.mjs";
 import {
   BOTS,
+  screenshotDir,
   completedOf,
   diagnose,
   exchangeOf,
@@ -27,7 +28,9 @@ import {
   expandBot,
   fontOf,
   gapAbove,
+  iconOf,
   launch,
+  parentRowGeometry,
   openApp,
   screenshot,
   groupsOf,
@@ -234,6 +237,11 @@ describe("1ma-sidebar with the bots block", () => {
     fixture.visible = await createBot("Visual Bot", { role: "Researcher", capabilities: ["dev"] });
     fixture.hidden = await createBot("Hidden Bot", { role: "Sleeper" });
     fixture.plain = regularThread(projects.alpha, "Regular thread");
+    fixture.parent = regularThread(projects.alpha, "Stock parent");
+    fixture.parentChild = regularThread(projects.alpha, "Stock child", "[stub:reply child]", [
+      "--parent-thread",
+      fixture.parent,
+    ]);
     fixture.v1 = await startConversation(fixture.visible, "[stub:reply v1]", projects.alpha);
     fixture.v2 = await startConversation(fixture.visible, "[stub:reply v2]", projects.alpha);
     fixture.h1 = await startConversation(fixture.hidden, "[stub:reply h1]", projects.beta);
@@ -241,7 +249,9 @@ describe("1ma-sidebar with the bots block", () => {
     await rename(fixture.v2, "Bot conversation two");
     await rename(fixture.h1, "Hidden bot conversation");
     await Promise.all(
-      [fixture.plain, fixture.v1, fixture.v2, fixture.h1].map((id) => waitTurns(id, 1)),
+      [fixture.plain, fixture.parent, fixture.parentChild, fixture.v1, fixture.v2, fixture.h1].map(
+        (id) => waitTurns(id, 1),
+      ),
     );
     const detail = await rpc("bots.v1.get", { botId: fixture.hidden.id });
     await rpc("bots.v1.update", {
@@ -311,7 +321,7 @@ describe("1ma-sidebar with the bots block", () => {
           "the hidden bot is absent",
         );
 
-        const botName = page.locator(`[data-bot-id="${fixture.visible.id}"] span.font-medium`, {
+        const botName = page.locator(`[data-bot-id="${fixture.visible.id}"] .bb-thread-title`, {
           hasText: "Visual Bot",
         });
         const rowTitle = page.locator(".bb-thread-title", { hasText: "Regular thread" });
@@ -324,6 +334,97 @@ describe("1ma-sidebar with the bots block", () => {
       }
     });
   }
+
+  it("draws a bot like bb's parent thread and the block header like a project header", async () => {
+    const { context, page, problems } = await openApp(browser, "dark");
+    try {
+      await waitDrawn(page, threadLink(page, fixture.parentChild), "stock-child");
+      await expandBot(page, "Visual Bot");
+      await threadLink(page, fixture.v1).waitFor({ timeout: 30 * SECOND });
+      const stockRow = page.locator("[data-sidebar-rename-row]", {
+        has: threadLink(page, fixture.parent),
+      });
+      const botRow = page.locator(`[data-bot-id="${fixture.visible.id}"] [data-1ma-bot-row]`);
+      const clip = async (top, bottom) => {
+        const [a, b] = [await top.first().boundingBox(), await bottom.first().boundingBox()];
+        return { x: 48, y: a.y - 8, width: 272, height: b.y + b.height - a.y + 16 };
+      };
+
+      await stockRow.hover();
+      const stock = await parentRowGeometry(page, {
+        row: stockRow,
+        title: stockRow.locator(".bb-thread-title"),
+        chevron: page.getByRole("button", { name: "Collapse Stock parent threads" }),
+        child: threadLink(page, fixture.parentChild),
+      });
+      await page.screenshot({
+        path: `${screenshotDir}/compare-stock-parent-hover.png`,
+        clip: await clip(stockRow, threadLink(page, fixture.parentChild)),
+      });
+
+      await botRow.hover();
+      const bot = await parentRowGeometry(page, {
+        row: botRow,
+        title: botRow.locator(".bb-thread-title"),
+        chevron: page.getByRole("button", { name: "Collapse Visual Bot conversations" }),
+        child: threadLink(page, fixture.v1),
+      });
+      await page.screenshot({
+        path: `${screenshotDir}/compare-bot-hover.png`,
+        clip: await clip(botRow, threadLink(page, fixture.v2)),
+      });
+
+      assert.ok(
+        Math.abs(bot.chevronAfterTitle - stock.chevronAfterTitle) <= 1,
+        JSON.stringify({ bot, stock }),
+      );
+      assert.deepEqual(bot.chevronSize, stock.chevronSize, "the chevron is bb's");
+      assert.ok(Math.abs(bot.childIndent - stock.childIndent) <= 1, JSON.stringify({ bot, stock }));
+      assert.equal(
+        bot.childPadding,
+        stock.childPadding,
+        "conversations are indented as sub-threads",
+      );
+      assert.notEqual(stock.guide, null, "the stock parent draws a guide line");
+      assert.equal(bot.guide, stock.guide, "the guide line sits where bb draws it");
+
+      const projectNew = page.getByRole("button", { name: "New thread in Alpha" });
+      const [stockIcon, botIcon, headerIcon] = await Promise.all([
+        iconOf(projectNew),
+        iconOf(page.getByRole("button", { name: "New conversation with Visual Bot" })),
+        iconOf(page.getByRole("button", { name: "New bot" })),
+      ]);
+      assert.ok(stockIcon !== null);
+      assert.equal(botIcon, stockIcon, "the bot's + is bb's new-thread icon");
+      assert.equal(headerIcon, stockIcon, "the Bots header's + is bb's new-thread icon");
+
+      const botsHeader = page.getByText("Bots", { exact: true }).first();
+      const alphaHeader = page.getByText("Alpha", { exact: true }).first();
+      await botsHeader.hover();
+      await page.screenshot({
+        path: `${screenshotDir}/compare-bots-header-hover.png`,
+        clip: await clip(botsHeader, botsHeader),
+      });
+      await alphaHeader.hover();
+      await page.screenshot({
+        path: `${screenshotDir}/compare-project-header-hover.png`,
+        clip: await clip(alphaHeader, alphaHeader),
+      });
+
+      await botRow.hover();
+      await page.getByRole("button", { name: "Visual Bot actions" }).click();
+      await page.getByRole("menuitem", { name: "Bot settings" }).click();
+      await page.locator("ul li button", { hasText: "Visual Bot" }).first().click();
+      await page
+        .getByText("Instructions", { exact: true })
+        .first()
+        .waitFor({ timeout: 30 * SECOND });
+      await screenshot(page, "bot-settings-page");
+      assert.deepEqual(problems, []);
+    } finally {
+      await context.close();
+    }
+  });
 
   it("draws no block and keeps every conversation in its project when 1ma-bots is disabled", async () => {
     server.bb(["plugin", "disable", BOTS]);

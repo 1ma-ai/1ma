@@ -64,7 +64,7 @@ export async function startConversation(bot, text, projectId = projects.alpha, m
   return threadId;
 }
 
-export function regularThread(projectId, title, prompt = "[stub:reply plain]") {
+export function regularThread(projectId, title, prompt = "[stub:reply plain]", more = []) {
   return server.bbJson([
     "thread",
     "spawn",
@@ -78,6 +78,7 @@ export function regularThread(projectId, title, prompt = "[stub:reply plain]") {
     prompt,
     "--title",
     title,
+    ...more,
   ]).id;
 }
 

@@ -11,7 +11,8 @@ The Thread list plugin owns the sidebar's layout state. Read it with
 `manualSectionOrder`, `machineSectionOrder`, `hiddenGroups` (including the
 built-in `threads` group), `rowActions`,
 `collapsedSections`, `collapsedProjects`, `collapsedThreads`,
-`collapsedEnvironments`, `collapsedThreadSections`, and `collapsedMachines`.
+`collapsedEnvironments`, `collapsedThreadSections`, `collapsedMachines`, and
+`collapsedBots` (bot ids, and `bots` for the whole Bots block).
 
 ```sh
 bb 1ma-sidebar prefs list [--json]

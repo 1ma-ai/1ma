@@ -6,12 +6,18 @@
 
 ## Что делает
 
-- `BotsBlock.tsx` — блок «Bots» над проектами: заголовок группы bb
-  (`TopLevelSidebarSection`), строка бота с лицом, ролью, значком
-  состояния bb (`experimental_ThreadStatusGlyph`), числом чатов; дерево
-  чатов бота строками bb (`ProjectThreadTree`); «Done: N»; «+» открывает
-  штатный композер нового чата и создаёт чат через `bots.v1.startThread`
-  плагина `1ma-bots`.
+- `BotsBlock.tsx` — блок «Bots» над проектами. Заголовок — заголовок
+  группы bb (`TopLevelSidebarSection`) со штатной кнопкой нового чата
+  (`SidebarControlButton`, «New bot»). Бот нарисован строкой родительского
+  чата bb: лицо на месте значка чата со значком состояния bb на углу, имя,
+  штатная стрелка сразу после имени (`SidebarChildToggleChevron`), второй
+  строкой название главного разговора (его открывает щелчок по строке),
+  роль только во всплывающей подсказке имени; при наведении штатные «+»
+  (новый разговор в композере bb, `bots.v1.startThread`) и «…». Разговоры
+  бота — дерево bb (`ProjectThreadTree`, `depthOffset: 1`) под штатной
+  линией (`ThreadTreeGroupLine`), «Done: N» под ними. Свёрнутые боты
+  хранятся в синхронизируемой настройке `collapsedBots`, как свёрнутые
+  чаты bb; по умолчанию боты раскрыты.
 - `use-bots.ts` — одно решение для блока и для фильтра проектов: блок и
   вынос чатов бота включены, только если установлен `1ma-bots` (есть его
   пункт навигации), настройка «Show bots» включена и список ботов прочитан.
@@ -39,7 +45,9 @@
 | `app.tsx`                                                    | заголовок слота «1ma Sidebar»                                                                                                                                                                                                                  |
 | `server.ts`                                                  | `register1maSidebar(bb, createPreferenceStore(bb))` даёт `store`, который помнит выбор владельца; `chooseDefaultThreadList()` и `copyBuiltInPreferences()` при загрузке (после успеха старые `sidebar.*` не переносятся) и в `listPreferences` |
 | `app/model/use-sidebar-data.ts`                              | `useWithoutBotThreads(...)` вокруг `experimental_useSidebarThreads`                                                                                                                                                                            |
-| `app/list/ProjectList.tsx`                                   | `<BotsBlock … />` после `<SidebarDraftPresenceSync />`                                                                                                                                                                                         |
+| `app/list/ProjectList.tsx`                                   | `<BotsBlock … />` после `<SidebarDraftPresenceSync />`, ему передаются штатные `collapsedThreadIds`, `collapsedEnvironmentIds` и их переключатели                                                                                              |
+| `app/list/ProjectRow.tsx`                                    | `ProjectThreadTree` принимает `depthOffset` (вложенное дерево получает отступ и шаг строк подчатов), `ThreadTreeGroupLine` экспортирована                                                                                                      |
+| `shared/preferences.ts`                                      | ключ `collapsedBots`: свёрнутые боты и весь блок (`bots`)                                                                                                                                                                                      |
 | `shared/preferences.ts`, `app/rows/ThreadRow.tsx` и их тесты | ключи `1ma-sidebar/move`, `1ma-sidebar/customizeRowActions`                                                                                                                                                                                    |
 | `skills/1ma-sidebar/SKILL.md`                                | имя навыка `1ma-sidebar`, команда `bb 1ma-sidebar`                                                                                                                                                                                             |
 | `vitest.config.ts`                                           | `maxWorkers: 2`, имя проекта                                                                                                                                                                                                                   |

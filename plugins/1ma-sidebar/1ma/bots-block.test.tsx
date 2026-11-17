@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, screen } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExperimentalSidebarNavigationItem } from "@get-bb/plugin-sdk/app";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
@@ -51,6 +51,7 @@ function render(options: {
   bots?: () => { bots: SidebarBot[] };
   botsInstalled?: boolean;
   settings?: Record<string, boolean>;
+  setPreference?: (input: unknown) => unknown;
 }) {
   return renderSlot(
     registration,
@@ -67,7 +68,7 @@ function render(options: {
       settings: options.settings,
       rpc: {
         listPreferences: () => ({ preferences: defaultPreferences() }),
-        setPreference: (input: unknown) => input,
+        setPreference: options.setPreference ?? ((input: unknown) => input),
         "bots.v1.list": options.bots ?? (() => ({ bots: [] })),
       },
     },
@@ -77,6 +78,18 @@ function render(options: {
 function threadIdsInList(): string[] {
   return Array.from(document.querySelectorAll("[data-sidebar-thread-id]"), (element) =>
     element.getAttribute("data-sidebar-thread-id"),
+  ).filter((id): id is string => id !== null);
+}
+
+function botElement(botId: string): HTMLElement {
+  const element = document.querySelector<HTMLElement>(`[data-bot-id="${botId}"]`);
+  if (element === null) throw new Error(`no bot ${botId}`);
+  return element;
+}
+
+function threadIdsIn(element: HTMLElement): string[] {
+  return Array.from(element.querySelectorAll("a[data-sidebar-thread-id]"), (link) =>
+    link.getAttribute("data-sidebar-thread-id"),
   ).filter((id): id is string => id !== null);
 }
 
@@ -90,11 +103,10 @@ describe("the bots block", () => {
     render({ bots: () => ({ bots: [marketer()] }) });
     await screen.findByText("Marketer");
     await screen.findByText("Plain chat");
-    expect(screen.queryByText("Creatives")).toBeNull();
-    expect(screen.queryByText("Banner draft")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Marketer: 1 conversations" }));
-    await screen.findByText("Creatives");
+    const bot = botElement("bot_m");
+    expect(threadIdsIn(bot)).toEqual(["thr_bot", "thr_bot_child"]);
     expect(threadIdsInList().filter((id) => id === "thr_bot")).toHaveLength(1);
+    expect(threadIdsInList().filter((id) => id === "thr_bot_child")).toHaveLength(1);
     const bots = screen.getByText("Marketer");
     const plain = screen.getByText("Plain chat");
     expect(bots.compareDocumentPosition(plain) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -144,10 +156,9 @@ describe("Codex review of stage 2: a bot with only done conversations", () => {
       }),
     });
     await screen.findByText("Marketer");
-    expect(screen.queryByText("Creatives")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Marketer: 0 conversations" }));
+    expect(threadIdsIn(botElement("bot_m"))).toEqual([]);
     fireEvent.click(await screen.findByText(strings.done(1)));
-    await screen.findByText("Creatives");
+    expect(threadIdsIn(botElement("bot_m"))).toEqual(["thr_bot", "thr_bot_child"]);
   });
 });
 
@@ -182,8 +193,47 @@ describe("a done conversation that is working again", () => {
         },
       },
     );
-    fireEvent.click(await screen.findByRole("button", { name: "Marketer: 1 conversations" }));
-    await screen.findByText("Creatives");
+    await screen.findByText("Marketer");
+    expect(threadIdsIn(botElement("bot_m"))).toEqual(["thr_bot", "thr_bot_child"]);
     expect(screen.queryByText(strings.done(1))).toBeNull();
+  });
+});
+
+describe("the owner's review of the bots block: a bot is drawn like a parent thread", () => {
+  it("the chevron after the name collapses the conversations, and the choice is kept", async () => {
+    const writes: unknown[] = [];
+    render({
+      bots: () => ({ bots: [marketer()] }),
+      setPreference: (input) => {
+        writes.push(input);
+        return input;
+      },
+    });
+    await screen.findByText("Marketer");
+    fireEvent.click(screen.getByRole("button", { name: strings.collapse("Marketer") }));
+    expect(threadIdsIn(botElement("bot_m"))).toEqual([]);
+    await waitFor(() =>
+      expect(writes).toContainEqual(
+        expect.objectContaining({ key: "collapsedBots", value: ["bot_m"] }),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: strings.expand("Marketer") }));
+    expect(threadIdsIn(botElement("bot_m"))).toEqual(["thr_bot", "thr_bot_child"]);
+  });
+
+  it("under the name it shows the main conversation, and the role only as the name's tooltip", async () => {
+    render({ bots: () => ({ bots: [marketer()] }) });
+    const name = await screen.findByText("Marketer");
+    const main = botElement("bot_m").querySelector("[data-1ma-bot-main-conversation]");
+    expect(main?.textContent).toBe("Creatives");
+    expect(name.getAttribute("title")).toBe("Marketer — Landing pages");
+    expect(screen.queryByText("Landing pages")).toBeNull();
+  });
+
+  it("offers a new conversation with the stock new-thread button on the bot's row", async () => {
+    render({ bots: () => ({ bots: [marketer()] }) });
+    await screen.findByText("Marketer");
+    fireEvent.click(screen.getByRole("button", { name: strings.newConversation("Marketer") }));
+    await screen.findByRole("dialog");
   });
 });

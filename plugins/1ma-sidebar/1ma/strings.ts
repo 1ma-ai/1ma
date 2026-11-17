@@ -6,7 +6,11 @@ export const strings = {
   unavailable: "Bots are unavailable right now. Conversations are in their projects.",
   newConversation: (name: string) => `New conversation with ${name}`,
   composerPlaceholder: (name: string) => `Message ${name}…`,
-  toggleConversations: (name: string, count: number) => `${name}: ${count} conversations`,
+  openBot: (name: string) => `Open ${name}`,
+  expand: (name: string) => `Expand ${name} conversations`,
+  collapse: (name: string) => `Collapse ${name} conversations`,
+  botActions: (name: string) => `${name} actions`,
+  botSettings: "Bot settings",
   done: (count: number) => `Done: ${count}`,
   settings: {
     showBots: "Show bots",

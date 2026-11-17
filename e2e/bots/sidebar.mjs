@@ -53,11 +53,52 @@ export async function openApp(browser, theme) {
 export const threadLink = (page, threadId) =>
   page.locator(`a[data-sidebar-thread-id="${threadId}"]`);
 
+// Bots start expanded, like bb's parent threads; a collapsed one opens here.
 export async function expandBot(page, botName) {
-  const toggle = page.getByRole("button", { name: new RegExp(`^${botName}: \\d+ conversations$`) });
-  await toggle.waitFor({ timeout: 30_000 });
-  if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
+  const name = page.locator("[data-1ma-bot-row] .bb-thread-title", { hasText: botName });
+  await name.waitFor({ timeout: 30_000 });
+  const expand = page.getByRole("button", { name: `Expand ${botName} conversations` });
+  if ((await expand.count()) > 0) await expand.click();
 }
+
+const boxOf = async (locator) => {
+  const box = await locator.first().boundingBox();
+  if (box === null) throw new Error(`not drawn: ${locator}`);
+  return box;
+};
+
+// What makes a parent row look like bb's: where its chevron sits after the
+// title, the chevron's size, the children's indent and the guide line's place.
+export async function parentRowGeometry(page, { row, title, chevron, child }) {
+  const [rowBox, titleBox, chevronBox, childBox] = await Promise.all(
+    [row, title, chevron, child].map(boxOf),
+  );
+  const childPadding = await child
+    .first()
+    .evaluate((link) => getComputedStyle(link.closest("[data-sidebar-rename-row]")).paddingLeft);
+  const guide = await child.first().evaluate((link) => {
+    const rowLeft = link.closest("[data-sidebar-rename-row]").getBoundingClientRect().left;
+    for (let node = link.parentElement; node !== null; node = node.parentElement) {
+      const line = [...node.children].find(
+        (element) =>
+          element.matches("span[aria-hidden='true']") &&
+          element.className.includes("bg-border-hairline"),
+      );
+      if (line) return Math.round(line.getBoundingClientRect().left - rowLeft);
+    }
+    return null;
+  });
+  return {
+    chevronAfterTitle: Math.round(chevronBox.x - (titleBox.x + titleBox.width)),
+    chevronSize: [Math.round(chevronBox.width), Math.round(chevronBox.height)],
+    childIndent: Math.round(childBox.x - rowBox.x),
+    childPadding,
+    guide,
+  };
+}
+
+export const iconOf = (button) =>
+  button.first().evaluate((element) => element.querySelector("svg")?.outerHTML ?? null);
 
 export const fontOf = (locator) =>
   locator.first().evaluate((node) => getComputedStyle(node).fontFamily);

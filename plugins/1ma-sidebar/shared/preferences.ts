@@ -220,6 +220,12 @@ export const preferenceDefinitions = {
     "Machine ids whose rows are collapsed.",
     null,
   ),
+  collapsedBots: definePreference(
+    stringListSchema,
+    [],
+    "1ma: bot ids whose conversations are collapsed, and bots for the whole Bots block.",
+    null,
+  ),
 } as const;
 
 export type PreferenceKey = keyof typeof preferenceDefinitions;
