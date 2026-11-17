@@ -401,11 +401,11 @@ describe("1ma-sidebar with the bots block", () => {
       assert.notEqual(stock.guide, null, "the stock parent draws a guide line");
       assert.equal(bot.guide, stock.guide, "the guide line sits where bb draws it");
 
-      const projectNew = page.getByRole("button", { name: "New thread in Alpha" });
+      const projectNew = page.getByRole("button", { name: "New thread in Alpha", exact: true });
       const [stockIcon, botIcon, headerIcon] = await Promise.all([
         iconOf(projectNew),
-        iconOf(page.getByRole("button", { name: "New conversation with Visual Bot" })),
-        iconOf(page.getByRole("button", { name: "New bot" })),
+        iconOf(page.getByRole("button", { name: "New conversation with Visual Bot", exact: true })),
+        iconOf(page.getByRole("button", { name: "New bot", exact: true })),
       ]);
       assert.ok(stockIcon !== null);
       assert.equal(botIcon, stockIcon, "the bot's + is bb's new-thread icon");
