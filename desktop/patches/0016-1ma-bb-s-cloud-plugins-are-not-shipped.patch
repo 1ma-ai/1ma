@@ -32,6 +32,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  apps/desktop/src/main.ts                      | 136 ++++++++++--------
  apps/desktop/src/server-target.ts             |  28 +++-
  apps/desktop/test/bb-connect-off.test.ts      |  22 +++
+ .../test/fixtures/startup-retry-smoke.cjs     |  43 +++---
  apps/desktop/test/server-target.test.ts       |  67 +++++++++
  .../src/services/plugins/builtin-registry.ts  |  16 ++-
  .../src/services/plugins/plugin-service.ts    |  16 ++-
@@ -43,7 +44,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../services/plugins/plugin-install.test.ts   |  26 ++--
  packages/domain/src/bb-cloud.ts               |  14 ++
  packages/domain/src/index.ts                  |   1 +
- 17 files changed, 363 insertions(+), 134 deletions(-)
+ 18 files changed, 388 insertions(+), 152 deletions(-)
  create mode 100644 apps/desktop/src/bb-connect-off.ts
  create mode 100644 apps/desktop/test/bb-connect-off.test.ts
  create mode 100644 packages/domain/src/bb-cloud.ts
@@ -386,6 +387,81 @@ index 0000000..8e34efd
 +    );
 +  });
 +});
+diff --git a/apps/desktop/test/fixtures/startup-retry-smoke.cjs b/apps/desktop/test/fixtures/startup-retry-smoke.cjs
+index 8c48973..972c0ff 100644
+--- a/apps/desktop/test/fixtures/startup-retry-smoke.cjs
++++ b/apps/desktop/test/fixtures/startup-retry-smoke.cjs
+@@ -123,6 +123,30 @@ async function run() {
+     };
+   });
+   require(join(desktopRoot, "dist/main.js"));
++  if (scenario === "connect") {
++    await until(() =>
++      contents?.executeJavaScript(
++        'document.querySelector("h1")?.textContent === "Recovered"',
++      ),
++    );
++    assert.equal(
++      mintCount,
++      0,
++      "1ma has no bb connect: a saved connect server is never asked for a session",
++    );
++    const saved = await readFile(
++      join(app.getPath("userData"), "server-target.json"),
++      "utf8",
++    );
++    assert.ok(
++      !saved.includes("Retry fixture"),
++      "The saved connect server must be forgotten",
++    );
++    server.close();
++    console.log("STARTUP_RETRY_SMOKE_OK");
++    app.exit(0);
++    return;
++  }
+   if (scenario === "attached") {
+     await until(() => contents?.getURL() === `${serverUrl}/`);
+     await until(() =>
+@@ -158,11 +182,7 @@ async function run() {
+     return;
+   }
+   const errorTitle =
+-    scenario === "fatal"
+-      ? "Port conflict"
+-      : scenario === "connect"
+-        ? "Could not authenticate with bb Connect"
+-        : "Could not reach this bb server";
++    scenario === "fatal" ? "Port conflict" : "Could not reach this bb server";
+   const hasError = () =>
+     contents?.getURL().startsWith("data:") &&
+     contents.executeJavaScript(
+@@ -272,7 +292,6 @@ async function run() {
+   }
+   recovered = true;
+   const before = loads.length;
+-  const previousMints = mintCount;
+   await contents.executeJavaScript(
+     'const button = document.querySelector("[data-startup-action=retry]"); for (let i = 0; i < 10; i++) button.click();',
+   );
+@@ -286,18 +305,6 @@ async function run() {
+   console.log(
+     JSON.stringify({ scenario, retryLoads: retryLoads.length, mintCount }),
+   );
+-  if (scenario === "connect") {
+-    assert.equal(
+-      mintCount - previousMints,
+-      1,
+-      "Concurrent retries must mint one fresh session",
+-    );
+-    const cookies = await contents.session.cookies.get({
+-      url: serverUrl,
+-      name: "bb_session",
+-    });
+-    assert.equal(cookies[0]?.value, "synthetic-retry-cookie");
+-  }
+   assert.equal(
+     retryLoads.length,
+     1,
 diff --git a/apps/desktop/test/server-target.test.ts b/apps/desktop/test/server-target.test.ts
 index 2a7e6cc..608fb68 100644
 --- a/apps/desktop/test/server-target.test.ts
