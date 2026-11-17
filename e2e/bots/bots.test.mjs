@@ -341,7 +341,9 @@ describe("1ma-sidebar with the bots block", () => {
       await waitDrawn(page, threadLink(page, fixture.parentChild), "stock-child");
       await expandBot(page, "Visual Bot");
       await threadLink(page, fixture.v1).waitFor({ timeout: 30 * SECOND });
-      const stockRow = page.locator("[data-sidebar-rename-row]", {
+      // The row itself, not the project group around it, which is a rename
+      // row too.
+      const stockRow = page.locator("[data-sidebar-rename-row].group\\/thread-row", {
         has: threadLink(page, fixture.parent),
       });
       const botRow = page.locator(`[data-bot-id="${fixture.visible.id}"] [data-1ma-bot-row]`);
