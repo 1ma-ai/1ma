@@ -32,10 +32,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../settings/AiServicesSettingsSection.tsx    |   2 +-
  .../components/settings/settings-search.ts    |   2 +-
- apps/desktop/src/bb-connect-off.ts            |  30 +++
- apps/desktop/src/main.ts                      | 172 +++++++++++-------
+ apps/desktop/src/bb-connect-off.ts            |  84 +++++++++
+ apps/desktop/src/main.ts                      | 171 +++++++++++-------
  apps/desktop/src/server-target.ts             |  37 +++-
- apps/desktop/test/bb-connect-off.test.ts      |  29 +++
+ apps/desktop/test/bb-connect-off.test.ts      |  85 +++++++++
  .../test/fixtures/startup-retry-smoke.cjs     |  90 +++++++--
  apps/desktop/test/preload-build.test.ts       |   1 +
  apps/desktop/test/server-target.test.ts       |  72 ++++++++
@@ -51,7 +51,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  packages/db/src/data/plugins.ts               |  11 ++
  packages/domain/src/bb-cloud.ts               |  14 ++
  packages/domain/src/index.ts                  |   1 +
- 21 files changed, 560 insertions(+), 160 deletions(-)
+ 21 files changed, 669 insertions(+), 160 deletions(-)
  create mode 100644 apps/desktop/src/bb-connect-off.ts
  create mode 100644 apps/desktop/test/bb-connect-off.test.ts
  create mode 100644 packages/domain/src/bb-cloud.ts
@@ -84,30 +84,76 @@ index c7d16a5..9f08062 100644
          title: "Thread titles",
 diff --git a/apps/desktop/src/bb-connect-off.ts b/apps/desktop/src/bb-connect-off.ts
 new file mode 100644
-index 0000000..b4cd9d8
+index 0000000..5547166
 --- /dev/null
 +++ b/apps/desktop/src/bb-connect-off.ts
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,84 @@
 +import { deriveConnectBaseUrl } from "@bb/connect-client";
 +import type { ConnectCredentialCache } from "./connect-credential-cache.js";
 +
++/** Cookies bb connect gives the desktop app for a connect server. */
++const DESKTOP_SESSION_COOKIES = [
++  "__Secure-bb-connect.desktop_session",
++  "bb-connect.desktop_session",
++] as const;
++/** The bb account sign-in, on the account site. */
++const ACCOUNT_SESSION_COOKIES = [
++  "__Secure-better-auth.session_token",
++  "better-auth.session_token",
++] as const;
++
++export interface ForgetCookie {
++  domain?: string;
++  name: string;
++  path?: string;
++  secure?: boolean;
++}
++
++export interface ForgetCookieStore {
++  get(filter: { name: string }): Promise<readonly ForgetCookie[]>;
++  remove(url: string, name: string): Promise<void>;
++}
++
 +/**
 + * In a build without bb connect, deletes what an earlier bb or 1ma kept for
-+ * it on this computer: the machine credential and the bb account sign-in on
-+ * every account site it knows of (the default one and the one behind a
-+ * forgotten connect server). The credential is deleted without being read:
-+ * reading it would ask the OS keychain, which can prompt on an unsigned build.
++ * it on this computer:
++ * - the machine credential, deleted without being read (reading asks the OS
++ *   keychain, which can prompt on an unsigned build);
++ * - bb connect desktop sessions in the app's and the built-in browser's
++ *   cookie stores, found by their bb-only names;
++ * - the bb account sign-in. The app's own store holds only bb server pages
++ *   and the bb connect sign-in window, so every account session cookie there
++ *   goes. The built-in browser also holds the user's own sites, so there it
++ *   goes only on bb account sites known from the default, a forgotten connect
++ *   server or a desktop session cookie.
 + */
 +export async function forgetBbConnect(args: {
-+  cookieNameFor(accountUrl: string): string;
++  appCookies: ForgetCookieStore;
++  browserCookies: ForgetCookieStore;
 +  credentialCache: Pick<ConnectCredentialCache, "clear">;
 +  defaultAccountUrl: string;
 +  forgottenServerUrls: readonly string[];
-+  removeCookie(url: string, name: string): Promise<void>;
 +}): Promise<void> {
 +  await args.credentialCache.clear();
++  const serverUrls = [...args.forgottenServerUrls];
++  for (const store of [args.appCookies, args.browserCookies]) {
++    for (const name of DESKTOP_SESSION_COOKIES) {
++      for (const cookie of await store.get({ name })) {
++        const url = cookieUrl(cookie);
++        if (url === null) continue;
++        await store.remove(url, name);
++        serverUrls.push(url);
++      }
++    }
++  }
++  for (const name of ACCOUNT_SESSION_COOKIES) {
++    for (const cookie of await args.appCookies.get({ name })) {
++      const url = cookieUrl(cookie);
++      if (url !== null) await args.appCookies.remove(url, name);
++    }
++  }
 +  const accountUrls = new Set([args.defaultAccountUrl]);
-+  for (const serverUrl of args.forgottenServerUrls) {
++  for (const serverUrl of serverUrls) {
 +    try {
 +      accountUrls.add(deriveConnectBaseUrl(serverUrl));
 +    } catch {
@@ -115,11 +161,19 @@ index 0000000..b4cd9d8
 +    }
 +  }
 +  for (const accountUrl of accountUrls) {
-+    await args.removeCookie(accountUrl, args.cookieNameFor(accountUrl));
++    for (const name of ACCOUNT_SESSION_COOKIES) {
++      await args.browserCookies.remove(accountUrl, name);
++    }
 +  }
 +}
++
++function cookieUrl(cookie: ForgetCookie): string | null {
++  const host = cookie.domain?.replace(/^\./, "");
++  if (host === undefined || host === "") return null;
++  return `${cookie.secure === false ? "http" : "https"}://${host}${cookie.path ?? "/"}`;
++}
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 92cdadc..6ff6de4 100644
+index 92cdadc..c05fa17 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
 @@ -45,6 +45,7 @@ import {
@@ -217,7 +271,7 @@ index 92cdadc..6ff6de4 100644
      storagePath: join(userDataPath, SERVER_TARGET_FILE_NAME),
    });
    await serverTargetStore.load();
-@@ -3071,63 +3104,78 @@ async function runDesktopApp(): Promise<void> {
+@@ -3071,63 +3104,77 @@ async function runDesktopApp(): Promise<void> {
    machineServiceNoticeStore = createServerMoveNoticeStore({
      storagePath: join(userDataPath, MACHINE_SERVICE_NOTICE_FILE_NAME),
    });
@@ -339,21 +393,20 @@ index 92cdadc..6ff6de4 100644
 +  } else {
 +    const forgotten = serverTargetStore.getForgottenConnectServer();
 +    await forgetBbConnect({
-+      cookieNameFor: connectAccountCookieName,
++      appCookies: session.defaultSession.cookies,
++      browserCookies: session.fromPartition(BB_BROWSER_PARTITION).cookies,
 +      credentialCache: createConnectCredentialCache({
 +        encryption: safeStorage,
 +        userDataPath,
 +      }),
 +      defaultAccountUrl: resolveConnectAccountUrl(),
 +      forgottenServerUrls: forgotten === null ? [] : [forgotten.url],
-+      removeCookie: (url, name) =>
-+        session.defaultSession.cookies.remove(url, name),
 +    });
 +  }
  
    const desktopUpdateSupport = resolveDesktopUpdateSupport({
      canReplaceAppImage,
-@@ -3410,7 +3458,7 @@ async function runDesktopApp(): Promise<void> {
+@@ -3410,7 +3457,7 @@ async function runDesktopApp(): Promise<void> {
      await initializeRuntime({ bridgePath, serverUrl, userDataPath });
    } else {
      await applyServerTarget();
@@ -468,37 +521,93 @@ index c6257b8..7d6b7b5 100644
              null;
 diff --git a/apps/desktop/test/bb-connect-off.test.ts b/apps/desktop/test/bb-connect-off.test.ts
 new file mode 100644
-index 0000000..37c8466
+index 0000000..645e79c
 --- /dev/null
 +++ b/apps/desktop/test/bb-connect-off.test.ts
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,85 @@
 +import { describe, expect, it, vi } from "vitest";
-+import { forgetBbConnect } from "../src/bb-connect-off.js";
++import {
++  forgetBbConnect,
++  type ForgetCookie,
++  type ForgetCookieStore,
++} from "../src/bb-connect-off.js";
++
++function cookieJar(cookies: ForgetCookie[]): ForgetCookieStore & {
++  left(): string[];
++} {
++  let jar = [...cookies];
++  return {
++    async get({ name }) {
++      return jar.filter((cookie) => cookie.name === name);
++    },
++    async remove(url, name) {
++      const host = new URL(url).hostname;
++      jar = jar.filter((cookie) => {
++        const domain = (cookie.domain ?? "").replace(/^\./, "");
++        return !(
++          cookie.name === name &&
++          (host === domain || host.endsWith(`.${domain}`))
++        );
++      });
++    },
++    left() {
++      return jar.map((cookie) => `${cookie.domain}|${cookie.name}`);
++    },
++  };
++}
 +
 +describe("forgetBbConnect", () => {
-+  it("deletes the credential and the account sign-in on every known account site, nothing else", async () => {
-+    const jar = new Set([
-+      "https://getbb.app|__Secure-better-auth.session_token",
-+      "https://connect.example.dev|__Secure-better-auth.session_token",
-+      "https://example.com|session",
++  it("deletes bb connect sessions and account sign-ins from both stores, and nothing else", async () => {
++    const appCookies = cookieJar([
++      { domain: "getbb.app", name: "__Secure-better-auth.session_token" },
++      { domain: "accounts.elsewhere.dev", name: "__Secure-better-auth.session_token" },
++      { domain: "studio.getbb.app", name: "__Secure-bb-connect.desktop_session" },
++      { domain: "localhost", name: "bb-connect.desktop_session", secure: false },
++      { domain: "example.com", name: "session" },
 +    ]);
-+    const clear = vi.fn(async () => undefined);
++    const browserCookies = cookieJar([
++      { domain: "box.corp-connect.dev", name: "__Secure-bb-connect.desktop_session" },
++      { domain: "corp-connect.dev", name: "__Secure-better-auth.session_token" },
++      { domain: "getbb.app", name: "__Secure-better-auth.session_token" },
++      { domain: "other-saas.com", name: "__Secure-better-auth.session_token" },
++      { domain: "example.com", name: "session" },
++    ]);
++    const credentialCache = {
++      clear: vi.fn(async () => undefined),
++      read: vi.fn(async () => null),
++    };
 +
 +    await forgetBbConnect({
-+      cookieNameFor: (url) =>
-+        new URL(url).protocol === "http:"
-+          ? "better-auth.session_token"
-+          : "__Secure-better-auth.session_token",
-+      credentialCache: { clear },
++      appCookies,
++      browserCookies,
++      credentialCache,
 +      defaultAccountUrl: "https://getbb.app",
-+      forgottenServerUrls: ["https://studio.connect.example.dev", "not a url"],
-+      removeCookie: async (url, name) => {
-+        jar.delete(`${url}|${name}`);
-+      },
++      forgottenServerUrls: ["not a url"],
 +    });
 +
-+    expect(clear).toHaveBeenCalledOnce();
-+    expect([...jar]).toEqual(["https://example.com|session"]);
++    expect(credentialCache.clear).toHaveBeenCalledOnce();
++    expect(credentialCache.read).not.toHaveBeenCalled();
++    expect(appCookies.left()).toEqual(["example.com|session"]);
++    expect(browserCookies.left()).toEqual([
++      "other-saas.com|__Secure-better-auth.session_token",
++      "example.com|session",
++    ]);
++  });
++
++  it("finds the account site behind a forgotten connect server", async () => {
++    const browserCookies = cookieJar([
++      { domain: "connect.example.dev", name: "__Secure-better-auth.session_token" },
++    ]);
++
++    await forgetBbConnect({
++      appCookies: cookieJar([]),
++      browserCookies,
++      credentialCache: { clear: async () => undefined },
++      defaultAccountUrl: "https://getbb.app",
++      forgottenServerUrls: ["https://studio.connect.example.dev"],
++    });
++
++    expect(browserCookies.left()).toEqual([]);
 +  });
 +});
 diff --git a/apps/desktop/test/fixtures/startup-retry-smoke.cjs b/apps/desktop/test/fixtures/startup-retry-smoke.cjs
