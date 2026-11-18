@@ -114,8 +114,15 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
     onDrop.current = (threadIds, target) => {
       const bot = state.bots.find((item) => item.id === target.botId);
       if (bot === undefined) return;
+      // Only top-level conversations belong to a bot; a dragged sub-thread
+      // follows its parent, so it is left out rather than refused.
+      const roots = threadIds.filter((threadId) => conversations.parentOf(threadId) === null);
+      if (roots.length === 0) {
+        toast.error(strings.assignFailed(bot.name), { description: strings.onlyTopLevel });
+        return;
+      }
       // Assigning in reverse keeps a dragged selection in its order at the top.
-      const ordered = target.place === "first" ? [...threadIds].reverse() : threadIds;
+      const ordered = target.place === "first" ? [...roots].reverse() : roots;
       void (async () => {
         try {
           for (const threadId of ordered) {
@@ -133,10 +140,10 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
         if (collapsed.includes(bot.id)) {
           setCollapsed((current) => current.filter((item) => item !== bot.id));
         }
-        const [shown] = threadIds;
+        const [shown] = roots;
         if (shown === undefined) return;
         reveal.current = { botId: bot.id, threadId: shown };
-        toast.success(strings.assigned(bot.name, threadIds.length), {
+        toast.success(strings.assigned(bot.name, roots.length), {
           action: { label: strings.open, onClick: () => navigate.toThread(shown) },
         });
       })();
@@ -297,6 +304,7 @@ function useBotConversations(bots: readonly SidebarBot[]) {
     };
     return {
       of: (bot: SidebarBot) => byBot.get(bot.id) ?? empty,
+      parentOf: (threadId: string) => byId.get(threadId)?.parentThreadId ?? null,
     };
   }, [bots, threads]);
 }

@@ -24,6 +24,7 @@ export const strings = {
     count === 1 ? `Moved to ${name}` : `${count} conversations moved to ${name}`,
   assignFailed: (name: string) => `Could not move the conversation to ${name}`,
   open: "Open",
+  onlyTopLevel: "Sub-threads follow their parent conversation; drag the parent instead.",
   done: (count: number) => `Done: ${count}`,
   settings: {
     showBots: "Show bots",

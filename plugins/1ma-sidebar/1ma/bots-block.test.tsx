@@ -381,3 +381,27 @@ describe("dragging conversations onto a bot", () => {
     await waitFor(() => expect(screen.queryByText(strings.dropFirst)).toBeNull());
   });
 });
+
+describe("dragging a selection that holds a sub-thread onto a bot", () => {
+  it("moves the top-level conversations and leaves the sub-thread to follow its parent", async () => {
+    const calls: unknown[] = [];
+    render({
+      bots: () => ({ bots: [{ ...marketer(), threads: [] }] }),
+      assign: (input) => {
+        calls.push(input);
+        return { botId: "bot_m", startedFromBot: false };
+      },
+    });
+    await screen.findByText("Marketer");
+    const row = botElement("bot_m");
+    document.elementsFromPoint = () => [row.querySelector("button")!];
+    botDrop.start(["thr_bot", "thr_bot_child", "thr_plain"]);
+    botDrop.over({ x: 100, y: 10 });
+    botDrop.end();
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls).toEqual([
+      { threadId: "thr_bot", botId: "bot_m", place: "last" },
+      { threadId: "thr_plain", botId: "bot_m", place: "last" },
+    ]);
+  });
+});
