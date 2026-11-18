@@ -13,14 +13,18 @@ needs an entry for each item there, but SHIPPED_PLUGINS and the bundled
 registrations leave them out. On an existing install bb's orphan cleanup
 removes their rows; for these four it also deletes their key-value storage
 and their plugins/<id> folder, where sign-ins to bb's cloud live (owner
-decision, 17.11.2026).
+decision, 17.11.2026). A cloud plugin the user removed earlier keeps a row
+with removedAt; those rows are purged the same way.
 
 Desktop: without connect the app starts no account server sync, session
 renewal or machine enrollment and opens no sign-in window, so the Server
 menu has no "Sign in to bb Connect" item and nothing reaches getbb.app.
 At start it deletes its stored connect machine credential and the bb
 account cookie. The server target store forgets a saved connect server and
-never chooses or adopts one.
+never chooses or adopts one. The account cookie goes on the default
+account site and on the one behind the forgotten connect server. A server
+that moved away through bb connect is not opened: the moved-server page
+explains it and offers only Choose server.
 
 The AI services text and search keyword no longer mention bb cloud.
 
@@ -28,23 +32,26 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../settings/AiServicesSettingsSection.tsx    |   2 +-
  .../components/settings/settings-search.ts    |   2 +-
- apps/desktop/src/bb-connect-off.ts            |  15 ++
- apps/desktop/src/main.ts                      | 136 ++++++++++--------
- apps/desktop/src/server-target.ts             |  28 +++-
- apps/desktop/test/bb-connect-off.test.ts      |  22 +++
- .../test/fixtures/startup-retry-smoke.cjs     |  43 +++---
- apps/desktop/test/server-target.test.ts       |  67 +++++++++
- .../src/services/plugins/builtin-registry.ts  |  16 ++-
- .../src/services/plugins/plugin-service.ts    |  16 ++-
- .../public/public-host-management.test.ts     |  50 +------
+ apps/desktop/src/bb-connect-off.ts            |  30 +++
+ apps/desktop/src/main.ts                      | 172 +++++++++++-------
+ apps/desktop/src/server-target.ts             |  37 +++-
+ apps/desktop/test/bb-connect-off.test.ts      |  29 +++
+ .../test/fixtures/startup-retry-smoke.cjs     |  90 +++++++--
+ apps/desktop/test/preload-build.test.ts       |   1 +
+ apps/desktop/test/server-target.test.ts       |  72 ++++++++
+ .../src/services/plugins/builtin-registry.ts  |  16 +-
+ .../src/services/plugins/plugin-service.ts    |  88 ++++++++-
+ .../public/public-host-management.test.ts     |  50 +----
  .../plugin-catalog-routes.test.ts             |   9 +-
- .../plugin-catalog-service.test.ts            |  23 +--
- .../services/plugins/builtin-plugins.test.ts  |  32 +++++
- .../services/plugins/builtin-registry.test.ts |  38 ++++-
- .../services/plugins/plugin-install.test.ts   |  26 ++--
+ .../plugin-catalog-service.test.ts            |  23 ++-
+ .../services/plugins/builtin-plugins.test.ts  |  64 +++++++
+ .../services/plugins/builtin-registry.test.ts |  38 +++-
+ .../services/plugins/plugin-install.test.ts   |  26 +--
+ packages/db/src/data/index.ts                 |   1 +
+ packages/db/src/data/plugins.ts               |  11 ++
  packages/domain/src/bb-cloud.ts               |  14 ++
  packages/domain/src/index.ts                  |   1 +
- 18 files changed, 388 insertions(+), 152 deletions(-)
+ 21 files changed, 618 insertions(+), 158 deletions(-)
  create mode 100644 apps/desktop/src/bb-connect-off.ts
  create mode 100644 apps/desktop/test/bb-connect-off.test.ts
  create mode 100644 packages/domain/src/bb-cloud.ts
@@ -77,27 +84,42 @@ index c7d16a5..9f08062 100644
          title: "Thread titles",
 diff --git a/apps/desktop/src/bb-connect-off.ts b/apps/desktop/src/bb-connect-off.ts
 new file mode 100644
-index 0000000..c021cc4
+index 0000000..b4cd9d8
 --- /dev/null
 +++ b/apps/desktop/src/bb-connect-off.ts
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,30 @@
++import { deriveConnectBaseUrl } from "@bb/connect-client";
 +import type { ConnectCredentialCache } from "./connect-credential-cache.js";
 +
 +/**
 + * In a build without bb connect, deletes what an earlier bb or 1ma kept for
-+ * it on this computer: the machine credential and the bb account sign-in.
++ * it on this computer: the machine credential and the bb account sign-in on
++ * every account site it knows of (the default one and the one behind a
++ * forgotten connect server). The credential is deleted without being read:
++ * reading it would ask the OS keychain, which can prompt on an unsigned build.
 + */
 +export async function forgetBbConnect(args: {
-+  accountUrl: string;
-+  cookieName: string;
++  cookieNameFor(accountUrl: string): string;
 +  credentialCache: Pick<ConnectCredentialCache, "clear">;
++  defaultAccountUrl: string;
++  forgottenServerUrls: readonly string[];
 +  removeCookie(url: string, name: string): Promise<void>;
 +}): Promise<void> {
 +  await args.credentialCache.clear();
-+  await args.removeCookie(args.accountUrl, args.cookieName);
++  const accountUrls = new Set([args.defaultAccountUrl]);
++  for (const serverUrl of args.forgottenServerUrls) {
++    try {
++      accountUrls.add(deriveConnectBaseUrl(serverUrl));
++    } catch {
++      // Not a URL: no cookie can belong to it.
++    }
++  }
++  for (const accountUrl of accountUrls) {
++    await args.removeCookie(accountUrl, args.cookieNameFor(accountUrl));
++  }
 +}
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 92cdadc..52d7f7f 100644
+index 92cdadc..6ff6de4 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
 @@ -45,6 +45,7 @@ import {
@@ -116,7 +138,21 @@ index 92cdadc..52d7f7f 100644
  import {
    createConnectSessionRenewal,
    type ConnectSessionRenewal,
-@@ -1717,6 +1719,9 @@ async function runStartupAction(
+@@ -1415,6 +1417,13 @@ async function activateLocalServerMove(move: DesktopServerMove): Promise<void> {
+   const userDataPath = desktopUserDataPath;
+   localServerMove = move;
+   stopServerMovedWatcher();
++  if (!isServerMoveSupported(move)) {
++    desktopLogger.info(
++      `[desktop] this computer's bb server moved to ${move.toHostName} through bb connect, which this app does not include; the user chooses a server`,
++    );
++    refreshApplicationMenu();
++    return;
++  }
+   desktopLogger.info(
+     `[desktop] this computer's bb server moved to ${move.toHostName}; the app now opens that server and runs this computer as a regular machine`,
+   );
+@@ -1717,6 +1726,9 @@ async function runStartupAction(
  }
  
  function openConnectSignIn(parentWindow: BrowserWindow | null): void {
@@ -126,7 +162,54 @@ index 92cdadc..52d7f7f 100644
    if (connectSignInWindow !== null && !connectSignInWindow.isDestroyed()) {
      connectSignInWindow.focus();
      return;
-@@ -3056,6 +3061,7 @@ async function runDesktopApp(): Promise<void> {
+@@ -1814,15 +1826,26 @@ async function selectBuiltinServer(): Promise<void> {
+   await applyServerTarget();
+ }
+ 
++function isServerMoveSupported(move: DesktopServerMove): boolean {
++  return BB_CONNECT_SHIPPED || move.target.kind !== "connect";
++}
++
+ async function loadServerMovedView(move: DesktopServerMove): Promise<void> {
++  const supported = isServerMoveSupported(move);
+   await loadActionView({
+     actions: [
+-      { id: "open-moved-server", label: `Open ${move.toHostName}` },
++      ...(supported
++        ? [{ id: "open-moved-server" as const, label: `Open ${move.toHostName}` }]
++        : []),
+       { id: "choose-server", label: "Choose server…" },
+     ],
+-    details: move.oldCopyKept
+-      ? "The old copy on this computer is locked after the move."
+-      : "The old copy on this computer was deleted.",
++    details:
++      (move.oldCopyKept
++        ? "The old copy on this computer is locked after the move."
++        : "The old copy on this computer was deleted.") +
++      (supported
++        ? ""
++        : " It moved through bb connect, which this app does not include. Add that server by its address: Choose server…, then Add Server…."),
+     logs: "",
+     title: `bb moved to ${move.toHostName}`,
+   });
+@@ -1853,6 +1876,15 @@ async function applyServerTarget(): Promise<void> {
+   const target = serverTargetStore.getTarget();
+   desktopBrowserBrokerClient?.reconnect();
+ 
++  if (
++    target.kind === "builtin" &&
++    localServerMove !== null &&
++    !isServerMoveSupported(localServerMove)
++  ) {
++    await loadServerMovedView(localServerMove);
++    refreshApplicationMenu();
++    return;
++  }
+   if (target.kind === "builtin") {
+     startServerMovedWatcher();
+     const attached = await ensureBuiltinRuntimeAttached();
+@@ -3056,6 +3088,7 @@ async function runDesktopApp(): Promise<void> {
    });
  
    serverTargetStore = createServerTargetStore({
@@ -134,7 +217,7 @@ index 92cdadc..52d7f7f 100644
      storagePath: join(userDataPath, SERVER_TARGET_FILE_NAME),
    });
    await serverTargetStore.load();
-@@ -3071,63 +3077,77 @@ async function runDesktopApp(): Promise<void> {
+@@ -3071,63 +3104,78 @@ async function runDesktopApp(): Promise<void> {
    machineServiceNoticeStore = createServerMoveNoticeStore({
      storagePath: join(userDataPath, MACHINE_SERVICE_NOTICE_FILE_NAME),
    });
@@ -254,14 +337,15 @@ index 92cdadc..52d7f7f 100644
 +      },
 +    });
 +  } else {
-+    const accountUrl = resolveConnectAccountUrl();
++    const forgotten = serverTargetStore.getForgottenConnectServer();
 +    await forgetBbConnect({
-+      accountUrl,
-+      cookieName: connectAccountCookieName(accountUrl),
++      cookieNameFor: connectAccountCookieName,
 +      credentialCache: createConnectCredentialCache({
 +        encryption: safeStorage,
 +        userDataPath,
 +      }),
++      defaultAccountUrl: resolveConnectAccountUrl(),
++      forgottenServerUrls: forgotten === null ? [] : [forgotten.url],
 +      removeCookie: (url, name) =>
 +        session.defaultSession.cookies.remove(url, name),
 +    });
@@ -269,7 +353,7 @@ index 92cdadc..52d7f7f 100644
  
    const desktopUpdateSupport = resolveDesktopUpdateSupport({
      canReplaceAppImage,
-@@ -3410,7 +3430,7 @@ async function runDesktopApp(): Promise<void> {
+@@ -3410,7 +3458,7 @@ async function runDesktopApp(): Promise<void> {
      await initializeRuntime({ bridgePath, serverUrl, userDataPath });
    } else {
      await applyServerTarget();
@@ -279,7 +363,7 @@ index 92cdadc..52d7f7f 100644
  }
  
 diff --git a/apps/desktop/src/server-target.ts b/apps/desktop/src/server-target.ts
-index c6257b8..740849a 100644
+index c6257b8..7d6b7b5 100644
 --- a/apps/desktop/src/server-target.ts
 +++ b/apps/desktop/src/server-target.ts
 @@ -43,6 +43,11 @@ export interface ServerTargetFs {
@@ -294,15 +378,25 @@ index c6257b8..740849a 100644
    fs?: ServerTargetFs;
    storagePath: string;
  }
-@@ -134,6 +139,7 @@ export function createServerTargetStore(
+@@ -50,6 +55,8 @@ interface CreateServerTargetStoreArgs {
+ export interface ServerTargetStore {
+   adoptConnectServers(servers: readonly ConnectServerRef[]): Promise<boolean>;
+   getConnectServer(): ConnectServerRef | null;
++  /** The connect server a store without connect dropped on load. */
++  getForgottenConnectServer(): ConnectServerRef | null;
+   getConnectServerName(handle: string): string | null;
+   getCustomServerUrl(): string | null;
+   getCustomServerUrls(): string[];
+@@ -134,6 +141,8 @@ export function createServerTargetStore(
    args: CreateServerTargetStoreArgs,
  ): ServerTargetStore {
    const fsImpl = args.fs ?? defaultFs;
 +  const connectEnabled = args.connect ?? true;
++  let forgottenConnectServer: ConnectServerRef | null = null;
    let connectServer: ConnectServerRef | null = null;
    let customServerUrl: string | null = null;
    let customServers: CustomServer[] = [];
-@@ -183,6 +189,9 @@ export function createServerTargetStore(
+@@ -183,6 +192,9 @@ export function createServerTargetStore(
        await persist();
      },
      async adoptConnectServers(servers) {
@@ -312,18 +406,31 @@ index c6257b8..740849a 100644
        const serversByUrl = new Map<string, ConnectServerRef>();
        for (const server of servers) {
          const url = normalizeCustomServerUrl(server.url);
-@@ -300,6 +309,10 @@ export function createServerTargetStore(
+@@ -222,6 +234,11 @@ export function createServerTargetStore(
+     getConnectServer() {
+       return connectServer === null ? null : { ...connectServer };
+     },
++    getForgottenConnectServer() {
++      return forgottenConnectServer === null
++        ? null
++        : { ...forgottenConnectServer };
++    },
+     getConnectServerName(handle) {
+       return connectServerNames.get(handle) ?? null;
+     },
+@@ -300,6 +317,11 @@ export function createServerTargetStore(
            },
          ),
        );
 +      if (!connectEnabled) {
++        forgottenConnectServer = connectServer;
 +        connectServer = null;
 +        connectServerNames = new Map();
 +      }
        if (persisted.target === "custom" && customServerUrl !== null) {
          target = "custom";
        } else if (persisted.target === "connect" && connectServer !== null) {
-@@ -307,6 +320,14 @@ export function createServerTargetStore(
+@@ -307,6 +329,14 @@ export function createServerTargetStore(
        } else {
          target = "builtin";
        }
@@ -338,7 +445,7 @@ index c6257b8..740849a 100644
      },
      async refreshConnectServer(server) {
        if (
-@@ -321,6 +342,9 @@ export function createServerTargetStore(
+@@ -321,6 +351,9 @@ export function createServerTargetStore(
        return true;
      },
      async setConnectServer(server) {
@@ -348,7 +455,7 @@ index c6257b8..740849a 100644
        connectServer = { ...server };
        target = "connect";
        await persist();
-@@ -361,7 +385,9 @@ export function createServerTargetStore(
+@@ -361,7 +394,9 @@ export function createServerTargetStore(
          if (target === "custom") {
            const fallbackConnectServer =
              connectServer ??
@@ -361,40 +468,110 @@ index c6257b8..740849a 100644
              null;
 diff --git a/apps/desktop/test/bb-connect-off.test.ts b/apps/desktop/test/bb-connect-off.test.ts
 new file mode 100644
-index 0000000..8e34efd
+index 0000000..37c8466
 --- /dev/null
 +++ b/apps/desktop/test/bb-connect-off.test.ts
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,29 @@
 +import { describe, expect, it, vi } from "vitest";
 +import { forgetBbConnect } from "../src/bb-connect-off.js";
 +
 +describe("forgetBbConnect", () => {
-+  it("deletes the stored machine credential and the account sign-in cookie", async () => {
++  it("deletes the credential and the account sign-in on every known account site, nothing else", async () => {
++    const jar = new Set([
++      "https://getbb.app|__Secure-better-auth.session_token",
++      "https://connect.example.dev|__Secure-better-auth.session_token",
++      "https://example.com|session",
++    ]);
 +    const clear = vi.fn(async () => undefined);
-+    const removeCookie = vi.fn(async () => undefined);
 +
 +    await forgetBbConnect({
-+      accountUrl: "https://getbb.app",
-+      cookieName: "__Secure-better-auth.session_token",
++      cookieNameFor: (url) =>
++        new URL(url).protocol === "http:"
++          ? "better-auth.session_token"
++          : "__Secure-better-auth.session_token",
 +      credentialCache: { clear },
-+      removeCookie,
++      defaultAccountUrl: "https://getbb.app",
++      forgottenServerUrls: ["https://studio.connect.example.dev", "not a url"],
++      removeCookie: async (url, name) => {
++        jar.delete(`${url}|${name}`);
++      },
 +    });
 +
 +    expect(clear).toHaveBeenCalledOnce();
-+    expect(removeCookie).toHaveBeenCalledExactlyOnceWith(
-+      "https://getbb.app",
-+      "__Secure-better-auth.session_token",
-+    );
++    expect([...jar]).toEqual(["https://example.com|session"]);
 +  });
 +});
 diff --git a/apps/desktop/test/fixtures/startup-retry-smoke.cjs b/apps/desktop/test/fixtures/startup-retry-smoke.cjs
-index 8c48973..972c0ff 100644
+index 8c48973..abbcdf7 100644
 --- a/apps/desktop/test/fixtures/startup-retry-smoke.cjs
 +++ b/apps/desktop/test/fixtures/startup-retry-smoke.cjs
-@@ -123,6 +123,30 @@ async function run() {
+@@ -77,9 +77,30 @@ async function run() {
+   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+   const port = server.address().port;
+   const serverUrl = `http://127.0.0.1:${port}`;
+-  if (scenario === "custom" || scenario === "crashed") {
++  if (
++    scenario === "custom" ||
++    scenario === "crashed" ||
++    scenario === "connect-move"
++  ) {
+     await new Promise((resolve) => server.close(resolve));
+   }
++  if (scenario === "connect-move") {
++    await writeFile(
++      join(process.env.BB_DATA_DIR, "server-moved.json"),
++      JSON.stringify({
++        version: 1,
++        moveId: "move-through-connect",
++        movedAt: Date.now(),
++        fromHostId: "host-here",
++        toHostId: "host-studio",
++        toHostName: "Studio Mac",
++        serverUrl,
++        mode: "connect",
++        connectHandle: "studio",
++        oldCopyEntries: [],
++      }),
++    );
++  }
+   if (scenario === "crashed") {
+     const crashingRuntime = join(app.getPath("userData"), "crashing-bb-app");
+     await writeFile(
+@@ -97,7 +118,10 @@ async function run() {
+   await writeFile(
+     join(app.getPath("userData"), "server-target.json"),
+     JSON.stringify(
+-      scenario === "fatal" || scenario === "attached" || scenario === "crashed"
++      scenario === "fatal" ||
++        scenario === "attached" ||
++        scenario === "crashed" ||
++        scenario === "connect-move"
+         ? { target: "builtin", customServerUrl: null }
+         : scenario === "connect"
+           ? {
+@@ -123,6 +147,49 @@ async function run() {
      };
    });
    require(join(desktopRoot, "dist/main.js"));
++  if (scenario === "connect-move") {
++    await until(() =>
++      contents?.executeJavaScript(
++        'document.querySelector("h1")?.textContent.includes("moved to Studio Mac")',
++      ),
++    );
++    assert.deepEqual(
++      await contents.executeJavaScript(
++        'Array.from(document.querySelectorAll("[data-startup-action]"), (button) => button.dataset.startupAction)',
++      ),
++      ["choose-server"],
++      "A move through bb connect offers only choosing another server",
++    );
++    assert.equal(mintCount, 0, "Nothing asks bb connect for a session");
++    server.close();
++    console.log("STARTUP_RETRY_SMOKE_OK");
++    app.exit(0);
++    return;
++  }
 +  if (scenario === "connect") {
 +    await until(() =>
 +      contents?.executeJavaScript(
@@ -422,7 +599,7 @@ index 8c48973..972c0ff 100644
    if (scenario === "attached") {
      await until(() => contents?.getURL() === `${serverUrl}/`);
      await until(() =>
-@@ -158,11 +182,7 @@ async function run() {
+@@ -158,11 +225,7 @@ async function run() {
      return;
    }
    const errorTitle =
@@ -435,7 +612,7 @@ index 8c48973..972c0ff 100644
    const hasError = () =>
      contents?.getURL().startsWith("data:") &&
      contents.executeJavaScript(
-@@ -272,7 +292,6 @@ async function run() {
+@@ -272,7 +335,6 @@ async function run() {
    }
    recovered = true;
    const before = loads.length;
@@ -443,7 +620,7 @@ index 8c48973..972c0ff 100644
    await contents.executeJavaScript(
      'const button = document.querySelector("[data-startup-action=retry]"); for (let i = 0; i < 10; i++) button.click();',
    );
-@@ -286,18 +305,6 @@ async function run() {
+@@ -286,18 +348,6 @@ async function run() {
    console.log(
      JSON.stringify({ scenario, retryLoads: retryLoads.length, mintCount }),
    );
@@ -462,11 +639,23 @@ index 8c48973..972c0ff 100644
    assert.equal(
      retryLoads.length,
      1,
+diff --git a/apps/desktop/test/preload-build.test.ts b/apps/desktop/test/preload-build.test.ts
+index ae9566d..a071c18 100644
+--- a/apps/desktop/test/preload-build.test.ts
++++ b/apps/desktop/test/preload-build.test.ts
+@@ -437,6 +437,7 @@ describe("desktop build", () => {
+           "crashed",
+           "custom",
+           "connect",
++          "connect-move",
+         ]) {
+           const retryProfile = join(smokeRoot, `retry-${scenario}`);
+           await mkdir(retryProfile);
 diff --git a/apps/desktop/test/server-target.test.ts b/apps/desktop/test/server-target.test.ts
-index 2a7e6cc..608fb68 100644
+index 2a7e6cc..5b85457 100644
 --- a/apps/desktop/test/server-target.test.ts
 +++ b/apps/desktop/test/server-target.test.ts
-@@ -379,3 +379,70 @@ describe("server target store", () => {
+@@ -379,3 +379,75 @@ describe("server target store", () => {
      expect(invalidUrl.getCustomServerUrl()).toBeNull();
    });
  });
@@ -495,6 +684,11 @@ index 2a7e6cc..608fb68 100644
 +
 +    expect(store.getTarget()).toEqual({ kind: "builtin" });
 +    expect(store.getConnectServer()).toBeNull();
++    expect(store.getForgottenConnectServer()).toEqual({
++      handle: "studio",
++      name: "Studio",
++      url: "https://studio.getbb.app",
++    });
 +    expect(store.getConnectServerName("studio")).toBeNull();
 +    expect(store.getCustomServerUrls()).toEqual(["https://lan.example"]);
 +    const written = files.get("/tmp/t.json") ?? "";
@@ -587,7 +781,7 @@ index 9822203..690a48c 100644
      rootDir: resolveBuiltinPluginRootPath(plugin.name),
    }));
 diff --git a/apps/server/src/services/plugins/plugin-service.ts b/apps/server/src/services/plugins/plugin-service.ts
-index 8fefebf..60fef96 100644
+index 8fefebf..d4ec80e 100644
 --- a/apps/server/src/services/plugins/plugin-service.ts
 +++ b/apps/server/src/services/plugins/plugin-service.ts
 @@ -14,6 +14,7 @@ import { join } from "node:path";
@@ -598,7 +792,89 @@ index 8fefebf..60fef96 100644
    CUSTOM_THEME_CSS_MAX_LENGTH,
    deepFreezePluginMetadata,
    derivePluginId,
-@@ -1352,10 +1353,23 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
+@@ -80,6 +81,7 @@ import {
+   getLatestThreadSequence,
+   listDuePluginSchedules,
+   listInstalledPlugins,
++  listRemovedInstalledPlugins,
+   listPendingGitPluginArtifacts,
+   listPluginMarketplaces,
+   listPluginSchedules,
+@@ -1349,13 +1351,97 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
+     }
+   }
+ 
++  function isBbCloudBuiltinRow(row: InstalledPluginRow): boolean {
++    return (
++      row.sourceKind === "builtin" &&
++      BB_CLOUD_PLUGIN_NAMES.includes(row.sourceBuiltinName ?? "")
++    );
++  }
++
++  async function removeUnbundledBuiltins(): Promise<void> {
++    const rows = [
++      ...listInstalledPlugins(deps.db).filter(isOrphanedBuiltinRow),
++      // A cloud plugin the user removed earlier still has its row, storage
++      // and folder; 1ma keeps no sign-ins to bb's cloud.
++      ...listRemovedInstalledPlugins(deps.db).filter(isBbCloudBuiltinRow),
++    ];
++    for (const row of rows) {
++      const bbCloud = isBbCloudBuiltinRow(row);
++      await deleteRemovedPluginData(row, pluginProviderIds(row));
++      if (bbCloud) {
++        deleteAllPluginKvValues(deps.db, row.id);
++        await rm(join(deps.dataDir, "plugins", row.id), {
++          recursive: true,
++          force: true,
++        });
++      }
++      deleteInstalledPlugin(deps.db, row.id);
++      logger.info(
++        bbCloud
++          ? `plugin ${row.id} removed because 1ma does not ship bb cloud plugins; everything it stored was deleted`
++          : `plugin ${row.id} removed because bb no longer bundles ${row.source}; its settings, secrets, and schedules were deleted`,
++      );
++    }
++  }
++
++  async function handOverRetiredBuiltins(): Promise<void> {
++    for (const retired of retiredBundledPlugins) {
++      const row = getInstalledPlugin(deps.db, retired.pluginId);
++      if (row === undefined || !isOrphanedBuiltinRow(row)) continue;
++      if (row.enabled) {
++        const stored = getPluginSettingsValues(deps.db, row.id);
++        const carried = Object.fromEntries(
++          retired.carriedSettings.flatMap((key) =>
++            Object.hasOwn(stored, key) ? [[key, stored[key]]] : [],
++          ),
++        );
++        if (Object.keys(carried).length > 0) {
++          setPluginSettingsValues(deps.db, retired.successorPluginId, carried);
++        }
++        const successor = getInstalledPluginRegistration(
++          deps.db,
++          retired.successorPluginId,
++        );
++        if (
++          successor?.removedAt !== null &&
++          successor?.removedAt !== undefined
++        ) {
++          restoreRemovedInstalledPlugin(deps.db, successor.id);
++        } else if (successor !== undefined && !successor.enabled) {
++          setInstalledPluginEnabled(deps.db, successor.id, true);
++        }
++      }
++      await deleteRemovedPluginData(row, new Set());
++      deleteAllPluginKvValues(deps.db, row.id);
++      deleteInstalledPlugin(deps.db, row.id);
++      logger.info(
++        row.enabled
++          ? `plugin ${row.id} retired; its settings moved to ${retired.successorPluginId}, which is now enabled`
++          : `plugin ${row.id} retired because bb no longer bundles ${row.source}`,
++      );
++    }
++  }
++
    async function removeUnbundledBuiltins(): Promise<void> {
      for (const row of listInstalledPlugins(deps.db)) {
        if (!isOrphanedBuiltinRow(row)) continue;
@@ -800,7 +1076,7 @@ index d87db4e..6d2ce2b 100644
        expect(getPluginMarketplace(db, "bb-community")?.lastError).toContain(
          "HTTP 503",
 diff --git a/apps/server/test/services/plugins/builtin-plugins.test.ts b/apps/server/test/services/plugins/builtin-plugins.test.ts
-index 6071b6a..b9b178e 100644
+index 6071b6a..45f3fe7 100644
 --- a/apps/server/test/services/plugins/builtin-plugins.test.ts
 +++ b/apps/server/test/services/plugins/builtin-plugins.test.ts
 @@ -15,8 +15,10 @@ import { fileURLToPath } from "node:url";
@@ -814,7 +1090,7 @@ index 6071b6a..b9b178e 100644
    setPluginSettingsValues,
    upsertPluginSchedule,
    type DbConnection,
-@@ -349,6 +351,36 @@ describe("builtin plugin reconciliation", () => {
+@@ -349,6 +351,68 @@ describe("builtin plugin reconciliation", () => {
      ]);
    });
  
@@ -843,6 +1119,38 @@ index 6071b6a..b9b178e 100644
 +      if (kvAfter === undefined) {
 +        await expect(stat(join(dataDir, "plugins", pluginId))).rejects.toThrow();
 +      } else {
++        await expect(stat(join(hostData, "state.json"))).resolves.toBeDefined();
++      }
++    },
++  );
++
++  it.each([
++    ["connect", "deletes", undefined],
++    ["fixture", "keeps", "signed-in"],
++  ] as const)(
++    "%s: a copy the user removed earlier: the next start %s its storage",
++    async (builtinName, _verb, kvAfter) => {
++      const dataDir = join(workDir, "data");
++      service = createService({ db, dataDir, builtinName });
++      await service.start();
++      const pluginId = service.list()[0]?.id;
++      if (pluginId === undefined) throw new Error("the builtin did not install");
++      setPluginKvValue(db, pluginId, "session", "signed-in");
++      const hostData = join(dataDir, "plugins", pluginId, "host-data");
++      await mkdir(hostData, { recursive: true });
++      await writeFile(join(hostData, "state.json"), "{}");
++      await expect(service.remove(pluginId)).resolves.toBe(true);
++      await service.stop();
++
++      service = createService({ db, dataDir, includeBuiltin: false });
++      await service.start();
++
++      expect(getPluginKvValue(db, pluginId, "session")).toBe(kvAfter);
++      if (kvAfter === undefined) {
++        expect(getInstalledPluginRegistration(db, pluginId)).toBeUndefined();
++        await expect(stat(join(dataDir, "plugins", pluginId))).rejects.toThrow();
++      } else {
++        expect(getInstalledPluginRegistration(db, pluginId)?.removedAt).not.toBeNull();
 +        await expect(stat(join(hostData, "state.json"))).resolves.toBeDefined();
 +      }
 +    },
@@ -972,6 +1280,40 @@ index 0cbdb4c..ea7b52f 100644
    });
  
    it("refuses a path plugin whose id uses the reserved bb-- prefix", async () => {
+diff --git a/packages/db/src/data/index.ts b/packages/db/src/data/index.ts
+index d38c996..03ac194 100644
+--- a/packages/db/src/data/index.ts
++++ b/packages/db/src/data/index.ts
+@@ -165,6 +165,7 @@ export {
+   getInstalledPluginRegistration,
+   listInstalledPlugins,
+   listInstalledPluginsFromMarketplace,
++  listRemovedInstalledPlugins,
+   listUnnormalizedPluginRegistrations,
+   markInstalledPluginRemoved,
+   normalizeInstalledPluginRegistration,
+diff --git a/packages/db/src/data/plugins.ts b/packages/db/src/data/plugins.ts
+index f0ed25c..2cffa27 100644
+--- a/packages/db/src/data/plugins.ts
++++ b/packages/db/src/data/plugins.ts
+@@ -247,6 +247,17 @@ export function listInstalledPlugins(db: DbConnection): InstalledPluginRow[] {
+     }));
+ }
+ 
++/** Rows of plugins the user removed; bb keeps them so a reinstall finds its data. */
++export function listRemovedInstalledPlugins(
++  db: DbConnection,
++): InstalledPluginRow[] {
++  return db
++    .select()
++    .from(installedPlugins)
++    .where(isNotNull(installedPlugins.removedAt))
++    .all();
++}
++
+ export function getInstalledPlugin(
+   db: DbConnection,
+   id: string,
 diff --git a/packages/domain/src/bb-cloud.ts b/packages/domain/src/bb-cloud.ts
 new file mode 100644
 index 0000000..0cf6d78
