@@ -409,30 +409,57 @@ describe("dragging a selection that holds a sub-thread onto a bot", () => {
   });
 });
 
+// A server for the drop tests: assignments it saves show in bots.v1.list.
+function dropServer(options: {
+  saveThenLose?: number;
+  refuse?: number;
+  listFails?: () => boolean;
+}) {
+  const owned: string[] = [];
+  let call = 0;
+  return {
+    bots: () => {
+      if (options.listFails?.()) throw new Error("1ma-bots is restarting");
+      return {
+        bots: [
+          {
+            ...marketer(),
+            threads: owned.map((threadId) => ({
+              threadId,
+              startedFromBot: false,
+              completed: false,
+            })),
+          },
+        ],
+      };
+    },
+    assign: (input: unknown) => {
+      call += 1;
+      const { threadId } = input as { threadId: string };
+      if (call === options.refuse) throw new Error("That conversation was archived");
+      owned.push(threadId);
+      if (call === options.saveThenLose) throw new Error("The answer did not arrive");
+      return { botId: "bot_m", startedFromBot: false };
+    },
+  };
+}
+
+async function dropTwo() {
+  await screen.findByText("Marketer");
+  const row = botElement("bot_m");
+  document.elementsFromPoint = () => [row.querySelector("button")!];
+  botDrop.start(["thr_bot", "thr_plain"]);
+  botDrop.over({ x: 100, y: 10 });
+  botDrop.end();
+}
+
 describe("Codex review of f6aa64f: a drop that fails partway", () => {
   it("says how many moved and offers to open the moved conversation", async () => {
-    let call = 0;
-    const writes: unknown[] = [];
     toasts.error.mockClear();
     toasts.success.mockClear();
-    render({
-      bots: () => ({ bots: [{ ...marketer(), threads: [] }] }),
-      setPreference: (input) => {
-        writes.push(input);
-        return input;
-      },
-      assign: () => {
-        call += 1;
-        if (call === 2) throw new Error("That conversation was archived");
-        return { botId: "bot_m", startedFromBot: false };
-      },
-    });
-    await screen.findByText("Marketer");
-    const row = botElement("bot_m");
-    document.elementsFromPoint = () => [row.querySelector("button")!];
-    botDrop.start(["thr_bot", "thr_plain"]);
-    botDrop.over({ x: 100, y: 10 });
-    botDrop.end();
+    const server = dropServer({ refuse: 2 });
+    render({ bots: server.bots, assign: server.assign });
+    await dropTwo();
     await waitFor(() => expect(toasts.error).toHaveBeenCalled());
     const [title, options] = toasts.error.mock.calls[0]!;
     expect(title).toBe(strings.partlyAssigned("Marketer", 1, 2));
@@ -441,5 +468,37 @@ describe("Codex review of f6aa64f: a drop that fails partway", () => {
       action: { label: strings.open },
     });
     expect(toasts.success).not.toHaveBeenCalled();
+  });
+});
+
+describe("Codex review of d2c3da0: an assignment whose answer is lost", () => {
+  it("reads the bot again and reports what the server actually saved", async () => {
+    toasts.error.mockClear();
+    toasts.success.mockClear();
+    const server = dropServer({ saveThenLose: 2 });
+    render({ bots: server.bots, assign: server.assign });
+    await dropTwo();
+    await waitFor(() => expect(toasts.success).toHaveBeenCalled());
+    expect(toasts.success.mock.calls[0]![0]).toBe(strings.assigned("Marketer", 2));
+    expect(toasts.error).not.toHaveBeenCalled();
+  });
+
+  it("does not claim the rest stayed when the bot cannot be read again either", async () => {
+    toasts.error.mockClear();
+    toasts.success.mockClear();
+    let dropped = false;
+    const server = dropServer({ saveThenLose: 2, listFails: () => dropped });
+    render({
+      bots: server.bots,
+      assign: (input) => {
+        dropped = true;
+        return server.assign(input);
+      },
+    });
+    await dropTwo();
+    await waitFor(() => expect(toasts.error).toHaveBeenCalled());
+    const [title] = toasts.error.mock.calls[0]!;
+    expect(title).toBe(strings.unconfirmedAssigned("Marketer", 1, 2));
+    expect(title).not.toBe(strings.partlyAssigned("Marketer", 1, 2));
   });
 });

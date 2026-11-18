@@ -25,6 +25,8 @@ export const strings = {
   assignFailed: (name: string) => `Could not move the conversation to ${name}`,
   partlyAssigned: (name: string, moved: number, total: number) =>
     `Moved ${moved} of ${total} conversations to ${name}; the rest stayed where they were`,
+  unconfirmedAssigned: (name: string, moved: number, total: number) =>
+    `Moved ${moved} of ${total} conversations to ${name}; could not check the rest. Reload the list to see where they are.`,
   open: "Open",
   done: (count: number) => `Done: ${count}`,
   settings: {

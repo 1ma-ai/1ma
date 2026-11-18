@@ -105,6 +105,13 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
     pluginId: BOTS_PLUGIN_ID,
     method: "bots.v1.assign",
   });
+  // A fresh read of the bots, to learn where conversations ended up when an
+  // assignment's answer was lost.
+  const reread = useRpcMutation({
+    contract: botsRpc,
+    pluginId: BOTS_PLUGIN_ID,
+    method: "bots.v1.list",
+  });
   const navigate = useBbNavigate();
   // A dropped conversation is scrolled into view once the bot shows it.
   const reveal = useRef<{ botId: string; threadId: string } | null>(null);
@@ -121,15 +128,31 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
         // Assigning in reverse keeps a dragged selection in its order at the top.
         const ordered = target.place === "first" ? [...threadIds].reverse() : threadIds;
         void (async () => {
-          const moved: string[] = [];
+          const confirmed: string[] = [];
           let failure: unknown = null;
           for (const threadId of ordered) {
             try {
               await assign.mutate({ threadId, botId: bot.id, place: target.place });
-              moved.push(threadId);
+              confirmed.push(threadId);
             } catch (error) {
               failure = error;
               break;
+            }
+          }
+          // A failed call does not tell whether the server saved it (its
+          // answer may be what got lost), so the bot is read again; if that
+          // fails too, the outcome of the rest stays open.
+          let moved: readonly string[] = confirmed;
+          let known = true;
+          if (failure !== null) {
+            try {
+              const { bots } = await reread.mutate({});
+              const owned = new Set(
+                bots.find((item) => item.id === bot.id)?.threads.map((item) => item.threadId) ?? [],
+              );
+              moved = threadIds.filter((threadId) => owned.has(threadId));
+            } catch {
+              known = false;
             }
           }
           const shown = threadIds.find((threadId) => moved.includes(threadId));
@@ -143,7 +166,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
             shown === undefined
               ? undefined
               : { label: strings.open, onClick: () => navigate.toThread(shown) };
-          if (failure === null) {
+          if (failure === null || (known && moved.length === threadIds.length)) {
             toast.success(strings.assigned(bot.name, moved.length), { action: open });
             return;
           }
@@ -151,6 +174,13 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
             error: failure,
             fallbackMessage: strings.assignFailed(bot.name),
           });
+          if (!known) {
+            toast.error(strings.unconfirmedAssigned(bot.name, moved.length, threadIds.length), {
+              description: reason,
+              action: open,
+            });
+            return;
+          }
           if (moved.length === 0) {
             toast.error(strings.assignFailed(bot.name), { description: reason });
             return;
