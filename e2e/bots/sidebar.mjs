@@ -151,11 +151,12 @@ export async function groupsOf(page, headers, threadIds) {
   };
 }
 
-// Space between a group header and the last thread row drawn above it.
+// Space between a group header and the last row drawn above it: a thread
+// row, or the bots block's "N hidden" line.
 export async function gapAbove(page, header) {
   const top = await topOf(page.getByText(header, { exact: true }));
   const bottoms = await page
-    .locator("[data-sidebar-thread-id]")
+    .locator("[data-sidebar-thread-id], [data-1ma-hidden-bots]")
     .evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().bottom));
   const above = bottoms.filter((bottom) => bottom <= top);
   if (above.length === 0) throw new Error(`no thread row above ${header}`);

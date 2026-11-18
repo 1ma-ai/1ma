@@ -454,10 +454,11 @@ describe("1ma-sidebar with the bots block", () => {
       // dnd-kit starts after a short move; then travel to the bot in steps.
       await page.mouse.move(from.x + 46, from.y + from.height / 2 + 6, { steps: 4 });
       await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 20 });
+      await page.mouse.move(to.x + to.width / 2 + 2, to.y + to.height / 2 + 1, { steps: 2 });
+      await screenshot(page, "drag-onto-bot");
       await page
         .locator(`${botScope} [data-1ma-drop-place="first"]`)
         .waitFor({ timeout: 10 * SECOND });
-      await screenshot(page, "drag-onto-bot");
       await page.mouse.up();
       await page
         .locator(`${botScope} a[data-sidebar-thread-id="${fixture.plain}"]`)
