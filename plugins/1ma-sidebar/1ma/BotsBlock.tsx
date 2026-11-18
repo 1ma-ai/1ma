@@ -139,18 +139,22 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
               break;
             }
           }
-          // A failed call does not tell whether the server saved it (its
-          // answer may be what got lost), so the bot is read again; if that
-          // fails too, the outcome of the rest stays open.
+          // Only the call that failed is in doubt: the ones before it were
+          // confirmed and the ones after it were never sent. Its answer may
+          // be what got lost, so the bot is read again. Had the call been
+          // saved, that conversation would be the last one placed: first or
+          // last in the bot's order. Membership alone proves nothing, since
+          // a drop on its own bot only reorders.
           let moved: readonly string[] = confirmed;
           let known = true;
-          if (failure !== null) {
+          const doubtful = failure === null ? undefined : ordered[confirmed.length];
+          if (doubtful !== undefined) {
             try {
               const { bots } = await reread.mutate({});
-              const owned = new Set(
-                bots.find((item) => item.id === bot.id)?.threads.map((item) => item.threadId) ?? [],
-              );
-              moved = threadIds.filter((threadId) => owned.has(threadId));
+              const order =
+                bots.find((item) => item.id === bot.id)?.threads.map((item) => item.threadId) ?? [];
+              const placed = target.place === "first" ? order[0] : order.at(-1);
+              if (placed === doubtful) moved = [...confirmed, doubtful];
             } catch {
               known = false;
             }

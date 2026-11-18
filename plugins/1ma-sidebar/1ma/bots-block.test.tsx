@@ -3,6 +3,8 @@ import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+// jsdom draws nothing, so it has no scrollIntoView; the block calls it after a drop.
+Element.prototype.scrollIntoView = vi.fn();
 vi.mock("sonner", () => ({ toast: toasts }));
 import type { ExperimentalSidebarNavigationItem } from "@get-bb/plugin-sdk/app";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
@@ -409,15 +411,19 @@ describe("dragging a selection that holds a sub-thread onto a bot", () => {
   });
 });
 
-// A server for the drop tests: assignments it saves show in bots.v1.list.
+// A server for the drop tests: it keeps the bot's order the way 1ma-bots
+// binds a conversation (moved out, then put first or last), and shows it in
+// bots.v1.list.
 function dropServer(options: {
   saveThenLose?: number;
   refuse?: number;
   listFails?: () => boolean;
+  owned?: string[];
 }) {
-  const owned: string[] = [];
+  const owned: string[] = [...(options.owned ?? [])];
   let call = 0;
   return {
+    owned,
     bots: () => {
       if (options.listFails?.()) throw new Error("1ma-bots is restarting");
       return {
@@ -435,21 +441,26 @@ function dropServer(options: {
     },
     assign: (input: unknown) => {
       call += 1;
-      const { threadId } = input as { threadId: string };
+      const { threadId, place } = input as { threadId: string; place?: "first" | "last" };
       if (call === options.refuse) throw new Error("That conversation was archived");
-      owned.push(threadId);
+      const at = owned.indexOf(threadId);
+      if (at !== -1) owned.splice(at, 1);
+      if (place === "first") owned.unshift(threadId);
+      else owned.push(threadId);
       if (call === options.saveThenLose) throw new Error("The answer did not arrive");
       return { botId: "bot_m", startedFromBot: false };
     },
   };
 }
 
-async function dropTwo() {
+async function dropTwo(threadIds = ["thr_bot", "thr_plain"], x = 100) {
   await screen.findByText("Marketer");
   const row = botElement("bot_m");
+  row.querySelector("[data-1ma-bot-avatar]")!.getBoundingClientRect = () =>
+    new DOMRect(0, 0, 32, 32);
   document.elementsFromPoint = () => [row.querySelector("button")!];
-  botDrop.start(["thr_bot", "thr_plain"]);
-  botDrop.over({ x: 100, y: 10 });
+  botDrop.start(threadIds);
+  botDrop.over({ x, y: 10 });
   botDrop.end();
 }
 
@@ -500,5 +511,30 @@ describe("Codex review of d2c3da0: an assignment whose answer is lost", () => {
     const [title] = toasts.error.mock.calls[0]!;
     expect(title).toBe(strings.unconfirmedAssigned("Marketer", 1, 2));
     expect(title).not.toBe(strings.partlyAssigned("Marketer", 1, 2));
+  });
+});
+
+describe("Codex review of 98142c5: a drop that reorders a bot's own conversations", () => {
+  it("does not report success when the first move is refused and the order stays", async () => {
+    toasts.error.mockClear();
+    toasts.success.mockClear();
+    const server = dropServer({ refuse: 1, owned: ["keep", "thr_bot", "thr_plain"] });
+    render({ bots: server.bots, assign: server.assign });
+    await dropTwo(["thr_bot", "thr_plain"], 10);
+    await waitFor(() => expect(toasts.error).toHaveBeenCalled());
+    expect(toasts.success).not.toHaveBeenCalled();
+    expect(toasts.error.mock.calls[0]![0]).toBe(strings.assignFailed("Marketer"));
+    expect(server.owned).toEqual(["keep", "thr_bot", "thr_plain"]);
+  });
+
+  it("reports success when the lost answer's move is in the bot's order after all", async () => {
+    toasts.error.mockClear();
+    toasts.success.mockClear();
+    const server = dropServer({ saveThenLose: 2, owned: ["keep", "thr_bot", "thr_plain"] });
+    render({ bots: server.bots, assign: server.assign });
+    await dropTwo(["thr_bot", "thr_plain"], 10);
+    await waitFor(() => expect(toasts.success).toHaveBeenCalled());
+    expect(toasts.success.mock.calls[0]![0]).toBe(strings.assigned("Marketer", 2));
+    expect(server.owned).toEqual(["thr_bot", "thr_plain", "keep"]);
   });
 });
