@@ -18,8 +18,8 @@ export const strings = {
   mainConversationStatus: (status: string | null) => `Main conversation: ${status ?? "idle"}`,
   othersWorking: (count: number) => `${count} other conversation${count === 1 ? "" : "s"} working`,
   unreadError: "a conversation failed",
-  dropFirst: "Drop to make it the first conversation",
-  dropLast: "Drop to add it to this bot",
+  dropFirst: "Make first",
+  dropLast: "Add to end",
   assigned: (name: string, count: number) =>
     count === 1 ? `Moved to ${name}` : `${count} conversations moved to ${name}`,
   assignFailed: (name: string) => `Could not move the conversation to ${name}`,
