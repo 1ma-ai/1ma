@@ -33,8 +33,16 @@ function targetAt(point: { x: number; y: number }): BotDropTarget | null {
     if (row === null) continue;
     const botId = row.getAttribute(BOT_DROP_TARGET_ATTRIBUTE);
     if (botId === null || botId === "") return null;
-    const first = element.closest(`[${BOT_DROP_FIRST_ATTRIBUTE}]`) !== null;
-    return { botId, place: first ? "first" : "last" };
+    // The face sits under the row's click target and takes no pointer
+    // events, so it is found by where it is drawn, not by hit testing.
+    const face = row.querySelector(`[${BOT_DROP_FIRST_ATTRIBUTE}]`)?.getBoundingClientRect();
+    const onFace =
+      face !== undefined &&
+      point.x >= face.left &&
+      point.x <= face.right &&
+      point.y >= face.top &&
+      point.y <= face.bottom;
+    return { botId, place: onFace ? "first" : "last" };
   }
   return null;
 }

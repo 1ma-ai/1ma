@@ -2,20 +2,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { botDrop } from "./thread-drop.js";
 
+// The face is drawn at x 0-32; the row's click target covers the whole row,
+// and hit testing finds only that target, as in the browser.
 function botRow(botId: string) {
   const row = document.createElement("div");
   row.setAttribute("data-1ma-bot-drop", botId);
   const face = document.createElement("span");
   face.setAttribute("data-1ma-bot-drop-first", "");
-  const name = document.createElement("span");
-  row.append(face, name);
+  face.getBoundingClientRect = () => new DOMRect(0, 0, 32, 32);
+  const target = document.createElement("button");
+  row.append(face, target);
   document.body.append(row);
-  return { face, name };
+  return { face: target, name: target };
 }
 
-function pointAt(element: Element | null) {
+function pointAt(element: Element | null, x = 1) {
   document.elementsFromPoint = () => (element === null ? [] : [element]);
-  return { x: 1, y: 1 };
+  return { x, y: 1 };
 }
 
 afterEach(() => {
@@ -33,7 +36,7 @@ describe("dropping a dragged thread on a bot", () => {
     expect(botDrop.over(pointAt(face))).toBe(true);
     botDrop.end();
     botDrop.start(["thr_2", "thr_3"]);
-    expect(botDrop.over(pointAt(name))).toBe(true);
+    expect(botDrop.over(pointAt(name, 100))).toBe(true);
     botDrop.end();
     botDrop.start(["thr_4"]);
     expect(botDrop.over(pointAt(document.body))).toBe(false);

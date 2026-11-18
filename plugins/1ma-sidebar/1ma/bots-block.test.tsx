@@ -348,15 +348,16 @@ describe("dragging conversations onto a bot", () => {
     await screen.findByText("Marketer");
     const row = botElement("bot_m");
     const face = row.querySelector("[data-1ma-bot-avatar]")!;
-    const name = row.querySelector(".bb-thread-title")!;
-    document.elementsFromPoint = () => [face];
+    face.getBoundingClientRect = () => new DOMRect(0, 0, 32, 32);
+    // As in the browser, hit testing finds the row's click target, not the face.
+    const target = row.querySelector("button")!;
+    document.elementsFromPoint = () => [target];
     botDrop.start(["thr_plain", "thr_other"]);
-    expect(botDrop.over({ x: 1, y: 1 })).toBe(true);
+    expect(botDrop.over({ x: 10, y: 10 })).toBe(true);
     botDrop.end();
     await waitFor(() => expect(calls).toHaveLength(2));
-    document.elementsFromPoint = () => [name];
     botDrop.start(["thr_last"]);
-    botDrop.over({ x: 1, y: 1 });
+    botDrop.over({ x: 100, y: 10 });
     botDrop.end();
     await waitFor(() => expect(calls).toHaveLength(3));
     expect(calls).toEqual([
@@ -369,10 +370,12 @@ describe("dragging conversations onto a bot", () => {
   it("shows where the drop lands while the pointer is over the bot", async () => {
     render({ bots: () => ({ bots: [marketer()] }) });
     await screen.findByText("Marketer");
-    const face = botElement("bot_m").querySelector("[data-1ma-bot-avatar]")!;
-    document.elementsFromPoint = () => [face];
+    const row = botElement("bot_m");
+    row.querySelector("[data-1ma-bot-avatar]")!.getBoundingClientRect = () =>
+      new DOMRect(0, 0, 32, 32);
+    document.elementsFromPoint = () => [row.querySelector("button")!];
     botDrop.start(["thr_plain"]);
-    botDrop.over({ x: 1, y: 1 });
+    botDrop.over({ x: 10, y: 10 });
     expect(await screen.findByText(strings.dropFirst)).toBeTruthy();
     botDrop.cancel();
     await waitFor(() => expect(screen.queryByText(strings.dropFirst)).toBeNull());
