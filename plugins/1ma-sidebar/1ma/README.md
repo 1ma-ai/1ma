@@ -28,6 +28,10 @@
     под штатной линией (`ThreadTreeGroupLine`), под ними «Done: N».
   - Внизу блока строка «N hidden»: она показывает скрытых ботов
     приглушёнными и без разговоров, их разговоры остаются в проектах.
+  - Чат из списка перетаскивается на бота (`thread-drop.ts`): на лицо —
+    станет первым разговором бота, на остальную строку — последним.
+    Строка подсвечивается и подсказывает, куда ляжет чат. После переноса
+    появляется уведомление «Open», бот раскрывается и прокручивает к чату.
   - Свёрнутые боты хранятся в синхронизируемой настройке `collapsedBots`,
     как свёрнутые чаты bb; по умолчанию боты раскрыты.
 - `use-bots.ts` — одно решение для блока и для фильтра проектов: блок и
@@ -60,6 +64,7 @@
 | `app/list/ProjectList.tsx`                                   | `<BotsBlock … />` после `<SidebarDraftPresenceSync />`, ему передаются штатные `collapsedThreadIds`, `collapsedEnvironmentIds` и их переключатели                                                                                              |
 | `app/list/ProjectRow.tsx`                                    | `ProjectThreadTree` принимает `depthOffset` (вложенное дерево получает отступ и шаг строк подчатов), `ThreadTreeGroupLine` экспортирована                                                                                                      |
 | `shared/preferences.ts`                                      | ключ `collapsedBots`: свёрнутые боты и весь блок (`bots`)                                                                                                                                                                                      |
+| `app/dnd/useSectionThreadDnd.ts`                             | перетаскивание bb сообщает `botDrop` (`1ma/thread-drop.ts`), какие чаты несёт и где указатель; над ботом у списка нет своих мест для сброса                                                                                                    |
 | `shared/preferences.ts`, `app/rows/ThreadRow.tsx` и их тесты | ключи `1ma-sidebar/move`, `1ma-sidebar/customizeRowActions`                                                                                                                                                                                    |
 | `skills/1ma-sidebar/SKILL.md`                                | имя навыка `1ma-sidebar`, команда `bb 1ma-sidebar`                                                                                                                                                                                             |
 | `vitest.config.ts`                                           | `maxWorkers: 2`, имя проекта                                                                                                                                                                                                                   |
