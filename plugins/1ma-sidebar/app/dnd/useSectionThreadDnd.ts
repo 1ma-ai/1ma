@@ -7,6 +7,7 @@ import {
   useState,
   type MouseEventHandler,
 } from "react";
+import { botDrop } from "../../1ma/thread-drop.js";
 import { useSetAtom } from "jotai";
 import { toast } from "sonner";
 import {
@@ -1529,6 +1530,18 @@ export function useSectionThreadDnd({
     clearProjectedDrag();
   }, [clearDropDwell, clearProjectedDrag]);
 
+  // 1ma: the plain threads a drag carries, for a drop on a bot.
+  const dragThreadIds = useCallback(
+    (activeId: string | null): readonly string[] => {
+      if (activeId === null || lookup.groupThreadsByItemId.has(activeId)) {
+        return [];
+      }
+      const thread = lookup.threadByItemId.get(activeId);
+      if (!thread) return [];
+      return draggedSelectionRef.current ?? [thread.id];
+    },
+    [lookup],
+  );
   const latestDragHandlers = useRef({
     collisionDetection,
     handleDragEnd,
@@ -1536,6 +1549,7 @@ export function useSectionThreadDnd({
     handleDragMove,
     handleDragOver,
     handleDragCancel,
+    dragThreadIds,
   });
   useLayoutEffect(() => {
     latestDragHandlers.current = {
@@ -1545,22 +1559,37 @@ export function useSectionThreadDnd({
       handleDragMove,
       handleDragOver,
       handleDragCancel,
+      dragThreadIds,
     };
   });
   const [dragHandlers] = useState(() => {
+    // 1ma: over a bot the list shows none of its own drop places.
     const detectCollisions: CollisionDetection = (args) =>
-      latestDragHandlers.current.collisionDetection(args);
+      botDrop.over(args.pointerCoordinates)
+        ? []
+        : latestDragHandlers.current.collisionDetection(args);
     return {
       collisionDetection: detectCollisions,
-      onDragEnd: (event: DragEndEvent) =>
-        latestDragHandlers.current.handleDragEnd(event),
-      onDragStart: (event: DragStartEvent) =>
-        latestDragHandlers.current.handleDragStart(event),
+      onDragEnd: (event: DragEndEvent) => {
+        botDrop.end();
+        latestDragHandlers.current.handleDragEnd(event);
+      },
+      onDragStart: (event: DragStartEvent) => {
+        latestDragHandlers.current.handleDragStart(event);
+        botDrop.start(
+          latestDragHandlers.current.dragThreadIds(
+            typeof event.active.id === "string" ? event.active.id : null,
+          ),
+        );
+      },
       onDragMove: (event: DragMoveEvent) =>
         latestDragHandlers.current.handleDragMove(event),
       onDragOver: (event: DragOverEvent) =>
         latestDragHandlers.current.handleDragOver(event),
-      onDragCancel: () => latestDragHandlers.current.handleDragCancel(),
+      onDragCancel: () => {
+        botDrop.cancel();
+        latestDragHandlers.current.handleDragCancel();
+      },
     };
   });
   const { consumeClickSuppression, dndContextProps, onClickCapture } =

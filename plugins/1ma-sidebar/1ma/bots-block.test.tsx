@@ -7,6 +7,7 @@ import { makePluginProject, makeSidebarThread } from "../app/model/fixtures.js";
 import { resetPreferencesSyncForTest } from "../app/preferences/preferences-sync.js";
 import { defaultPreferences } from "../shared/preferences.js";
 import type { SidebarBot } from "./bots-rpc.js";
+import { botDrop } from "./thread-drop.js";
 import { strings } from "./strings.js";
 
 const app = await loadPluginApp(() => import("../app"));
@@ -53,6 +54,7 @@ function render(options: {
   settings?: Record<string, boolean>;
   setPreference?: (input: unknown) => unknown;
   setHidden?: (input: unknown) => unknown;
+  assign?: (input: unknown) => unknown;
   threads?: typeof THREADS;
 }) {
   return renderSlot(
@@ -73,6 +75,7 @@ function render(options: {
         setPreference: options.setPreference ?? ((input: unknown) => input),
         "bots.v1.list": options.bots ?? (() => ({ bots: [] })),
         "bots.v1.setHidden": options.setHidden ?? (() => ({ ok: true })),
+        "bots.v1.assign": options.assign ?? (() => ({ botId: "bot_m", startedFromBot: false })),
       },
     },
   );
@@ -329,5 +332,49 @@ describe("the owner's review of 17.11: hiding a bot and its state at a glance", 
     expect(avatar.querySelector("[data-1ma-bot-other-working-more]")).not.toBeNull();
     expect(avatar.querySelector("[data-1ma-bot-unread-error]")).not.toBeNull();
     expect(avatar.getAttribute("title")).toContain(strings.othersWorking(4));
+  });
+});
+
+describe("dragging conversations onto a bot", () => {
+  it("drops on the face as first, keeping the dragged order, and on the row as last", async () => {
+    const calls: unknown[] = [];
+    render({
+      bots: () => ({ bots: [marketer()] }),
+      assign: (input) => {
+        calls.push(input);
+        return { botId: "bot_m", startedFromBot: false };
+      },
+    });
+    await screen.findByText("Marketer");
+    const row = botElement("bot_m");
+    const face = row.querySelector("[data-1ma-bot-avatar]")!;
+    const name = row.querySelector(".bb-thread-title")!;
+    document.elementsFromPoint = () => [face];
+    botDrop.start(["thr_plain", "thr_other"]);
+    expect(botDrop.over({ x: 1, y: 1 })).toBe(true);
+    botDrop.end();
+    await waitFor(() => expect(calls).toHaveLength(2));
+    document.elementsFromPoint = () => [name];
+    botDrop.start(["thr_last"]);
+    botDrop.over({ x: 1, y: 1 });
+    botDrop.end();
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls).toEqual([
+      { threadId: "thr_other", botId: "bot_m", place: "first" },
+      { threadId: "thr_plain", botId: "bot_m", place: "first" },
+      { threadId: "thr_last", botId: "bot_m", place: "last" },
+    ]);
+  });
+
+  it("shows where the drop lands while the pointer is over the bot", async () => {
+    render({ bots: () => ({ bots: [marketer()] }) });
+    await screen.findByText("Marketer");
+    const face = botElement("bot_m").querySelector("[data-1ma-bot-avatar]")!;
+    document.elementsFromPoint = () => [face];
+    botDrop.start(["thr_plain"]);
+    botDrop.over({ x: 1, y: 1 });
+    expect(await screen.findByText(strings.dropFirst)).toBeTruthy();
+    botDrop.cancel();
+    await waitFor(() => expect(screen.queryByText(strings.dropFirst)).toBeNull());
   });
 });

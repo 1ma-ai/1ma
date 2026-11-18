@@ -439,6 +439,46 @@ describe("1ma-sidebar with the bots block", () => {
     }
   });
 
+  it("moves a conversation dragged from a project onto a bot's face to the top of that bot", async () => {
+    const { context, page, problems } = await openApp(browser, "light");
+    try {
+      await waitDrawn(page, threadLink(page, fixture.plain), "plain-thread");
+      await expandBot(page, "Visual Bot");
+      const botScope = `[data-bot-id="${fixture.visible.id}"]`;
+      const face = page.locator(`${botScope} [data-1ma-bot-avatar]`);
+      const from = await threadLink(page, fixture.plain).boundingBox();
+      const to = await face.boundingBox();
+      assert.ok(from !== null && to !== null);
+      await page.mouse.move(from.x + 40, from.y + from.height / 2);
+      await page.mouse.down();
+      // dnd-kit starts after a short move; then travel to the bot in steps.
+      await page.mouse.move(from.x + 46, from.y + from.height / 2 + 6, { steps: 4 });
+      await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 20 });
+      await page
+        .locator(`${botScope} [data-1ma-drop-place="first"]`)
+        .waitFor({ timeout: 10 * SECOND });
+      await screenshot(page, "drag-onto-bot");
+      await page.mouse.up();
+      await page
+        .locator(`${botScope} a[data-sidebar-thread-id="${fixture.plain}"]`)
+        .waitFor({ timeout: 30 * SECOND });
+      const ids = await page
+        .locator(`${botScope} a[data-sidebar-thread-id]`)
+        .evaluateAll((links) => links.map((link) => link.getAttribute("data-sidebar-thread-id")));
+      assert.equal(ids[0], fixture.plain, "the dropped conversation is the bot's first");
+      assert.equal(await threadLink(page, fixture.plain).count(), 1, "it left its project");
+      const { bots } = await rpc("bots.v1.list", {});
+      assert.equal(
+        bots.find((bot) => bot.id === fixture.visible.id).threads[0].threadId,
+        fixture.plain,
+      );
+      assert.deepEqual(problems, []);
+    } finally {
+      await context.close();
+      await rpc("bots.v1.assign", { threadId: fixture.plain, botId: null });
+    }
+  });
+
   it("draws no block and keeps every conversation in its project when 1ma-bots is disabled", async () => {
     server.bb(["plugin", "disable", BOTS]);
     const { context, page } = await openApp(browser, "light");

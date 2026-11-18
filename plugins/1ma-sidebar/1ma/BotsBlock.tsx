@@ -54,6 +54,15 @@ import { BOTS_PLUGIN_ID, botsRpc, type SidebarBot } from "./bots-rpc.js";
 import { threadsShownUnderBots } from "./bot-threads.js";
 import { strings } from "./strings.js";
 import { useSidebarBots } from "./use-bots.js";
+import {
+  BOT_DROP_FIRST_ATTRIBUTE,
+  BOT_DROP_TARGET_ATTRIBUTE,
+  botDrop,
+  useBotDropTarget,
+  type BotDropTarget,
+} from "./thread-drop.js";
+import { toast } from "sonner";
+import { getMutationErrorMessage } from "../app/ui/mutation-errors.js";
 
 // Collapsed bots are kept like bb's collapsed threads: a synced preference.
 const collapsedBotsAtom = createSyncedPreferenceAtom("collapsedBots");
@@ -89,6 +98,63 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
     method: "bots.v1.setHidden",
+  });
+  const assign = useRpcMutation({
+    contract: botsRpc,
+    pluginId: BOTS_PLUGIN_ID,
+    method: "bots.v1.assign",
+  });
+  const navigate = useBbNavigate();
+  // A dropped conversation is scrolled into view once the bot shows it.
+  const reveal = useRef<{ botId: string; threadId: string } | null>(null);
+  const onDrop = useRef<(threadIds: readonly string[], target: BotDropTarget) => void>(
+    () => undefined,
+  );
+  useEffect(() => {
+    onDrop.current = (threadIds, target) => {
+      const bot = state.bots.find((item) => item.id === target.botId);
+      if (bot === undefined) return;
+      // Assigning in reverse keeps a dragged selection in its order at the top.
+      const ordered = target.place === "first" ? [...threadIds].reverse() : threadIds;
+      void (async () => {
+        try {
+          for (const threadId of ordered) {
+            await assign.mutate({ threadId, botId: bot.id, place: target.place });
+          }
+        } catch (error) {
+          toast.error(strings.assignFailed(bot.name), {
+            description: getMutationErrorMessage({
+              error,
+              fallbackMessage: strings.assignFailed(bot.name),
+            }),
+          });
+          return;
+        }
+        if (collapsed.includes(bot.id)) {
+          setCollapsed((current) => current.filter((item) => item !== bot.id));
+        }
+        const [shown] = threadIds;
+        if (shown === undefined) return;
+        reveal.current = { botId: bot.id, threadId: shown };
+        toast.success(strings.assigned(bot.name, threadIds.length), {
+          action: { label: strings.open, onClick: () => navigate.toThread(shown) },
+        });
+      })();
+    };
+  });
+  useEffect(() => botDrop.register((threadIds, target) => onDrop.current(threadIds, target)), []);
+  useEffect(() => {
+    const pending = reveal.current;
+    if (pending === null) return;
+    const bot = [...document.querySelectorAll("[data-bot-id]")].find(
+      (element) => element.getAttribute("data-bot-id") === pending.botId,
+    );
+    const row = [...(bot?.querySelectorAll("a[data-sidebar-thread-id]") ?? [])].find(
+      (element) => element.getAttribute("data-sidebar-thread-id") === pending.threadId,
+    );
+    if (row === undefined) return;
+    row.scrollIntoView({ block: "nearest" });
+    reveal.current = null;
   });
   const { panelId } = state;
   if (state.status === "off" || panelId === null) return null;
@@ -280,6 +346,7 @@ function BotAvatar({ bot, conversations }: { bot: SidebarBot; conversations: Bot
     <span
       className="relative shrink-0"
       data-1ma-bot-avatar=""
+      {...{ [BOT_DROP_FIRST_ATTRIBUTE]: "" }}
       role="img"
       aria-label={label === "" ? bot.name : `${bot.name}: ${label}`}
       title={label === "" ? undefined : label}
@@ -359,6 +426,7 @@ function BotRow({
   // only a row to bring it back.
   const hasChildren = !bot.hidden && (open.length > 0 || doneCount > 0);
   const isCollapsed = collapsed && hasChildren;
+  const dropPlace = useBotDropTarget(bot.id);
 
   // Like bb's thread reveal: opening a conversation of a collapsed bot shows it.
   const lastSelected = useRef(selectedThreadId);
@@ -390,6 +458,8 @@ function BotRow({
         data-sidebar-rename-row=""
         data-1ma-bot-row=""
         data-1ma-bot-hidden={bot.hidden ? "" : undefined}
+        {...{ [BOT_DROP_TARGET_ATTRIBUTE]: bot.hidden ? "" : bot.id }}
+        data-1ma-drop-place={dropPlace ?? undefined}
         className={cn(
           SIDEBAR_HOVER_ACTIONS_ROW_CLASS,
           "group/thread-row relative cursor-pointer",
@@ -400,7 +470,7 @@ function BotRow({
           "h-auto min-h-[var(--bb-sidebar-row-height)] max-md:pointer-coarse:h-auto max-md:pointer-coarse:min-h-[var(--bb-sidebar-row-height-coarse)]",
           SIDEBAR_ROW_INTERACTIVE_STATE_CLASS,
           SIDEBAR_ROW_ACCENT_STATE_CLASS,
-          menuOpen && "bg-sidebar-accent",
+          (menuOpen || dropPlace !== null) && "bg-sidebar-accent",
         )}
         style={{ paddingLeft: getSidebarThreadRowPaddingLeft(0) }}
       >
@@ -433,7 +503,11 @@ function BotRow({
                 />
               ) : null}
             </span>
-            {bot.role === "" ? null : (
+            {dropPlace !== null ? (
+              <span className={cn("min-w-0 truncate text-xs leading-4", SIDEBAR_GROUP_TEXT_CLASS)}>
+                {dropPlace === "first" ? strings.dropFirst : strings.dropLast}
+              </span>
+            ) : bot.role === "" ? null : (
               <span
                 data-1ma-bot-role=""
                 title={bot.role}
