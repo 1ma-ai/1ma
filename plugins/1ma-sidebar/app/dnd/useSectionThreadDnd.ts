@@ -1530,7 +1530,8 @@ export function useSectionThreadDnd({
     clearProjectedDrag();
   }, [clearDropDwell, clearProjectedDrag]);
 
-  // 1ma: the plain threads a drag carries, for a drop on a bot.
+  // 1ma: the plain threads a drag carries, for a drop on a bot: the same
+  // set the drag preview counts.
   const dragThreadIds = useCallback(
     (activeId: string | null): readonly string[] => {
       if (activeId === null || lookup.groupThreadsByItemId.has(activeId)) {
@@ -1538,7 +1539,12 @@ export function useSectionThreadDnd({
       }
       const thread = lookup.threadByItemId.get(activeId);
       if (!thread) return [];
-      return draggedSelectionRef.current ?? [thread.id];
+      const selection = resolveDraggedSelection(
+        lookup,
+        activeId,
+        draggedSelectionRef.current ?? undefined,
+      );
+      return selection === null ? [thread.id] : selection.map(({ id }) => id);
     },
     [lookup],
   );

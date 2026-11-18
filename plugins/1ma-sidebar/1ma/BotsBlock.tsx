@@ -58,8 +58,9 @@ import {
   BOT_DROP_FIRST_ATTRIBUTE,
   BOT_DROP_TARGET_ATTRIBUTE,
   botDrop,
+  useBotDropCount,
   useBotDropTarget,
-  type BotDropTarget,
+  type BotDropHandler,
 } from "./thread-drop.js";
 import { toast } from "sonner";
 import { getMutationErrorMessage } from "../app/ui/mutation-errors.js";
@@ -107,49 +108,69 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
   const navigate = useBbNavigate();
   // A dropped conversation is scrolled into view once the bot shows it.
   const reveal = useRef<{ botId: string; threadId: string } | null>(null);
-  const onDrop = useRef<(threadIds: readonly string[], target: BotDropTarget) => void>(
-    () => undefined,
-  );
+  const onDrop = useRef<BotDropHandler>({ accept: () => [], drop: () => undefined });
   useEffect(() => {
-    onDrop.current = (threadIds, target) => {
-      const bot = state.bots.find((item) => item.id === target.botId);
-      if (bot === undefined) return;
+    onDrop.current = {
       // Only top-level conversations belong to a bot; a dragged sub-thread
-      // follows its parent, so it is left out rather than refused.
-      const roots = threadIds.filter((threadId) => conversations.parentOf(threadId) === null);
-      if (roots.length === 0) {
-        toast.error(strings.assignFailed(bot.name), { description: strings.onlyTopLevel });
-        return;
-      }
-      // Assigning in reverse keeps a dragged selection in its order at the top.
-      const ordered = target.place === "first" ? [...roots].reverse() : roots;
-      void (async () => {
-        try {
+      // follows its parent, so it is not part of what a drop moves.
+      accept: (threadIds) =>
+        threadIds.filter((threadId) => conversations.parentOf(threadId) === null),
+      drop: (threadIds, target) => {
+        const bot = state.bots.find((item) => item.id === target.botId);
+        if (bot === undefined) return;
+        // Assigning in reverse keeps a dragged selection in its order at the top.
+        const ordered = target.place === "first" ? [...threadIds].reverse() : threadIds;
+        void (async () => {
+          const moved: string[] = [];
+          let failure: unknown = null;
           for (const threadId of ordered) {
-            await assign.mutate({ threadId, botId: bot.id, place: target.place });
+            try {
+              await assign.mutate({ threadId, botId: bot.id, place: target.place });
+              moved.push(threadId);
+            } catch (error) {
+              failure = error;
+              break;
+            }
           }
-        } catch (error) {
-          toast.error(strings.assignFailed(bot.name), {
-            description: getMutationErrorMessage({
-              error,
-              fallbackMessage: strings.assignFailed(bot.name),
-            }),
+          const shown = threadIds.find((threadId) => moved.includes(threadId));
+          if (shown !== undefined) {
+            if (collapsed.includes(bot.id)) {
+              setCollapsed((current) => current.filter((item) => item !== bot.id));
+            }
+            reveal.current = { botId: bot.id, threadId: shown };
+          }
+          const open =
+            shown === undefined
+              ? undefined
+              : { label: strings.open, onClick: () => navigate.toThread(shown) };
+          if (failure === null) {
+            toast.success(strings.assigned(bot.name, moved.length), { action: open });
+            return;
+          }
+          const reason = getMutationErrorMessage({
+            error: failure,
+            fallbackMessage: strings.assignFailed(bot.name),
           });
-          return;
-        }
-        if (collapsed.includes(bot.id)) {
-          setCollapsed((current) => current.filter((item) => item !== bot.id));
-        }
-        const [shown] = roots;
-        if (shown === undefined) return;
-        reveal.current = { botId: bot.id, threadId: shown };
-        toast.success(strings.assigned(bot.name, roots.length), {
-          action: { label: strings.open, onClick: () => navigate.toThread(shown) },
-        });
-      })();
+          if (moved.length === 0) {
+            toast.error(strings.assignFailed(bot.name), { description: reason });
+            return;
+          }
+          toast.error(strings.partlyAssigned(bot.name, moved.length, threadIds.length), {
+            description: reason,
+            action: open,
+          });
+        })();
+      },
     };
   });
-  useEffect(() => botDrop.register((threadIds, target) => onDrop.current(threadIds, target)), []);
+  useEffect(
+    () =>
+      botDrop.register({
+        accept: (threadIds) => onDrop.current.accept(threadIds),
+        drop: (threadIds, target) => onDrop.current.drop(threadIds, target),
+      }),
+    [],
+  );
   useEffect(() => {
     const pending = reveal.current;
     if (pending === null) return;
@@ -435,6 +456,7 @@ function BotRow({
   const hasChildren = !bot.hidden && (open.length > 0 || doneCount > 0);
   const isCollapsed = collapsed && hasChildren;
   const dropPlace = useBotDropTarget(bot.id);
+  const dropCount = useBotDropCount();
 
   // Like bb's thread reveal: opening a conversation of a collapsed bot shows it.
   const lastSelected = useRef(selectedThreadId);
@@ -513,7 +535,7 @@ function BotRow({
             </span>
             {dropPlace !== null ? (
               <span className={cn("min-w-0 truncate text-xs leading-4", SIDEBAR_GROUP_TEXT_CLASS)}>
-                {dropPlace === "first" ? strings.dropFirst : strings.dropLast}
+                {dropPlace === "first" ? strings.dropFirst(dropCount) : strings.dropLast(dropCount)}
               </span>
             ) : bot.role === "" ? null : (
               <span

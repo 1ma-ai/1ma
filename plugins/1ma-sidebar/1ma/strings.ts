@@ -18,13 +18,14 @@ export const strings = {
   mainConversationStatus: (status: string | null) => `Main conversation: ${status ?? "idle"}`,
   othersWorking: (count: number) => `${count} other conversation${count === 1 ? "" : "s"} working`,
   unreadError: "a conversation failed",
-  dropFirst: "Make first",
-  dropLast: "Add to end",
+  dropFirst: (count: number) => (count === 1 ? "Make first" : `Make these ${count} first`),
+  dropLast: (count: number) => (count === 1 ? "Add to end" : `Add these ${count} to end`),
   assigned: (name: string, count: number) =>
     count === 1 ? `Moved to ${name}` : `${count} conversations moved to ${name}`,
   assignFailed: (name: string) => `Could not move the conversation to ${name}`,
+  partlyAssigned: (name: string, moved: number, total: number) =>
+    `Moved ${moved} of ${total} conversations to ${name}; the rest stayed where they were`,
   open: "Open",
-  onlyTopLevel: "Sub-threads follow their parent conversation; drag the parent instead.",
   done: (count: number) => `Done: ${count}`,
   settings: {
     showBots: "Show bots",

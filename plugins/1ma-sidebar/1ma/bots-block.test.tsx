@@ -1,6 +1,9 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+vi.mock("sonner", () => ({ toast: toasts }));
 import type { ExperimentalSidebarNavigationItem } from "@get-bb/plugin-sdk/app";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { makePluginProject, makeSidebarThread } from "../app/model/fixtures.js";
@@ -376,9 +379,9 @@ describe("dragging conversations onto a bot", () => {
     document.elementsFromPoint = () => [row.querySelector("button")!];
     botDrop.start(["thr_plain"]);
     botDrop.over({ x: 10, y: 10 });
-    expect(await screen.findByText(strings.dropFirst)).toBeTruthy();
+    expect(await screen.findByText(strings.dropFirst(1))).toBeTruthy();
     botDrop.cancel();
-    await waitFor(() => expect(screen.queryByText(strings.dropFirst)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(strings.dropFirst(1))).toBeNull());
   });
 });
 
@@ -403,5 +406,40 @@ describe("dragging a selection that holds a sub-thread onto a bot", () => {
       { threadId: "thr_bot", botId: "bot_m", place: "last" },
       { threadId: "thr_plain", botId: "bot_m", place: "last" },
     ]);
+  });
+});
+
+describe("Codex review of f6aa64f: a drop that fails partway", () => {
+  it("says how many moved and offers to open the moved conversation", async () => {
+    let call = 0;
+    const writes: unknown[] = [];
+    toasts.error.mockClear();
+    toasts.success.mockClear();
+    render({
+      bots: () => ({ bots: [{ ...marketer(), threads: [] }] }),
+      setPreference: (input) => {
+        writes.push(input);
+        return input;
+      },
+      assign: () => {
+        call += 1;
+        if (call === 2) throw new Error("That conversation was archived");
+        return { botId: "bot_m", startedFromBot: false };
+      },
+    });
+    await screen.findByText("Marketer");
+    const row = botElement("bot_m");
+    document.elementsFromPoint = () => [row.querySelector("button")!];
+    botDrop.start(["thr_bot", "thr_plain"]);
+    botDrop.over({ x: 100, y: 10 });
+    botDrop.end();
+    await waitFor(() => expect(toasts.error).toHaveBeenCalled());
+    const [title, options] = toasts.error.mock.calls[0]!;
+    expect(title).toBe(strings.partlyAssigned("Marketer", 1, 2));
+    expect(options).toMatchObject({
+      description: expect.stringContaining("archived"),
+      action: { label: strings.open },
+    });
+    expect(toasts.success).not.toHaveBeenCalled();
   });
 });

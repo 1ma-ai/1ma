@@ -29,7 +29,10 @@ afterEach(() => {
 describe("dropping a dragged thread on a bot", () => {
   it("on the face makes it first, on the rest of the row last, elsewhere nothing", () => {
     const drops: unknown[] = [];
-    const unregister = botDrop.register((threadIds, target) => drops.push({ threadIds, target }));
+    const unregister = botDrop.register({
+      accept: (threadIds) => threadIds,
+      drop: (threadIds, target) => drops.push({ threadIds, target }),
+    });
     const { face, name } = botRow("bot_a");
 
     botDrop.start(["thr_1"]);
@@ -51,7 +54,7 @@ describe("dropping a dragged thread on a bot", () => {
 
   it("a drag that carries no plain thread, a cancelled drag and a hidden bot drop nothing", () => {
     const handler = vi.fn();
-    const unregister = botDrop.register(handler);
+    const unregister = botDrop.register({ accept: (threadIds) => threadIds, drop: handler });
     const { name } = botRow("bot_a");
     botDrop.start([]);
     expect(botDrop.over(pointAt(name))).toBe(false);
@@ -68,5 +71,24 @@ describe("dropping a dragged thread on a bot", () => {
     botDrop.end();
     unregister();
     expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+describe("what a drop on a bot moves", () => {
+  it("is what the bots block accepts, and a drag it accepts nothing of targets no bot", () => {
+    const drops: unknown[] = [];
+    const unregister = botDrop.register({
+      accept: (threadIds) => threadIds.filter((id) => id !== "thr_child"),
+      drop: (threadIds) => drops.push(threadIds),
+    });
+    const { name } = botRow("bot_a");
+    botDrop.start(["thr_child"]);
+    expect(botDrop.over(pointAt(name, 100))).toBe(false);
+    botDrop.end();
+    botDrop.start(["thr_root", "thr_child"]);
+    expect(botDrop.over(pointAt(name, 100))).toBe(true);
+    botDrop.end();
+    unregister();
+    expect(drops).toEqual([["thr_root"]]);
   });
 });

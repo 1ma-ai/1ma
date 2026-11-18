@@ -11,14 +11,19 @@ export interface BotDropTarget {
   place: "first" | "last";
 }
 
-type DropHandler = (threadIds: readonly string[], target: BotDropTarget) => void;
+export interface BotDropHandler {
+  // The conversations of a drag that a bot takes; the hint and the drop use
+  // exactly these.
+  accept(threadIds: readonly string[]): readonly string[];
+  drop(threadIds: readonly string[], target: BotDropTarget): void;
+}
 
 export const BOT_DROP_TARGET_ATTRIBUTE = "data-1ma-bot-drop";
 export const BOT_DROP_FIRST_ATTRIBUTE = "data-1ma-bot-drop-first";
 
 let dragged: readonly string[] = [];
 let current: BotDropTarget | null = null;
-let handler: DropHandler | null = null;
+let handler: BotDropHandler | null = null;
 const listeners = new Set<() => void>();
 
 function set(next: BotDropTarget | null) {
@@ -51,7 +56,7 @@ export const botDrop = {
   // Called when a drag starts with the threads it carries; a drag that
   // carries no plain threads (an environment group) never targets a bot.
   start(threadIds: readonly string[]) {
-    dragged = handler === null ? [] : threadIds;
+    dragged = handler === null ? [] : handler.accept(threadIds);
     set(null);
   },
   // Called with every pointer move; true while the pointer is over a bot,
@@ -65,13 +70,14 @@ export const botDrop = {
     const threadIds = dragged;
     dragged = [];
     set(null);
-    if (target !== null && handler !== null && threadIds.length > 0) handler(threadIds, target);
+    if (target !== null && handler !== null && threadIds.length > 0)
+      handler.drop(threadIds, target);
   },
   cancel() {
     dragged = [];
     set(null);
   },
-  register(next: DropHandler): () => void {
+  register(next: BotDropHandler): () => void {
     handler = next;
     return () => {
       if (handler === next) handler = null;
@@ -84,11 +90,20 @@ function subscribe(listener: () => void) {
   return () => listeners.delete(listener);
 }
 
-// The place a drag would land on this bot right now, or null.
+// Where a drag would land on this bot right now, or null.
 export function useBotDropTarget(botId: string): BotDropTarget["place"] | null {
   return useSyncExternalStore(
     subscribe,
     () => (current?.botId === botId ? current.place : null),
     () => null,
+  );
+}
+
+// How many conversations the current drag would move to a bot.
+export function useBotDropCount(): number {
+  return useSyncExternalStore(
+    subscribe,
+    () => dragged.length,
+    () => 0,
   );
 }
