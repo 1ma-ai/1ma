@@ -40,18 +40,18 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  apps/desktop/test/preload-build.test.ts       |   1 +
  apps/desktop/test/server-target.test.ts       |  72 ++++++++
  .../src/services/plugins/builtin-registry.ts  |  16 +-
- .../src/services/plugins/plugin-service.ts    |  88 ++++++++-
+ .../src/services/plugins/plugin-service.ts    |  30 ++-
  .../public/public-host-management.test.ts     |  50 +----
  .../plugin-catalog-routes.test.ts             |   9 +-
  .../plugin-catalog-service.test.ts            |  23 ++-
- .../services/plugins/builtin-plugins.test.ts  |  64 +++++++
+ .../services/plugins/builtin-plugins.test.ts  |  66 +++++++
  .../services/plugins/builtin-registry.test.ts |  38 +++-
  .../services/plugins/plugin-install.test.ts   |  26 +--
  packages/db/src/data/index.ts                 |   1 +
  packages/db/src/data/plugins.ts               |  11 ++
  packages/domain/src/bb-cloud.ts               |  14 ++
  packages/domain/src/index.ts                  |   1 +
- 21 files changed, 618 insertions(+), 158 deletions(-)
+ 21 files changed, 560 insertions(+), 160 deletions(-)
  create mode 100644 apps/desktop/src/bb-connect-off.ts
  create mode 100644 apps/desktop/test/bb-connect-off.test.ts
  create mode 100644 packages/domain/src/bb-cloud.ts
@@ -781,7 +781,7 @@ index 9822203..690a48c 100644
      rootDir: resolveBuiltinPluginRootPath(plugin.name),
    }));
 diff --git a/apps/server/src/services/plugins/plugin-service.ts b/apps/server/src/services/plugins/plugin-service.ts
-index 8fefebf..d4ec80e 100644
+index 8fefebf..374b61d 100644
 --- a/apps/server/src/services/plugins/plugin-service.ts
 +++ b/apps/server/src/services/plugins/plugin-service.ts
 @@ -14,6 +14,7 @@ import { join } from "node:path";
@@ -800,7 +800,7 @@ index 8fefebf..d4ec80e 100644
    listPendingGitPluginArtifacts,
    listPluginMarketplaces,
    listPluginSchedules,
-@@ -1349,13 +1351,97 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
+@@ -1349,13 +1351,35 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
      }
    }
  
@@ -811,7 +811,9 @@ index 8fefebf..d4ec80e 100644
 +    );
 +  }
 +
-+  async function removeUnbundledBuiltins(): Promise<void> {
+   async function removeUnbundledBuiltins(): Promise<void> {
+-    for (const row of listInstalledPlugins(deps.db)) {
+-      if (!isOrphanedBuiltinRow(row)) continue;
 +    const rows = [
 +      ...listInstalledPlugins(deps.db).filter(isOrphanedBuiltinRow),
 +      // A cloud plugin the user removed earlier still has its row, storage
@@ -820,70 +822,8 @@ index 8fefebf..d4ec80e 100644
 +    ];
 +    for (const row of rows) {
 +      const bbCloud = isBbCloudBuiltinRow(row);
-+      await deleteRemovedPluginData(row, pluginProviderIds(row));
-+      if (bbCloud) {
-+        deleteAllPluginKvValues(deps.db, row.id);
-+        await rm(join(deps.dataDir, "plugins", row.id), {
-+          recursive: true,
-+          force: true,
-+        });
-+      }
-+      deleteInstalledPlugin(deps.db, row.id);
-+      logger.info(
-+        bbCloud
-+          ? `plugin ${row.id} removed because 1ma does not ship bb cloud plugins; everything it stored was deleted`
-+          : `plugin ${row.id} removed because bb no longer bundles ${row.source}; its settings, secrets, and schedules were deleted`,
-+      );
-+    }
-+  }
-+
-+  async function handOverRetiredBuiltins(): Promise<void> {
-+    for (const retired of retiredBundledPlugins) {
-+      const row = getInstalledPlugin(deps.db, retired.pluginId);
-+      if (row === undefined || !isOrphanedBuiltinRow(row)) continue;
-+      if (row.enabled) {
-+        const stored = getPluginSettingsValues(deps.db, row.id);
-+        const carried = Object.fromEntries(
-+          retired.carriedSettings.flatMap((key) =>
-+            Object.hasOwn(stored, key) ? [[key, stored[key]]] : [],
-+          ),
-+        );
-+        if (Object.keys(carried).length > 0) {
-+          setPluginSettingsValues(deps.db, retired.successorPluginId, carried);
-+        }
-+        const successor = getInstalledPluginRegistration(
-+          deps.db,
-+          retired.successorPluginId,
-+        );
-+        if (
-+          successor?.removedAt !== null &&
-+          successor?.removedAt !== undefined
-+        ) {
-+          restoreRemovedInstalledPlugin(deps.db, successor.id);
-+        } else if (successor !== undefined && !successor.enabled) {
-+          setInstalledPluginEnabled(deps.db, successor.id, true);
-+        }
-+      }
-+      await deleteRemovedPluginData(row, new Set());
-+      deleteAllPluginKvValues(deps.db, row.id);
-+      deleteInstalledPlugin(deps.db, row.id);
-+      logger.info(
-+        row.enabled
-+          ? `plugin ${row.id} retired; its settings moved to ${retired.successorPluginId}, which is now enabled`
-+          : `plugin ${row.id} retired because bb no longer bundles ${row.source}`,
-+      );
-+    }
-+  }
-+
-   async function removeUnbundledBuiltins(): Promise<void> {
-     for (const row of listInstalledPlugins(deps.db)) {
-       if (!isOrphanedBuiltinRow(row)) continue;
-+      const bbCloud = BB_CLOUD_PLUGIN_NAMES.includes(
-+        row.sourceBuiltinName ?? "",
-+      );
        await deleteRemovedPluginData(row, pluginProviderIds(row));
 +      if (bbCloud) {
-+        // Their storage holds sign-ins to bb's cloud; 1ma keeps none of them.
 +        deleteAllPluginKvValues(deps.db, row.id);
 +        await rm(join(deps.dataDir, "plugins", row.id), {
 +          recursive: true,
@@ -1076,7 +1016,7 @@ index d87db4e..6d2ce2b 100644
        expect(getPluginMarketplace(db, "bb-community")?.lastError).toContain(
          "HTTP 503",
 diff --git a/apps/server/test/services/plugins/builtin-plugins.test.ts b/apps/server/test/services/plugins/builtin-plugins.test.ts
-index 6071b6a..45f3fe7 100644
+index 6071b6a..a5bc2dc 100644
 --- a/apps/server/test/services/plugins/builtin-plugins.test.ts
 +++ b/apps/server/test/services/plugins/builtin-plugins.test.ts
 @@ -15,8 +15,10 @@ import { fileURLToPath } from "node:url";
@@ -1090,7 +1030,7 @@ index 6071b6a..45f3fe7 100644
    setPluginSettingsValues,
    upsertPluginSchedule,
    type DbConnection,
-@@ -349,6 +351,68 @@ describe("builtin plugin reconciliation", () => {
+@@ -349,6 +351,70 @@ describe("builtin plugin reconciliation", () => {
      ]);
    });
  
@@ -1150,7 +1090,9 @@ index 6071b6a..45f3fe7 100644
 +        expect(getInstalledPluginRegistration(db, pluginId)).toBeUndefined();
 +        await expect(stat(join(dataDir, "plugins", pluginId))).rejects.toThrow();
 +      } else {
-+        expect(getInstalledPluginRegistration(db, pluginId)?.removedAt).not.toBeNull();
++        expect(getInstalledPluginRegistration(db, pluginId)).toMatchObject({
++          removedAt: expect.any(Number),
++        });
 +        await expect(stat(join(hostData, "state.json"))).resolves.toBeDefined();
 +      }
 +    },
