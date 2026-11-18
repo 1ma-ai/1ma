@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { useAtom, useAtomValue } from "jotai";
 import {
   experimental_NewThreadComposer as NewThreadComposer,
+  experimental_resolveThreadStatus as resolveThreadStatus,
   experimental_ThreadStatusGlyph as ThreadStatusGlyph,
   experimental_useRpcMutation as useRpcMutation,
   experimental_useRpcQuery as useRpcQuery,
@@ -20,6 +21,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Icon } from "@/components/ui/icon";
@@ -39,10 +41,8 @@ import {
   getSidebarThreadRowPaddingLeft,
 } from "@/components/ui/sidebar-row-classes";
 import { cn } from "@/lib/utils";
-import {
-  useHiddenThreadsStatus,
-  usePluginThreadRowStatusForThreads,
-} from "../app/list/groupRollups.js";
+import { usePluginThreadRowStatusForThreads } from "../app/list/groupRollups.js";
+import { useThreadsHaveDraft } from "../app/list/sidebarDraftPresence.js";
 import { ProjectThreadTree, ThreadTreeGroupLine } from "../app/list/ProjectRow.js";
 import { TopLevelSidebarSection } from "../app/list/TopLevelSidebarSection.js";
 import type { ThreadComparator } from "../app/model/project-thread-groups.js";
@@ -81,8 +81,15 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
     setCollapsed((current) =>
       current.includes(key) ? current.filter((item) => item !== key) : [...current, key],
     );
+  const [showHidden, setShowHidden] = useState(false);
   const visible = useMemo(() => state.bots.filter((bot) => !bot.hidden), [state.bots]);
-  const conversations = useBotConversations(visible);
+  const hidden = useMemo(() => state.bots.filter((bot) => bot.hidden), [state.bots]);
+  const conversations = useBotConversations(state.bots);
+  const setHidden = useRpcMutation({
+    contract: botsRpc,
+    pluginId: BOTS_PLUGIN_ID,
+    method: "bots.v1.setHidden",
+  });
   const { panelId } = state;
   if (state.status === "off" || panelId === null) return null;
   const openBotsPage = () => navigation.actions.activate(panelId, { target: "current" });
@@ -95,7 +102,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
           isCollapsed: collapsed.includes(BLOCK_KEY),
           onToggleCollapsed: () => toggle(BLOCK_KEY),
         }}
-        collapsedThreads={conversations.allOpen}
+        collapsedThreads={visible.flatMap((bot) => conversations.of(bot).open)}
         actionsMobileAlways
         actions={
           <SidebarRowControls
@@ -110,19 +117,47 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
         {state.status === "unavailable" ? (
           <p className={`px-2 py-1 text-xs ${SIDEBAR_GROUP_TEXT_CLASS}`}>{strings.unavailable}</p>
         ) : (
-          visible.map((bot) => (
-            <BotRow
-              key={bot.id}
-              bot={bot}
-              conversations={conversations.of(bot)}
-              collapsed={collapsed.includes(bot.id)}
-              onToggle={() => toggle(bot.id)}
-              onOpenBotsPage={openBotsPage}
-              selectedThreadId={selectedThreadId}
-              onProjectSelect={onProjectSelect}
-              tree={tree}
-            />
-          ))
+          <>
+            {[...visible, ...(showHidden ? hidden : [])].map((bot) => (
+              <BotRow
+                key={bot.id}
+                bot={bot}
+                conversations={conversations.of(bot)}
+                collapsed={collapsed.includes(bot.id)}
+                onToggle={() => toggle(bot.id)}
+                onOpenBotsPage={openBotsPage}
+                onSetHidden={(next) => void setHidden.mutate({ botId: bot.id, hidden: next })}
+                selectedThreadId={selectedThreadId}
+                onProjectSelect={onProjectSelect}
+                tree={tree}
+              />
+            ))}
+            {hidden.length > 0 ? (
+              <button
+                type="button"
+                data-1ma-hidden-bots=""
+                className={cn(
+                  SIDEBAR_ROW_BASE_CLASS,
+                  COARSE_POINTER_ROW_HEIGHT_CLASS,
+                  SIDEBAR_ROW_INTERACTIVE_STATE_CLASS,
+                  "w-full gap-1 text-xs",
+                  SIDEBAR_GROUP_TEXT_CLASS,
+                )}
+                style={{ paddingLeft: getSidebarThreadRowPaddingLeft(0) }}
+                aria-expanded={showHidden}
+                onClick={() => setShowHidden(!showHidden)}
+              >
+                {strings.hiddenBots(hidden.length)}
+                <Icon
+                  name="ChevronRight"
+                  className={cn(
+                    "size-3 transition-transform duration-150",
+                    showHidden && "rotate-90",
+                  )}
+                />
+              </button>
+            ) : null}
+          </>
         )}
       </TopLevelSidebarSection>
     </div>
@@ -137,7 +172,6 @@ interface BotConversations {
   // Open and done conversations with their sub-threads.
   open: PluginSidebarThread[];
   done: PluginSidebarThread[];
-  openRoots: PluginSidebarThread[];
   doneCount: number;
   compare: ThreadComparator;
 }
@@ -182,7 +216,6 @@ function useBotConversations(bots: readonly SidebarBot[]) {
         first: present(open)[0] ?? null,
         open: subtree(bot, open),
         done: subtree(bot, done),
-        openRoots: present(open),
         doneCount: present(done).length,
         compare: (left, right) =>
           (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
@@ -193,16 +226,99 @@ function useBotConversations(bots: readonly SidebarBot[]) {
       first: null,
       open: [],
       done: [],
-      openRoots: [],
       doneCount: 0,
       compare: () => 0,
     };
     return {
       of: (bot: SidebarBot) => byBot.get(bot.id) ?? empty,
-      allOpen: [...byBot.values()].flatMap((item) => item.open),
     };
   }, [bots, threads]);
 }
+
+// The bot's state at a glance, drawn on its image: the glyph bb draws for its
+// main conversation (the one a click opens) on the corner, a dot for each
+// other conversation that is working (two and a plus past three, the count in
+// the tooltip), and a red mark for an unread error elsewhere.
+function BotAvatar({ bot, conversations }: { bot: SidebarBot; conversations: BotConversations }) {
+  const { first, open } = conversations;
+  const main = useMemo(() => (first === null ? NO_THREADS : [first]), [first]);
+  const hasDraft = useThreadsHaveDraft(main);
+  const rowStatus = usePluginThreadRowStatusForThreads(main);
+  const status = resolveThreadStatus({
+    thread: first,
+    hiddenThreads: NO_THREADS,
+    hasUnsubmittedDraft: hasDraft,
+    rowStatus,
+  });
+  // A hidden bot's conversations show in their projects, so its row stays quiet.
+  const quiet = bot.hidden;
+  // Each conversation's own state, worked out the way bb's rows do.
+  const own = (thread: PluginSidebarThread) =>
+    resolveThreadStatus({
+      thread,
+      hiddenThreads: NO_THREADS,
+      hasUnsubmittedDraft: false,
+      rowStatus: null,
+    });
+  const others = quiet
+    ? 0
+    : open.filter((thread) => thread.id !== first?.id && own(thread).isWorking).length;
+  const unreadError =
+    !quiet &&
+    status.indicator !== "unread-error" &&
+    open.some((thread) => own(thread).indicator === "unread-error");
+  const label = [
+    first === null ? null : strings.mainConversationStatus(status.label),
+    others > 0 ? strings.othersWorking(others) : null,
+    unreadError ? strings.unreadError : null,
+  ]
+    .filter((part) => part !== null)
+    .join("; ");
+  const dots = others > 3 ? 2 : others;
+  const showMain = !quiet && (status.indicator !== "none" || status.rowStatus !== null);
+  return (
+    <span
+      className="relative shrink-0"
+      data-1ma-bot-avatar=""
+      role="img"
+      aria-label={label === "" ? bot.name : `${bot.name}: ${label}`}
+      title={label === "" ? undefined : label}
+    >
+      <img src={bot.avatar} alt="" className="size-8 rounded-full" />
+      {unreadError ? (
+        <span
+          data-1ma-bot-unread-error=""
+          className="absolute -top-1 -right-1 flex size-3.5 items-center justify-center rounded-full bg-destructive text-[9px] leading-none font-bold text-destructive-foreground"
+        >
+          !
+        </span>
+      ) : null}
+      {showMain || dots > 0 ? (
+        <span className="absolute -right-1.5 -bottom-1 flex items-center gap-px rounded-full bg-sidebar pl-0.5">
+          {Array.from({ length: dots }, (_, index) => (
+            <span
+              key={index}
+              data-1ma-bot-other-working=""
+              className="size-1 rounded-full bg-sidebar-foreground/70 motion-safe:animate-pulse"
+            />
+          ))}
+          {others > 3 ? (
+            <span data-1ma-bot-other-working-more="" className="text-[9px] leading-none">
+              +
+            </span>
+          ) : null}
+          {showMain ? (
+            <span data-1ma-bot-main-status={status.indicator}>
+              <ThreadStatusGlyph indicator={status.indicator} rowStatus={status.rowStatus} />
+            </span>
+          ) : null}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+const NO_THREADS: readonly PluginSidebarThread[] = [];
 
 // The stock thread row's room for one quick action before its menu.
 const ONE_ACTION_INSET = {
@@ -219,6 +335,7 @@ function BotRow({
   collapsed,
   onToggle,
   onOpenBotsPage,
+  onSetHidden,
   selectedThreadId,
   onProjectSelect,
   tree,
@@ -228,6 +345,7 @@ function BotRow({
   collapsed: boolean;
   onToggle: () => void;
   onOpenBotsPage: () => void;
+  onSetHidden: (hidden: boolean) => void;
   selectedThreadId?: string;
   onProjectSelect?: () => void;
   tree: TreeState;
@@ -236,12 +354,11 @@ function BotRow({
   const [showDone, setShowDone] = useState(false);
   const [composing, setComposing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const { first, open, done, doneCount, compare, openRoots } = conversations;
-  const hasChildren = open.length > 0 || doneCount > 0;
+  const { first, open, done, doneCount, compare } = conversations;
+  // A hidden bot's conversations stay in their projects; shown here, it is
+  // only a row to bring it back.
+  const hasChildren = !bot.hidden && (open.length > 0 || doneCount > 0);
   const isCollapsed = collapsed && hasChildren;
-  const pluginStatus = usePluginThreadRowStatusForThreads(openRoots);
-  const status = useHiddenThreadsStatus(openRoots, pluginStatus);
-  const label = bot.role === "" ? bot.name : `${bot.name} — ${bot.role}`;
 
   // Like bb's thread reveal: opening a conversation of a collapsed bot shows it.
   const lastSelected = useRef(selectedThreadId);
@@ -272,9 +389,11 @@ function BotRow({
       <div
         data-sidebar-rename-row=""
         data-1ma-bot-row=""
+        data-1ma-bot-hidden={bot.hidden ? "" : undefined}
         className={cn(
           SIDEBAR_HOVER_ACTIONS_ROW_CLASS,
           "group/thread-row relative cursor-pointer",
+          bot.hidden && "opacity-55",
           SIDEBAR_ROW_BASE_CLASS,
           LIST_HOVER_TRANSITION,
           COARSE_POINTER_ROW_HEIGHT_CLASS,
@@ -298,17 +417,10 @@ function BotRow({
           )}
           style={ONE_ACTION_INSET}
         >
-          <span className="relative shrink-0" data-1ma-bot-avatar="">
-            <img src={bot.avatar} alt="" className="size-8 rounded-full" />
-            {status.indicator === "none" && status.rowStatus === null ? null : (
-              <span className="absolute -right-1 -bottom-1 flex items-center justify-center rounded-full bg-sidebar">
-                <ThreadStatusGlyph indicator={status.indicator} rowStatus={status.rowStatus} />
-              </span>
-            )}
-          </span>
+          <BotAvatar bot={bot} conversations={conversations} />
           <span className="flex min-w-0 flex-1 flex-col">
             <span className="flex min-w-0 items-center gap-1.5">
-              <span className="bb-thread-title min-w-0 truncate" title={label}>
+              <span className="bb-thread-title min-w-0 truncate" title={bot.name}>
                 {bot.name}
               </span>
               {hasChildren ? (
@@ -321,12 +433,13 @@ function BotRow({
                 />
               ) : null}
             </span>
-            {first === null ? null : (
+            {bot.role === "" ? null : (
               <span
-                data-1ma-bot-main-conversation=""
+                data-1ma-bot-role=""
+                title={bot.role}
                 className={cn("min-w-0 truncate text-xs leading-4", SIDEBAR_GROUP_TEXT_CLASS)}
               >
-                {first.displayTitle}
+                {bot.role}
               </span>
             )}
           </span>
@@ -361,9 +474,18 @@ function BotRow({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent side="right" align="start" sideOffset={8}>
+                <DropdownMenuItem onSelect={() => setComposing(true)}>
+                  <Icon name={NEW_ICON} />
+                  {strings.newConversationItem}
+                </DropdownMenuItem>
                 <DropdownMenuItem onSelect={onOpenBotsPage}>
                   <Icon name="Settings" />
                   {strings.botSettings}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => onSetHidden(!bot.hidden)}>
+                  <Icon name={bot.hidden ? "Eye" : "EyeOff"} />
+                  {bot.hidden ? strings.showBot : strings.hideBot}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>

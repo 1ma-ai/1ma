@@ -11,6 +11,13 @@ export const strings = {
   collapse: (name: string) => `Collapse ${name} conversations`,
   botActions: (name: string) => `${name} actions`,
   botSettings: "Bot settings",
+  newConversationItem: "New conversation",
+  hideBot: "Hide bot",
+  showBot: "Show in sidebar",
+  hiddenBots: (count: number) => `${count} hidden`,
+  mainConversationStatus: (status: string | null) => `Main conversation: ${status ?? "idle"}`,
+  othersWorking: (count: number) => `${count} other conversation${count === 1 ? "" : "s"} working`,
+  unreadError: "a conversation failed",
   done: (count: number) => `Done: ${count}`,
   settings: {
     showBots: "Show bots",

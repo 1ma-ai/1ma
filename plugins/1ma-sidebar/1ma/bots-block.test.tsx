@@ -52,6 +52,8 @@ function render(options: {
   botsInstalled?: boolean;
   settings?: Record<string, boolean>;
   setPreference?: (input: unknown) => unknown;
+  setHidden?: (input: unknown) => unknown;
+  threads?: typeof THREADS;
 }) {
   return renderSlot(
     registration,
@@ -63,13 +65,14 @@ function render(options: {
       searchQuery: "",
     },
     {
-      sidebarThreads: { projects: PROJECTS, sections: [], threads: THREADS },
+      sidebarThreads: { projects: PROJECTS, sections: [], threads: options.threads ?? THREADS },
       sidebarNavigation: { items: options.botsInstalled === false ? [] : [BOTS_PANEL] },
       settings: options.settings,
       rpc: {
         listPreferences: () => ({ preferences: defaultPreferences() }),
         setPreference: options.setPreference ?? ((input: unknown) => input),
         "bots.v1.list": options.bots ?? (() => ({ bots: [] })),
+        "bots.v1.setHidden": options.setHidden ?? (() => ({ ok: true })),
       },
     },
   );
@@ -221,13 +224,11 @@ describe("the owner's review of the bots block: a bot is drawn like a parent thr
     expect(threadIdsIn(botElement("bot_m"))).toEqual(["thr_bot", "thr_bot_child"]);
   });
 
-  it("under the name it shows the main conversation, and the role only as the name's tooltip", async () => {
+  it("under the name it shows the bot's role, as Bots Sidebar does", async () => {
     render({ bots: () => ({ bots: [marketer()] }) });
-    const name = await screen.findByText("Marketer");
-    const main = botElement("bot_m").querySelector("[data-1ma-bot-main-conversation]");
-    expect(main?.textContent).toBe("Creatives");
-    expect(name.getAttribute("title")).toBe("Marketer — Landing pages");
-    expect(screen.queryByText("Landing pages")).toBeNull();
+    await screen.findByText("Marketer");
+    const role = botElement("bot_m").querySelector("[data-1ma-bot-role]");
+    expect(role?.textContent).toBe("Landing pages");
   });
 
   it("offers a new conversation with the stock new-thread button on the bot's row", async () => {
@@ -235,5 +236,98 @@ describe("the owner's review of the bots block: a bot is drawn like a parent thr
     await screen.findByText("Marketer");
     fireEvent.click(screen.getByRole("button", { name: strings.newConversation("Marketer") }));
     await screen.findByRole("dialog");
+  });
+});
+
+async function openBotMenu(name: string) {
+  fireEvent.keyDown(screen.getByRole("button", { name: strings.botActions(name) }), {
+    key: "Enter",
+  });
+  await screen.findByRole("menuitem", { name: strings.botSettings });
+}
+
+describe("the owner's review of 17.11: hiding a bot and its state at a glance", () => {
+  it("Hide bot in the bot's menu hides it, and the hidden line brings it back", async () => {
+    const calls: unknown[] = [];
+    let bots = [marketer()];
+    render({
+      bots: () => ({ bots }),
+      setHidden: (input) => {
+        calls.push(input);
+        return { ok: true };
+      },
+    });
+    await screen.findByText("Marketer");
+    await openBotMenu("Marketer");
+    fireEvent.click(screen.getByRole("menuitem", { name: strings.hideBot }));
+    await waitFor(() => expect(calls).toEqual([{ botId: "bot_m", hidden: true }]));
+    cleanup();
+    resetPreferencesSyncForTest();
+    bots = [marketer(true)];
+    render({
+      bots: () => ({ bots }),
+      setHidden: (input) => {
+        calls.push(input);
+        return { ok: true };
+      },
+    });
+    fireEvent.click(await screen.findByText(strings.hiddenBots(1)));
+    const row = await screen.findByText("Marketer");
+    expect(row.closest("[data-1ma-bot-hidden]")).not.toBeNull();
+    expect(threadIdsIn(botElement("bot_m"))).toEqual([]);
+    await openBotMenu("Marketer");
+    fireEvent.click(screen.getByRole("menuitem", { name: strings.showBot }));
+    await waitFor(() => expect(calls).toContainEqual({ botId: "bot_m", hidden: false }));
+  });
+
+  it("the avatar shows the main conversation's state, dots for others working, and a failure elsewhere", async () => {
+    const extra = [1, 2, 3, 4].map((n) =>
+      makeSidebarThread({
+        id: `thr_w${n}`,
+        projectId: "proj_app",
+        title: `Working ${n}`,
+        createdAt: 10 + n,
+        status: "active",
+        runtimeStatus: "active",
+      }),
+    );
+    const failed = makeSidebarThread({
+      id: "thr_failed",
+      projectId: "proj_app",
+      title: "Failed",
+      createdAt: 20,
+      status: "error",
+    });
+    const main = makeSidebarThread({
+      id: "thr_main",
+      projectId: "proj_app",
+      title: "Main",
+      createdAt: 30,
+      status: "active",
+      runtimeStatus: "active",
+    });
+    const items = [main, ...extra, failed];
+    render({
+      threads: [...THREADS, ...items],
+      bots: () => ({
+        bots: [
+          {
+            ...marketer(),
+            threads: items.map((thread) => ({
+              threadId: thread.id,
+              startedFromBot: true,
+              completed: false,
+            })),
+          },
+        ],
+      }),
+    });
+    await screen.findByText("Marketer");
+    const avatar = botElement("bot_m").querySelector("[data-1ma-bot-avatar]")!;
+    expect(avatar.querySelector("[data-1ma-bot-main-status]")).not.toBeNull();
+    expect(avatar.querySelectorAll("[data-1ma-bot-other-working]")).toHaveLength(2);
+    expect(avatar.querySelector("[data-1ma-bot-other-working-more]")).not.toBeNull();
+    expect(avatar.querySelector("[data-1ma-bot-unread-error]")).not.toBeNull();
+    expect(avatar.getAttribute("title")).toContain(strings.othersWorking(4));
   });
 });

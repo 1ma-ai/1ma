@@ -859,3 +859,23 @@ describe("the owner's message steered into a running turn", () => {
     expect(done).toBe(false);
   });
 });
+
+describe("hiding a bot from the sidebar", () => {
+  it("needs no revision, shows in an open editor's revision, and logs only real changes", async () => {
+    const t = setup();
+    const bot = await t.create("Main");
+    await t.rpc("bots.v1.setHidden", { botId: bot.id, hidden: true });
+    await t.rpc("bots.v1.setHidden", { botId: bot.id, hidden: true });
+    const hidden = await t.rpc<BotDetail>("bots.v1.get", { botId: bot.id });
+    expect(hidden.hidden).toBe(true);
+    expect(hidden.revision).toBe(bot.revision + 1);
+    await expect(
+      t.rpc("bots.v1.update", { botId: bot.id, expectedRevision: bot.revision, name: "Stale" }),
+    ).rejects.toThrow(/changed since revision/);
+    await t.rpc("bots.v1.setHidden", { botId: bot.id, hidden: false });
+    const { events } = await t.rpc<{ events: Array<{ kind: string }> }>("bots.v1.events", {
+      botId: bot.id,
+    });
+    expect(events.map((event) => event.kind)).toEqual(["bot.shown", "bot.hidden", "bot.created"]);
+  });
+});

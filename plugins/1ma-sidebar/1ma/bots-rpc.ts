@@ -44,6 +44,10 @@ export const botsRpc = {
     input: z.object({ botId: z.string(), request: z.record(z.string(), z.unknown()) }),
     output: z.object({ threadId: z.string() }),
   },
+  "bots.v1.setHidden": {
+    input: z.object({ botId: z.string(), hidden: z.boolean() }),
+    output: ok,
+  },
   "bots.v1.setCompleted": {
     input: z.object({ threadId: z.string(), completed: z.boolean() }),
     output: ok,

@@ -136,6 +136,10 @@ export const botsRpc = {
   "bots.v1.update": { input: updateBotInput, output: botDetailSchema },
   "bots.v1.remove": { input: botId, output: ok },
   "bots.v1.reorderBots": { input: z.object({ botIds: z.array(z.string()) }), output: ok },
+  "bots.v1.setHidden": {
+    input: z.object({ botId: z.string(), hidden: z.boolean() }),
+    output: ok,
+  },
   "bots.v1.assign": {
     input: z.object({
       threadId: z.string(),

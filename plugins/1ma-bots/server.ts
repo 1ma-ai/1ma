@@ -484,6 +484,21 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       changed();
       return { ok: true as const };
     },
+    "bots.v1.setHidden": ({ botId, hidden }, ctx) => {
+      const changedNow = store.transaction(() => {
+        const updated = store.setHidden(botId, hidden);
+        if (updated) {
+          store.record({
+            botId,
+            kind: hidden ? "bot.hidden" : "bot.shown",
+            actor: actorOf(ctx),
+          });
+        }
+        return updated;
+      });
+      if (changedNow) changed();
+      return { ok: true as const };
+    },
     "bots.v1.reorderBots": ({ botIds }) => {
       store.reorderBots(botIds);
       changed();
