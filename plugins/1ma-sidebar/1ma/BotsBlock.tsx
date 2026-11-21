@@ -127,6 +127,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
         if (bot === undefined) return;
         // Assigning in reverse keeps a dragged selection in its order at the top.
         const ordered = target.place === "first" ? [...threadIds].reverse() : threadIds;
+        const had = new Set(bot.threads.map((item) => item.threadId));
         void (async () => {
           const confirmed: string[] = [];
           let failure: unknown = null;
@@ -141,10 +142,11 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
           }
           // Only the call that failed is in doubt: the ones before it were
           // confirmed and the ones after it were never sent. Its answer may
-          // be what got lost, so the bot is read again. Had the call been
-          // saved, that conversation would be the last one placed: first or
-          // last in the bot's order. Membership alone proves nothing, since
-          // a drop on its own bot only reorders.
+          // be what got lost, so the bot is read again. A conversation that
+          // came from elsewhere moved if the bot now has it. One the bot
+          // already had was only to be reordered: it moved if it stands where
+          // it was put; otherwise the call was refused or someone placed
+          // another conversation there since, and the read cannot tell which.
           let moved: readonly string[] = confirmed;
           let known = true;
           const doubtful = failure === null ? undefined : ordered[confirmed.length];
@@ -153,8 +155,13 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
               const { bots } = await reread.mutate({});
               const order =
                 bots.find((item) => item.id === bot.id)?.threads.map((item) => item.threadId) ?? [];
-              const placed = target.place === "first" ? order[0] : order.at(-1);
-              if (placed === doubtful) moved = [...confirmed, doubtful];
+              if (!had.has(doubtful)) {
+                if (order.includes(doubtful)) moved = [...confirmed, doubtful];
+              } else if ((target.place === "first" ? order[0] : order.at(-1)) === doubtful) {
+                moved = [...confirmed, doubtful];
+              } else {
+                known = false;
+              }
             } catch {
               known = false;
             }
