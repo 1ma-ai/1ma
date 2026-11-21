@@ -419,27 +419,32 @@ function dropServer(options: {
   refuse?: number;
   listFails?: () => boolean;
   owned?: string[];
-  // Another client assigns this conversation to the bot after a call fails
-  // and before the bot is read again.
+  // The call's connection drops before the server writes; the write lands
+  // later, when finishLate() is called.
+  loseThenSave?: number;
+  // Another client assigns this conversation to the bot while the failing
+  // call is in flight, before the bot is read again.
   othersAssign?: { threadId: string; place: "first" | "last" };
 }) {
   const owned: string[] = [...(options.owned ?? [])];
   let call = 0;
-  let failed = false;
+  let late: (() => void) | null = null;
   const bind = (threadId: string, place: "first" | "last" | undefined) => {
     const at = owned.indexOf(threadId);
     if (at !== -1) owned.splice(at, 1);
     if (place === "first") owned.unshift(threadId);
     else owned.push(threadId);
   };
+  const others = () => {
+    if (options.othersAssign !== undefined) {
+      bind(options.othersAssign.threadId, options.othersAssign.place);
+    }
+  };
   return {
     owned,
+    finishLate: () => late?.(),
     bots: () => {
       if (options.listFails?.()) throw new Error("1ma-bots is restarting");
-      if (failed && options.othersAssign !== undefined) {
-        bind(options.othersAssign.threadId, options.othersAssign.place);
-        options.othersAssign = undefined;
-      }
       return {
         bots: [
           {
@@ -457,12 +462,18 @@ function dropServer(options: {
       call += 1;
       const { threadId, place } = input as { threadId: string; place?: "first" | "last" };
       if (call === options.refuse) {
-        failed = true;
-        throw new Error("That conversation was archived");
+        others();
+        // A refusal reaches the client with its code, as BotsError does.
+        throw Object.assign(new Error("That conversation was archived"), { code: "invalid" });
+      }
+      if (call === options.loseThenSave) {
+        late = () => bind(threadId, place);
+        others();
+        throw new Error("Failed to fetch");
       }
       bind(threadId, place);
       if (call === options.saveThenLose) {
-        failed = true;
+        others();
         throw new Error("The answer did not arrive");
       }
       return { botId: "bot_m", startedFromBot: false };
@@ -540,7 +551,7 @@ describe("Codex review of 98142c5: a drop that reorders a bot's own conversation
     await dropTwo(["thr_bot", "thr_plain"], 10);
     await waitFor(() => expect(toasts.error).toHaveBeenCalled());
     expect(toasts.success).not.toHaveBeenCalled();
-    expect(toasts.error.mock.calls[0]![0]).toBe(strings.unconfirmedAssigned("Marketer", 0, 2));
+    expect(toasts.error.mock.calls[0]![0]).toBe(strings.assignFailed("Marketer"));
     expect(server.owned).toEqual(["keep", "thr_bot", "thr_plain"]);
   });
 
@@ -597,5 +608,39 @@ describe("Codex review of 7be99a2: another conversation placed on the bot before
     expect(toasts.error.mock.calls[0]![0]).toBe(strings.unconfirmedAssigned("Marketer", 1, 2));
     expect(toasts.success).not.toHaveBeenCalled();
     expect(server.owned).toEqual(["thr_other", "thr_bot", "thr_plain", "keep"]);
+  });
+});
+
+describe("Codex review of afe5c1f: a refusal is an answer, a lost connection is not", () => {
+  it("reports the refusal even when another client gave the bot that conversation meanwhile", async () => {
+    toasts.error.mockClear();
+    toasts.success.mockClear();
+    const server = dropServer({
+      refuse: 1,
+      owned: ["keep"],
+      othersAssign: { threadId: "thr_plain", place: "last" },
+    });
+    render({ bots: server.bots, assign: server.assign });
+    await dropTwo(["thr_plain"], 10);
+    await waitFor(() => expect(toasts.error).toHaveBeenCalled());
+    const [title, options] = toasts.error.mock.calls[0]!;
+    expect(title).toBe(strings.assignFailed("Marketer"));
+    expect(options).toMatchObject({ description: expect.stringContaining("archived") });
+    expect(toasts.success).not.toHaveBeenCalled();
+    expect(server.owned).toEqual(["keep", "thr_plain"]);
+  });
+
+  it("does not say the rest stayed while the dropped call may still be saved", async () => {
+    toasts.error.mockClear();
+    toasts.success.mockClear();
+    const server = dropServer({ loseThenSave: 2, owned: ["keep"] });
+    render({ bots: server.bots, assign: server.assign });
+    await dropTwo();
+    await waitFor(() => expect(toasts.error).toHaveBeenCalled());
+    expect(toasts.error.mock.calls[0]![0]).toBe(strings.unconfirmedAssigned("Marketer", 1, 2));
+    expect(toasts.success).not.toHaveBeenCalled();
+    expect(server.owned).toEqual(["keep", "thr_bot"]);
+    server.finishLate();
+    expect(server.owned).toEqual(["keep", "thr_bot", "thr_plain"]);
   });
 });

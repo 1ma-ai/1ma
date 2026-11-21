@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { useAtom, useAtomValue } from "jotai";
 import {
   experimental_NewThreadComposer as NewThreadComposer,
+  experimental_PluginRpcCallError as PluginRpcCallError,
   experimental_resolveThreadStatus as resolveThreadStatus,
   experimental_ThreadStatusGlyph as ThreadStatusGlyph,
   experimental_useRpcMutation as useRpcMutation,
@@ -83,6 +84,22 @@ interface BotsBlockProps extends TreeState {
   onProjectSelect?: () => void;
 }
 
+// bots.v1.assign gives these answers before it writes anything: the host's
+// own checks of the call and the plugin's refusals (BotsError).
+const REFUSALS: ReadonlySet<PluginRpcCallError["code"]> = new Set([
+  "forbidden",
+  "not_found",
+  "conflict",
+  "invalid",
+  "invalid_json",
+  "invalid_input",
+  "unknown_method",
+]);
+
+function isRefusal(error: unknown): boolean {
+  return error instanceof PluginRpcCallError && REFUSALS.has(error.code);
+}
+
 export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBlockProps) {
   const state = useSidebarBots();
   const navigation = useSidebarNavigation();
@@ -140,30 +157,33 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
               break;
             }
           }
-          // Only the call that failed is in doubt: the ones before it were
-          // confirmed and the ones after it were never sent. Its answer may
-          // be what got lost, so the bot is read again. A conversation that
-          // came from elsewhere moved if the bot now has it. One the bot
-          // already had was only to be reordered: it moved if it stands where
-          // it was put; otherwise the call was refused or someone placed
-          // another conversation there since, and the read cannot tell which.
+          // The call that failed is the only one in doubt: the ones before it
+          // were confirmed and the ones after it were never sent. A refusal
+          // is a definite answer, since bots.v1.assign refuses only before it
+          // writes. Any other failure may have been saved or may still be
+          // saved, so the bot is read again and only what the read shows is
+          // counted: a conversation from elsewhere that the bot now has, or
+          // one it already had that stands where it was put. Anything else
+          // stays unknown rather than reported as left in place.
           let moved: readonly string[] = confirmed;
           let known = true;
-          const doubtful = failure === null ? undefined : ordered[confirmed.length];
+          const doubtful =
+            failure === null || isRefusal(failure) ? undefined : ordered[confirmed.length];
           if (doubtful !== undefined) {
+            known = false;
             try {
               const { bots } = await reread.mutate({});
               const order =
                 bots.find((item) => item.id === bot.id)?.threads.map((item) => item.threadId) ?? [];
-              if (!had.has(doubtful)) {
-                if (order.includes(doubtful)) moved = [...confirmed, doubtful];
-              } else if ((target.place === "first" ? order[0] : order.at(-1)) === doubtful) {
+              const there = had.has(doubtful)
+                ? (target.place === "first" ? order[0] : order.at(-1)) === doubtful
+                : order.includes(doubtful);
+              if (there) {
                 moved = [...confirmed, doubtful];
-              } else {
-                known = false;
+                known = true;
               }
             } catch {
-              known = false;
+              // Still unknown.
             }
           }
           const shown = threadIds.find((threadId) => moved.includes(threadId));

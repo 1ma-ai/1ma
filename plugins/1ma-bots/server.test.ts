@@ -772,6 +772,26 @@ describe("Codex review of stage 2", () => {
     expect((await t.list()).bots[0]!.threads.map((thread) => thread.threadId)).toEqual(["thr_ok"]);
   });
 
+  it("a refused assignment carries its code and moves nothing, as the sidebar's drop relies on", async () => {
+    const t = setup();
+    const bot = await t.create("Marketer");
+    await t.assign("thr_1", bot.id);
+    await t.assign("thr_2", bot.id);
+    t.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) =>
+      makeThreadResponse({ id: threadId, archivedAt: threadId === "thr_2" ? START : null }),
+    );
+    await expect(
+      t.rpc("bots.v1.assign", { threadId: "thr_2", botId: bot.id, place: "first" }),
+    ).rejects.toMatchObject({ code: "invalid" });
+    await expect(
+      t.rpc("bots.v1.assign", { threadId: "thr_1", botId: "bot_missing", place: "first" }),
+    ).rejects.toMatchObject({ code: "not_found" });
+    expect((await t.list()).bots[0]!.threads.map((thread) => thread.threadId)).toEqual([
+      "thr_1",
+      "thr_2",
+    ]);
+  });
+
   it("reordering refuses a repeated id and keeps the order", async () => {
     const t = setup();
     const bot = await t.create("Marketer");

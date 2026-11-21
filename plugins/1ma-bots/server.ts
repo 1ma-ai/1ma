@@ -505,6 +505,8 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       return { ok: true as const };
     },
     "bots.v1.assign": async ({ threadId, botId, place }, ctx) => {
+      // Every refusal comes before the write: the sidebar takes a refusal as
+      // proof that a dropped conversation did not move.
       if (botId !== null) {
         store.get(botId);
         await requireAssignable(threadId);
