@@ -187,7 +187,7 @@ describe("bb cloud services and identifiers stay", () => {
     );
     assert.equal(
       rebrandString("Reviewed by BB Community; bb shows it", { kind: "value" }, rules).result,
-      "Reviewed by BB Community; 1ma shows it",
+      "Reviewed by bb Community; 1ma shows it",
     );
   });
 });
