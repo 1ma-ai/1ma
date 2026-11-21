@@ -32,16 +32,16 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../settings/AiServicesSettingsSection.tsx    |   2 +-
  .../components/settings/settings-search.ts    |   2 +-
- apps/desktop/src/bb-connect-off.ts            | 139 ++++++
- apps/desktop/src/main.ts                      | 176 +++++---
- apps/desktop/src/server-target.ts             |  59 ++-
- apps/desktop/test/bb-connect-off.test.ts      | 402 ++++++++++++++++++
- .../test/fixtures/startup-retry-smoke.cjs     | 207 ++++++++-
+ apps/desktop/src/bb-connect-off.ts            | 208 +++++++
+ apps/desktop/src/main.ts                      | 180 ++++--
+ apps/desktop/src/server-target.ts             |  59 +-
+ apps/desktop/test/bb-connect-off.test.ts      | 537 ++++++++++++++++++
+ .../test/fixtures/startup-retry-smoke.cjs     | 217 ++++++-
  apps/desktop/test/preload-build.test.ts       |   1 +
- apps/desktop/test/server-target.test.ts       |  75 ++++
+ apps/desktop/test/server-target.test.ts       |  75 +++
  .../src/services/plugins/builtin-registry.ts  |  16 +-
  .../src/services/plugins/plugin-service.ts    |  30 +-
- .../public/public-host-management.test.ts     |  50 +--
+ .../public/public-host-management.test.ts     |  50 +-
  .../plugin-catalog-routes.test.ts             |   9 +-
  .../plugin-catalog-service.test.ts            |  23 +-
  .../services/plugins/builtin-plugins.test.ts  |  66 +++
@@ -51,7 +51,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  packages/db/src/data/plugins.ts               |  11 +
  packages/domain/src/bb-cloud.ts               |  14 +
  packages/domain/src/index.ts                  |   1 +
- 21 files changed, 1187 insertions(+), 161 deletions(-)
+ 21 files changed, 1405 insertions(+), 161 deletions(-)
  create mode 100644 apps/desktop/src/bb-connect-off.ts
  create mode 100644 apps/desktop/test/bb-connect-off.test.ts
  create mode 100644 packages/domain/src/bb-cloud.ts
@@ -84,10 +84,12 @@ index c7d16a5..9f08062 100644
          title: "Thread titles",
 diff --git a/apps/desktop/src/bb-connect-off.ts b/apps/desktop/src/bb-connect-off.ts
 new file mode 100644
-index 0000000..31033d9
+index 0000000..ed05e7a
 --- /dev/null
 +++ b/apps/desktop/src/bb-connect-off.ts
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,208 @@
++import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
++import { join } from "node:path";
 +import { deriveConnectBaseUrl } from "@bb/connect-client";
 +import type { ConnectCredentialCache } from "./connect-credential-cache.js";
 +
@@ -126,6 +128,66 @@ index 0000000..31033d9
 +  }): Promise<void>;
 +}
 +
++/** The bb account sites whose sign-ins 1ma deletes; host names only, kept for good. */
++export interface ForgottenBbSites {
++  read(): Promise<readonly string[]>;
++  write(hosts: readonly string[]): Promise<void>;
++}
++
++/**
++ * Keeps the sites in `forgotten-bb-sites.json` in the user data folder. The
++ * file is written in full and synced before it replaces the old one, so a
++ * crash leaves either the old list or the new one.
++ */
++export function createForgottenBbSitesFile(
++  userDataPath: string,
++): ForgottenBbSites {
++  const path = join(userDataPath, "forgotten-bb-sites.json");
++  return {
++    async read() {
++      let text: string;
++      try {
++        text = await readFile(path, "utf8");
++      } catch (error) {
++        if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
++        throw error;
++      }
++      try {
++        const hosts: unknown = (JSON.parse(text) as { hosts?: unknown }).hosts;
++        return Array.isArray(hosts)
++          ? hosts.filter((host): host is string => typeof host === "string")
++          : [];
++      } catch {
++        return [];
++      }
++    },
++    async write(hosts) {
++      await mkdir(userDataPath, { recursive: true });
++      const temporaryPath = `${path}.tmp`;
++      try {
++        const file = await open(temporaryPath, "w");
++        try {
++          await file.writeFile(`${JSON.stringify({ hosts }, null, 2)}\n`);
++          await file.sync();
++        } finally {
++          await file.close();
++        }
++        await rename(temporaryPath, path);
++      } finally {
++        await rm(temporaryPath, { force: true });
++      }
++      if (process.platform !== "win32") {
++        const folder = await open(userDataPath, "r");
++        try {
++          await folder.sync();
++        } finally {
++          await folder.close();
++        }
++      }
++    },
++  };
++}
++
 +/**
 + * In a build without bb connect, deletes what an earlier bb or 1ma kept for
 + * it on this computer: the bb account sign-in, bb connect desktop sessions
@@ -133,13 +195,13 @@ index 0000000..31033d9
 + * stores (the two stores bb wrote them to).
 + *
 + * Account sign-ins are removed only when their own domain is a bb account
-+ * site known from the default, a forgotten connect server, the stored
-+ * credential or a desktop session cookie; the same cookie name on any other
-+ * domain, a parent domain included, belongs to someone else. Each source of
-+ * those sites is deleted only after the sign-ins are deleted on disk, and the
-+ * credential only while the system keychain can read it, so a cleanup that
-+ * stops halfway, a crash included, finds them again on the next start. The
-+ * caller forgets the connect server only after this resolves.
++ * site; the same cookie name on any other domain, a parent domain included,
++ * belongs to someone else. The sites come from the default, a forgotten
++ * connect server, the stored credential and desktop session cookies, and are
++ * saved for good before anything is deleted: every start deletes the sign-ins
++ * on every site ever seen, so a cleanup that a crash, a failed disk write or
++ * a locked keychain stopped finishes on a later start. The credential is
++ * cleared only while the system keychain can read it.
 + */
 +export async function forgetBbConnect(args: {
 +  appCookies: ForgetCookieStore;
@@ -150,9 +212,14 @@ index 0000000..31033d9
 +  >;
 +  defaultAccountUrl: string;
 +  forgottenServerUrls: readonly string[];
++  knownSites: ForgottenBbSites;
 +}): Promise<void> {
 +  const stores = [args.appCookies, args.browserCookies];
-+  const accountHosts = new Set([new URL(args.defaultAccountUrl).hostname]);
++  const remembered = await args.knownSites.read();
++  const accountHosts = new Set([
++    ...remembered,
++    new URL(args.defaultAccountUrl).hostname,
++  ]);
 +  const credential = await args.credentialCache.read();
 +  for (const serverUrl of [
 +    ...args.forgottenServerUrls,
@@ -175,6 +242,9 @@ index 0000000..31033d9
 +      }
 +    }
 +  }
++  if ([...accountHosts].some((host) => !remembered.includes(host))) {
++    await args.knownSites.write([...accountHosts].sort());
++  }
 +  for (const store of stores) {
 +    for (const name of ACCOUNT_SESSION_COOKIES) {
 +      for (const cookie of await store.get({ name })) {
@@ -185,7 +255,6 @@ index 0000000..31033d9
 +      }
 +    }
 +  }
-+  await flush(stores);
 +  for (const { store, cookie } of sessions) {
 +    const host = cookieHost(cookie);
 +    if (host !== null) await expireCookie(store, cookie, host);
@@ -228,7 +297,7 @@ index 0000000..31033d9
 +  });
 +}
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 92cdadc..d8b89d1 100644
+index 92cdadc..5513776 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
 @@ -45,6 +45,7 @@ import {
@@ -239,15 +308,18 @@ index 92cdadc..d8b89d1 100644
    type AppCommandId,
    type AppKeybindings,
  } from "@bb/domain";
-@@ -165,6 +166,7 @@ import {
+@@ -165,6 +166,10 @@ import {
    type ConnectCredentialCache,
  } from "./connect-credential-cache.js";
  import { enrollDesktopMachine } from "./connect-machine-enrollment.js";
-+import { forgetBbConnect } from "./bb-connect-off.js";
++import {
++  createForgottenBbSitesFile,
++  forgetBbConnect,
++} from "./bb-connect-off.js";
  import {
    createConnectSessionRenewal,
    type ConnectSessionRenewal,
-@@ -1415,6 +1417,13 @@ async function activateLocalServerMove(move: DesktopServerMove): Promise<void> {
+@@ -1415,6 +1420,13 @@ async function activateLocalServerMove(move: DesktopServerMove): Promise<void> {
    const userDataPath = desktopUserDataPath;
    localServerMove = move;
    stopServerMovedWatcher();
@@ -261,7 +333,7 @@ index 92cdadc..d8b89d1 100644
    desktopLogger.info(
      `[desktop] this computer's bb server moved to ${move.toHostName}; the app now opens that server and runs this computer as a regular machine`,
    );
-@@ -1717,6 +1726,9 @@ async function runStartupAction(
+@@ -1717,6 +1729,9 @@ async function runStartupAction(
  }
  
  function openConnectSignIn(parentWindow: BrowserWindow | null): void {
@@ -271,7 +343,7 @@ index 92cdadc..d8b89d1 100644
    if (connectSignInWindow !== null && !connectSignInWindow.isDestroyed()) {
      connectSignInWindow.focus();
      return;
-@@ -1814,15 +1826,26 @@ async function selectBuiltinServer(): Promise<void> {
+@@ -1814,15 +1829,26 @@ async function selectBuiltinServer(): Promise<void> {
    await applyServerTarget();
  }
  
@@ -302,7 +374,7 @@ index 92cdadc..d8b89d1 100644
      logs: "",
      title: `bb moved to ${move.toHostName}`,
    });
-@@ -1853,6 +1876,15 @@ async function applyServerTarget(): Promise<void> {
+@@ -1853,6 +1879,15 @@ async function applyServerTarget(): Promise<void> {
    const target = serverTargetStore.getTarget();
    desktopBrowserBrokerClient?.reconnect();
  
@@ -318,7 +390,7 @@ index 92cdadc..d8b89d1 100644
    if (target.kind === "builtin") {
      startServerMovedWatcher();
      const attached = await ensureBuiltinRuntimeAttached();
-@@ -3056,6 +3088,7 @@ async function runDesktopApp(): Promise<void> {
+@@ -3056,6 +3091,7 @@ async function runDesktopApp(): Promise<void> {
    });
  
    serverTargetStore = createServerTargetStore({
@@ -326,7 +398,7 @@ index 92cdadc..d8b89d1 100644
      storagePath: join(userDataPath, SERVER_TARGET_FILE_NAME),
    });
    await serverTargetStore.load();
-@@ -3071,63 +3104,84 @@ async function runDesktopApp(): Promise<void> {
+@@ -3071,63 +3107,85 @@ async function runDesktopApp(): Promise<void> {
    machineServiceNoticeStore = createServerMoveNoticeStore({
      storagePath: join(userDataPath, MACHINE_SERVICE_NOTICE_FILE_NAME),
    });
@@ -448,6 +520,7 @@ index 92cdadc..d8b89d1 100644
 +        }),
 +        defaultAccountUrl: resolveConnectAccountUrl(),
 +        forgottenServerUrls: forgotten === null ? [] : [forgotten.url],
++        knownSites: createForgottenBbSitesFile(userDataPath),
 +      });
 +      await serverTargetStore.persistForgottenConnect();
 +    } catch (error) {
@@ -467,7 +540,7 @@ index 92cdadc..d8b89d1 100644
  
    const desktopUpdateSupport = resolveDesktopUpdateSupport({
      canReplaceAppImage,
-@@ -3410,7 +3464,7 @@ async function runDesktopApp(): Promise<void> {
+@@ -3410,7 +3468,7 @@ async function runDesktopApp(): Promise<void> {
      await initializeRuntime({ bridgePath, serverUrl, userDataPath });
    } else {
      await applyServerTarget();
@@ -611,15 +684,20 @@ index c6257b8..b0e7f2c 100644
              null;
 diff --git a/apps/desktop/test/bb-connect-off.test.ts b/apps/desktop/test/bb-connect-off.test.ts
 new file mode 100644
-index 0000000..8655011
+index 0000000..97cbafa
 --- /dev/null
 +++ b/apps/desktop/test/bb-connect-off.test.ts
-@@ -0,0 +1,402 @@
+@@ -0,0 +1,537 @@
++import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
 +import { describe, expect, it } from "vitest";
 +import {
++  createForgottenBbSitesFile,
 +  forgetBbConnect,
 +  type ForgetCookie,
 +  type ForgetCookieStore,
++  type ForgottenBbSites,
 +} from "../src/bb-connect-off.js";
 +import {
 +  createServerTargetStore,
@@ -631,13 +709,15 @@ index 0000000..8655011
 + * leading dot for a domain cookie) and path; setting an expired cookie deletes
 + * the one with the same identity; removing by URL deletes every same-named
 + * cookie that URL would send, parent domains included. Changes reach the disk
-+ * only on flushStore(); restart() reads the disk back, as after a crash.
++ * only on flushStore(), which can also report success without writing, as
++ * Chromium does when SQLite fails; restart() reads the disk back, as after a
++ * crash.
 + */
 +function cookieJar(
 +  cookies: ForgetCookie[],
-+  power: { flushes: number; crashAt: number } = {
-+    flushes: 0,
++  power: { crashAt: number; flushes: number; loseWrites?: boolean } = {
 +    crashAt: Infinity,
++    flushes: 0,
 +  },
 +): ForgetCookieStore & {
 +  left(): string[];
@@ -661,6 +741,7 @@ index 0000000..8655011
 +    async flushStore() {
 +      power.flushes += 1;
 +      if (power.flushes === power.crashAt) throw new Error("crash");
++      if (power.loseWrites === true) return;
 +      disk = [...jar];
 +    },
 +    async get({ name }) {
@@ -733,6 +814,32 @@ index 0000000..8655011
 +  };
 +}
 +
++function sitesFile(): ForgottenBbSites & {
++  hosts(): readonly string[];
++  failNextWrite(): void;
++} {
++  let hosts: readonly string[] = [];
++  let fail = false;
++  return {
++    async read() {
++      return hosts;
++    },
++    async write(next) {
++      if (fail) {
++        fail = false;
++        throw new Error("disk full");
++      }
++      hosts = [...next];
++    },
++    hosts() {
++      return hosts;
++    },
++    failNextWrite() {
++      fail = true;
++    },
++  };
++}
++
 +function memoryFs(initial: Record<string, string>): {
 +  files: Map<string, string>;
 +  fs: ServerTargetFs;
@@ -779,6 +886,7 @@ index 0000000..8655011
 +      { domain: "other-saas.com", name: ACCOUNT },
 +    ]);
 +    const credential = credentialFile("https://box.cred-connect.dev");
++    const sites = sitesFile();
 +
 +    await forgetBbConnect({
 +      appCookies,
@@ -786,8 +894,15 @@ index 0000000..8655011
 +      credentialCache: credential,
 +      defaultAccountUrl: "https://getbb.app",
 +      forgottenServerUrls: ["not a url"],
++      knownSites: sites,
 +    });
 +
++    expect(sites.hosts()).toEqual([
++      "corp-connect.dev",
++      "cred-connect.dev",
++      "getbb.app",
++      "lan.example",
++    ]);
 +    expect(credential.exists()).toBe(false);
 +    expect(appCookies.left()).toEqual([
 +      `my-server.example|${ACCOUNT}`,
@@ -807,6 +922,7 @@ index 0000000..8655011
 +      credentialCache: credentialFile(null),
 +      defaultAccountUrl: "https://getbb.app",
 +      forgottenServerUrls: ["https://studio.connect.example.dev"],
++      knownSites: sitesFile(),
 +    });
 +
 +    expect(browserCookies.left()).toEqual([]);
@@ -829,6 +945,7 @@ index 0000000..8655011
 +      credentialCache: credentialFile(null),
 +      defaultAccountUrl: "https://getbb.app",
 +      forgottenServerUrls: [],
++      knownSites: sitesFile(),
 +    });
 +
 +    expect(appCookies.left()).toEqual([`.example.dev|${ACCOUNT}`]);
@@ -841,6 +958,7 @@ index 0000000..8655011
 +      { domain: "corp-connect.dev", name: ACCOUNT },
 +    ]);
 +    const credential = credentialFile("https://box.corp-connect.dev");
++    const sites = sitesFile();
 +    const run = () =>
 +      forgetBbConnect({
 +        appCookies: cookieJar([]),
@@ -848,6 +966,7 @@ index 0000000..8655011
 +        credentialCache: credential,
 +        defaultAccountUrl: "https://getbb.app",
 +        forgottenServerUrls: [],
++        knownSites: sites,
 +      });
 +
 +    browserCookies.failNextWrite();
@@ -865,6 +984,7 @@ index 0000000..8655011
 +      { domain: "cred-connect.dev", name: ACCOUNT },
 +    ]);
 +    const credential = credentialFile("https://box.cred-connect.dev");
++    const sites = sitesFile();
 +    const run = () =>
 +      forgetBbConnect({
 +        appCookies: cookieJar([]),
@@ -872,6 +992,7 @@ index 0000000..8655011
 +        credentialCache: credential,
 +        defaultAccountUrl: "https://getbb.app",
 +        forgottenServerUrls: [],
++        knownSites: sites,
 +      });
 +
 +    credential.setKeychain(false);
@@ -900,6 +1021,7 @@ index 0000000..8655011
 +    const browserCookies = cookieJar([
 +      { domain: "private-connect.dev", name: ACCOUNT },
 +    ]);
++    const sites = sitesFile();
 +    const start = async () => {
 +      const store = createServerTargetStore({
 +        connect: false,
@@ -914,6 +1036,7 @@ index 0000000..8655011
 +        credentialCache: credentialFile(null),
 +        defaultAccountUrl: "https://getbb.app",
 +        forgottenServerUrls: forgotten === null ? [] : [forgotten.url],
++        knownSites: sites,
 +      }).then(
 +        () => store.persistForgottenConnect(),
 +        () => undefined,
@@ -934,91 +1057,176 @@ index 0000000..8655011
 +    });
 +    expect(files.get(storagePath)).not.toContain("private-connect.dev");
 +  });
-+  it("leaves nothing the next start cannot find when the app crashes during or right after the cleanup", async () => {
-+    const storagePath = "/tmp/server-target.json";
-+    const scenarios = {
-+      "a sign-in known only from the saved connect server": {
-+        app: [],
-+        browser: [{ domain: "private-connect.dev", name: ACCOUNT }],
-+        connectServerUrl: "https://box.private-connect.dev",
-+        credentialUrl: null,
-+      },
-+      "a sign-in known only from a desktop session in the other store": {
-+        app: [{ domain: ".corp-connect.dev", name: DESKTOP }],
-+        browser: [{ domain: "corp-connect.dev", name: ACCOUNT }],
-+        connectServerUrl: null,
-+        credentialUrl: null,
-+      },
-+      "a sign-in known only from the stored credential": {
-+        app: [],
-+        browser: [{ domain: "cred-connect.dev", name: ACCOUNT }],
-+        connectServerUrl: null,
-+        credentialUrl: "https://box.cred-connect.dev",
-+      },
-+    } satisfies Record<
-+      string,
-+      {
-+        app: ForgetCookie[];
-+        browser: ForgetCookie[];
-+        connectServerUrl: string | null;
-+        credentialUrl: string | null;
-+      }
-+    >;
-+    for (const [scenario, seed] of Object.entries(scenarios)) {
-+      for (const crashAt of [1, 2, 3, 4, Infinity]) {
-+        const power = { flushes: 0, crashAt };
-+        const appCookies = cookieJar(seed.app, power);
-+        const browserCookies = cookieJar(seed.browser, power);
-+        const credential = credentialFile(seed.credentialUrl);
-+        const { fs } = memoryFs({
-+          [storagePath]: JSON.stringify({
-+            connectServer:
-+              seed.connectServerUrl === null
-+                ? null
-+                : { handle: "box", name: "Box", url: seed.connectServerUrl },
-+            customServerUrl: null,
-+            target: seed.connectServerUrl === null ? "builtin" : "connect",
-+          }),
-+        });
-+        const start = async () => {
-+          const store = createServerTargetStore({
-+            connect: false,
-+            fs,
-+            storagePath,
-+          });
-+          await store.load();
-+          const forgotten = store.getForgottenConnectServer();
-+          await forgetBbConnect({
-+            appCookies,
-+            browserCookies,
-+            credentialCache: credential,
-+            defaultAccountUrl: "https://getbb.app",
-+            forgottenServerUrls: forgotten === null ? [] : [forgotten.url],
-+          }).then(
-+            () => store.persistForgottenConnect(),
-+            () => undefined,
-+          );
-+        };
-+        const label = `${scenario}, crash at flush ${crashAt}`;
++  const scenarios = {
++    "a sign-in known only from the saved connect server": {
++      app: [],
++      browser: [{ domain: "private-connect.dev", name: ACCOUNT }],
++      connectServerUrl: "https://box.private-connect.dev",
++      credentialUrl: null,
++    },
++    "a sign-in known only from a desktop session in the other store": {
++      app: [{ domain: ".corp-connect.dev", name: DESKTOP }],
++      browser: [{ domain: "corp-connect.dev", name: ACCOUNT }],
++      connectServerUrl: null,
++      credentialUrl: null,
++    },
++    "a sign-in known only from the stored credential": {
++      app: [],
++      browser: [{ domain: "cred-connect.dev", name: ACCOUNT }],
++      connectServerUrl: null,
++      credentialUrl: "https://box.cred-connect.dev",
++    },
++  } satisfies Record<
++    string,
++    {
++      app: ForgetCookie[];
++      browser: ForgetCookie[];
++      connectServerUrl: string | null;
++      credentialUrl: string | null;
++    }
++  >;
 +
-+        await start();
-+        if (crashAt === Infinity) {
-+          expect(appCookies.onDisk(), label).toEqual([]);
-+          expect(browserCookies.onDisk(), label).toEqual([]);
-+        }
++  /** A profile with one bb sign-in, started the way main.ts starts. */
++  function profile(
++    seed: (typeof scenarios)[keyof typeof scenarios],
++    power: { crashAt: number; flushes: number; loseWrites?: boolean },
++  ) {
++    const storagePath = "/tmp/server-target.json";
++    const appCookies = cookieJar(seed.app, power);
++    const browserCookies = cookieJar(seed.browser, power);
++    const credential = credentialFile(seed.credentialUrl);
++    const sites = sitesFile();
++    const { files, fs } = memoryFs({
++      [storagePath]: JSON.stringify({
++        connectServer:
++          seed.connectServerUrl === null
++            ? null
++            : { handle: "box", name: "Box", url: seed.connectServerUrl },
++        customServerUrl: null,
++        target: seed.connectServerUrl === null ? "builtin" : "connect",
++      }),
++    });
++    return {
++      appCookies,
++      browserCookies,
++      credential,
++      settings: () => files.get(storagePath) ?? "",
++      sites,
++      async start() {
++        const store = createServerTargetStore({
++          connect: false,
++          fs,
++          storagePath,
++        });
++        await store.load();
++        const forgotten = store.getForgottenConnectServer();
++        await forgetBbConnect({
++          appCookies,
++          browserCookies,
++          credentialCache: credential,
++          defaultAccountUrl: "https://getbb.app",
++          forgottenServerUrls: forgotten === null ? [] : [forgotten.url],
++          knownSites: sites,
++        }).then(
++          () => store.persistForgottenConnect(),
++          () => undefined,
++        );
++      },
++      restart() {
 +        appCookies.restart();
 +        browserCookies.restart();
-+        await start();
++      },
++    };
++  }
 +
-+        expect(appCookies.onDisk(), label).toEqual([]);
-+        expect(browserCookies.onDisk(), label).toEqual([]);
-+        expect(credential.exists(), label).toBe(false);
++  it("leaves nothing the next start cannot find when the app crashes during or right after the cleanup", async () => {
++    for (const [scenario, seed] of Object.entries(scenarios)) {
++      for (const crashAt of [1, 2, Infinity]) {
++        const label = `${scenario}, crash at flush ${crashAt}`;
++        const box = profile(seed, { crashAt, flushes: 0 });
++
++        await box.start();
++        if (crashAt === Infinity) {
++          expect(box.appCookies.onDisk(), label).toEqual([]);
++          expect(box.browserCookies.onDisk(), label).toEqual([]);
++        }
++        box.restart();
++        await box.start();
++
++        expect(box.appCookies.onDisk(), label).toEqual([]);
++        expect(box.browserCookies.onDisk(), label).toEqual([]);
++        expect(box.credential.exists(), label).toBe(false);
 +      }
++    }
++  });
++
++  it("finishes on a later start when the cookie store reported a write it did not make", async () => {
++    for (const [scenario, seed] of Object.entries(scenarios)) {
++      const power = { crashAt: Infinity, flushes: 0, loseWrites: true };
++      const box = profile(seed, power);
++
++      await box.start();
++      expect(box.settings(), scenario).not.toContain("private-connect.dev");
++      expect(box.credential.exists(), scenario).toBe(false);
++      box.restart();
++      expect(box.browserCookies.onDisk(), scenario).not.toEqual([]);
++
++      power.loseWrites = false;
++      await box.start();
++      expect(box.appCookies.onDisk(), scenario).toEqual([]);
++      expect(box.browserCookies.onDisk(), scenario).toEqual([]);
++    }
++  });
++
++  it("saves the bb sites before it deletes anything", async () => {
++    for (const [scenario, seed] of Object.entries(scenarios)) {
++      const box = profile(seed, { crashAt: Infinity, flushes: 0 });
++
++      box.sites.failNextWrite();
++      await box.start();
++      expect(box.browserCookies.left(), scenario).toEqual(
++        seed.browser.map((cookie) => `${cookie.domain}|${cookie.name}`),
++      );
++      expect(box.credential.exists(), scenario).toBe(
++        seed.credentialUrl !== null,
++      );
++      if (seed.connectServerUrl !== null) {
++        expect(box.settings(), scenario).toContain("private-connect.dev");
++      }
++
++      await box.start();
++      expect(box.appCookies.onDisk(), scenario).toEqual([]);
++      expect(box.browserCookies.onDisk(), scenario).toEqual([]);
++      expect(box.credential.exists(), scenario).toBe(false);
++    }
++  });
++});
++
++describe("createForgottenBbSitesFile", () => {
++  it("keeps only host names, replaces the list whole and reads a damaged file as empty", async () => {
++    const folder = await mkdtemp(join(tmpdir(), "bb-sites-"));
++    try {
++      const sites = createForgottenBbSitesFile(folder);
++      expect(await sites.read()).toEqual([]);
++
++      await sites.write(["getbb.app", "private-connect.dev"]);
++      expect(await sites.read()).toEqual(["getbb.app", "private-connect.dev"]);
++      expect(
++        JSON.parse(
++          await readFile(join(folder, "forgotten-bb-sites.json"), "utf8"),
++        ),
++      ).toEqual({ hosts: ["getbb.app", "private-connect.dev"] });
++      expect(await readdir(folder)).toEqual(["forgotten-bb-sites.json"]);
++
++      await writeFile(join(folder, "forgotten-bb-sites.json"), "{", "utf8");
++      expect(await sites.read()).toEqual([]);
++    } finally {
++      await rm(folder, { force: true, recursive: true });
 +    }
 +  });
 +});
 diff --git a/apps/desktop/test/fixtures/startup-retry-smoke.cjs b/apps/desktop/test/fixtures/startup-retry-smoke.cjs
-index 8c48973..47947a9 100644
+index 8c48973..ef345fc 100644
 --- a/apps/desktop/test/fixtures/startup-retry-smoke.cjs
 +++ b/apps/desktop/test/fixtures/startup-retry-smoke.cjs
 @@ -1,14 +1,26 @@
@@ -1093,7 +1301,7 @@ index 8c48973..47947a9 100644
          ? { target: "builtin", customServerUrl: null }
          : scenario === "connect"
            ? {
-@@ -122,7 +158,153 @@ async function run() {
+@@ -122,7 +158,163 @@ async function run() {
        return loadURL(url, options);
      };
    });
@@ -1239,6 +1447,16 @@ index 8c48973..47947a9 100644
 +        `bb connect's sign-ins are deleted on disk before the connect server is forgotten, so a crash cannot bring them back (${database})`,
 +      );
 +    }
++    const remembered = JSON.parse(
++      await readFile(
++        join(app.getPath("userData"), "forgotten-bb-sites.json"),
++        "utf8",
++      ),
++    ).hosts;
++    assert.ok(
++      remembered.includes("connect.example.dev"),
++      `1ma remembers the bb sites for good, so every start repeats the cleanup: ${JSON.stringify(remembered)}`,
++    );
 +    server.close();
 +    console.log("STARTUP_RETRY_SMOKE_OK");
 +    app.exit(0);
@@ -1247,7 +1465,7 @@ index 8c48973..47947a9 100644
    if (scenario === "attached") {
      await until(() => contents?.getURL() === `${serverUrl}/`);
      await until(() =>
-@@ -158,11 +340,7 @@ async function run() {
+@@ -158,11 +350,7 @@ async function run() {
      return;
    }
    const errorTitle =
@@ -1260,7 +1478,7 @@ index 8c48973..47947a9 100644
    const hasError = () =>
      contents?.getURL().startsWith("data:") &&
      contents.executeJavaScript(
-@@ -272,7 +450,6 @@ async function run() {
+@@ -272,7 +460,6 @@ async function run() {
    }
    recovered = true;
    const before = loads.length;
@@ -1268,7 +1486,7 @@ index 8c48973..47947a9 100644
    await contents.executeJavaScript(
      'const button = document.querySelector("[data-startup-action=retry]"); for (let i = 0; i < 10; i++) button.click();',
    );
-@@ -286,18 +463,6 @@ async function run() {
+@@ -286,18 +473,6 @@ async function run() {
    console.log(
      JSON.stringify({ scenario, retryLoads: retryLoads.length, mintCount }),
    );
