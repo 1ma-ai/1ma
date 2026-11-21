@@ -32,26 +32,26 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../settings/AiServicesSettingsSection.tsx    |   2 +-
  .../components/settings/settings-search.ts    |   2 +-
- apps/desktop/src/bb-connect-off.ts            | 130 ++++++++
- apps/desktop/src/main.ts                      | 176 +++++++----
- apps/desktop/src/server-target.ts             |  59 +++-
- apps/desktop/test/bb-connect-off.test.ts      | 297 ++++++++++++++++++
- .../test/fixtures/startup-retry-smoke.cjs     | 154 +++++++--
+ apps/desktop/src/bb-connect-off.ts            | 139 ++++++
+ apps/desktop/src/main.ts                      | 176 +++++---
+ apps/desktop/src/server-target.ts             |  59 ++-
+ apps/desktop/test/bb-connect-off.test.ts      | 402 ++++++++++++++++++
+ .../test/fixtures/startup-retry-smoke.cjs     | 207 ++++++++-
  apps/desktop/test/preload-build.test.ts       |   1 +
- apps/desktop/test/server-target.test.ts       |  75 +++++
+ apps/desktop/test/server-target.test.ts       |  75 ++++
  .../src/services/plugins/builtin-registry.ts  |  16 +-
  .../src/services/plugins/plugin-service.ts    |  30 +-
  .../public/public-host-management.test.ts     |  50 +--
  .../plugin-catalog-routes.test.ts             |   9 +-
  .../plugin-catalog-service.test.ts            |  23 +-
- .../services/plugins/builtin-plugins.test.ts  |  66 ++++
- .../services/plugins/builtin-registry.test.ts |  38 ++-
+ .../services/plugins/builtin-plugins.test.ts  |  66 +++
+ .../services/plugins/builtin-registry.test.ts |  38 +-
  .../services/plugins/plugin-install.test.ts   |  26 +-
  packages/db/src/data/index.ts                 |   1 +
  packages/db/src/data/plugins.ts               |  11 +
  packages/domain/src/bb-cloud.ts               |  14 +
  packages/domain/src/index.ts                  |   1 +
- 21 files changed, 1020 insertions(+), 161 deletions(-)
+ 21 files changed, 1187 insertions(+), 161 deletions(-)
  create mode 100644 apps/desktop/src/bb-connect-off.ts
  create mode 100644 apps/desktop/test/bb-connect-off.test.ts
  create mode 100644 packages/domain/src/bb-cloud.ts
@@ -84,10 +84,10 @@ index c7d16a5..9f08062 100644
          title: "Thread titles",
 diff --git a/apps/desktop/src/bb-connect-off.ts b/apps/desktop/src/bb-connect-off.ts
 new file mode 100644
-index 0000000..52406ec
+index 0000000..31033d9
 --- /dev/null
 +++ b/apps/desktop/src/bb-connect-off.ts
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,139 @@
 +import { deriveConnectBaseUrl } from "@bb/connect-client";
 +import type { ConnectCredentialCache } from "./connect-credential-cache.js";
 +
@@ -111,6 +111,8 @@ index 0000000..52406ec
 +}
 +
 +export interface ForgetCookieStore {
++  /** Writes the deletions to disk; until then a crash brings the cookies back. */
++  flushStore(): Promise<void>;
 +  get(filter: { name: string }): Promise<readonly ForgetCookie[]>;
 +  set(details: {
 +    domain?: string;
@@ -133,10 +135,11 @@ index 0000000..52406ec
 + * Account sign-ins are removed only when their own domain is a bb account
 + * site known from the default, a forgotten connect server, the stored
 + * credential or a desktop session cookie; the same cookie name on any other
-+ * domain, a parent domain included, belongs to someone else. Those sources
-+ * are deleted after the sign-ins, and the credential only while the system
-+ * keychain can read it, so a cleanup that stops halfway finds them again on
-+ * the next start.
++ * domain, a parent domain included, belongs to someone else. Each source of
++ * those sites is deleted only after the sign-ins are deleted on disk, and the
++ * credential only while the system keychain can read it, so a cleanup that
++ * stops halfway, a crash included, finds them again on the next start. The
++ * caller forgets the connect server only after this resolves.
 + */
 +export async function forgetBbConnect(args: {
 +  appCookies: ForgetCookieStore;
@@ -182,13 +185,19 @@ index 0000000..52406ec
 +      }
 +    }
 +  }
++  await flush(stores);
 +  for (const { store, cookie } of sessions) {
 +    const host = cookieHost(cookie);
 +    if (host !== null) await expireCookie(store, cookie, host);
 +  }
++  await flush(stores);
 +  if (args.credentialCache.canPersist()) {
 +    await args.credentialCache.clear();
 +  }
++}
++
++async function flush(stores: readonly ForgetCookieStore[]): Promise<void> {
++  for (const store of stores) await store.flushStore();
 +}
 +
 +function cookieHost(cookie: ForgetCookie): string | null {
@@ -602,10 +611,10 @@ index c6257b8..b0e7f2c 100644
              null;
 diff --git a/apps/desktop/test/bb-connect-off.test.ts b/apps/desktop/test/bb-connect-off.test.ts
 new file mode 100644
-index 0000000..d7f1282
+index 0000000..8655011
 --- /dev/null
 +++ b/apps/desktop/test/bb-connect-off.test.ts
-@@ -0,0 +1,297 @@
+@@ -0,0 +1,402 @@
 +import { describe, expect, it } from "vitest";
 +import {
 +  forgetBbConnect,
@@ -621,14 +630,24 @@ index 0000000..d7f1282
 + * A cookie store with Chromium's rules: a cookie is its name, domain (with a
 + * leading dot for a domain cookie) and path; setting an expired cookie deletes
 + * the one with the same identity; removing by URL deletes every same-named
-+ * cookie that URL would send, parent domains included.
++ * cookie that URL would send, parent domains included. Changes reach the disk
++ * only on flushStore(); restart() reads the disk back, as after a crash.
 + */
-+function cookieJar(cookies: ForgetCookie[]): ForgetCookieStore & {
++function cookieJar(
++  cookies: ForgetCookie[],
++  power: { flushes: number; crashAt: number } = {
++    flushes: 0,
++    crashAt: Infinity,
++  },
++): ForgetCookieStore & {
 +  left(): string[];
++  onDisk(): string[];
++  restart(): void;
 +  failNextWrite(): void;
 +  remove(url: string, name: string): Promise<void>;
 +} {
 +  let jar = [...cookies];
++  let disk = [...cookies];
 +  let fail = false;
 +  const failIfAsked = () => {
 +    if (fail) {
@@ -636,7 +655,14 @@ index 0000000..d7f1282
 +      throw new Error("cookie store unavailable");
 +    }
 +  };
++  const names = (list: ForgetCookie[]) =>
++    list.map((cookie) => `${cookie.domain}|${cookie.name}`);
 +  return {
++    async flushStore() {
++      power.flushes += 1;
++      if (power.flushes === power.crashAt) throw new Error("crash");
++      disk = [...jar];
++    },
 +    async get({ name }) {
 +      return jar.filter((cookie) => cookie.name === name);
 +    },
@@ -668,7 +694,13 @@ index 0000000..d7f1282
 +      });
 +    },
 +    left() {
-+      return jar.map((cookie) => `${cookie.domain}|${cookie.name}`);
++      return names(jar);
++    },
++    onDisk() {
++      return names(disk);
++    },
++    restart() {
++      jar = [...disk];
 +    },
 +    failNextWrite() {
 +      fail = true;
@@ -902,14 +934,108 @@ index 0000000..d7f1282
 +    });
 +    expect(files.get(storagePath)).not.toContain("private-connect.dev");
 +  });
++  it("leaves nothing the next start cannot find when the app crashes during or right after the cleanup", async () => {
++    const storagePath = "/tmp/server-target.json";
++    const scenarios = {
++      "a sign-in known only from the saved connect server": {
++        app: [],
++        browser: [{ domain: "private-connect.dev", name: ACCOUNT }],
++        connectServerUrl: "https://box.private-connect.dev",
++        credentialUrl: null,
++      },
++      "a sign-in known only from a desktop session in the other store": {
++        app: [{ domain: ".corp-connect.dev", name: DESKTOP }],
++        browser: [{ domain: "corp-connect.dev", name: ACCOUNT }],
++        connectServerUrl: null,
++        credentialUrl: null,
++      },
++      "a sign-in known only from the stored credential": {
++        app: [],
++        browser: [{ domain: "cred-connect.dev", name: ACCOUNT }],
++        connectServerUrl: null,
++        credentialUrl: "https://box.cred-connect.dev",
++      },
++    } satisfies Record<
++      string,
++      {
++        app: ForgetCookie[];
++        browser: ForgetCookie[];
++        connectServerUrl: string | null;
++        credentialUrl: string | null;
++      }
++    >;
++    for (const [scenario, seed] of Object.entries(scenarios)) {
++      for (const crashAt of [1, 2, 3, 4, Infinity]) {
++        const power = { flushes: 0, crashAt };
++        const appCookies = cookieJar(seed.app, power);
++        const browserCookies = cookieJar(seed.browser, power);
++        const credential = credentialFile(seed.credentialUrl);
++        const { fs } = memoryFs({
++          [storagePath]: JSON.stringify({
++            connectServer:
++              seed.connectServerUrl === null
++                ? null
++                : { handle: "box", name: "Box", url: seed.connectServerUrl },
++            customServerUrl: null,
++            target: seed.connectServerUrl === null ? "builtin" : "connect",
++          }),
++        });
++        const start = async () => {
++          const store = createServerTargetStore({
++            connect: false,
++            fs,
++            storagePath,
++          });
++          await store.load();
++          const forgotten = store.getForgottenConnectServer();
++          await forgetBbConnect({
++            appCookies,
++            browserCookies,
++            credentialCache: credential,
++            defaultAccountUrl: "https://getbb.app",
++            forgottenServerUrls: forgotten === null ? [] : [forgotten.url],
++          }).then(
++            () => store.persistForgottenConnect(),
++            () => undefined,
++          );
++        };
++        const label = `${scenario}, crash at flush ${crashAt}`;
++
++        await start();
++        if (crashAt === Infinity) {
++          expect(appCookies.onDisk(), label).toEqual([]);
++          expect(browserCookies.onDisk(), label).toEqual([]);
++        }
++        appCookies.restart();
++        browserCookies.restart();
++        await start();
++
++        expect(appCookies.onDisk(), label).toEqual([]);
++        expect(browserCookies.onDisk(), label).toEqual([]);
++        expect(credential.exists(), label).toBe(false);
++      }
++    }
++  });
 +});
 diff --git a/apps/desktop/test/fixtures/startup-retry-smoke.cjs b/apps/desktop/test/fixtures/startup-retry-smoke.cjs
-index 8c48973..372eb41 100644
+index 8c48973..47947a9 100644
 --- a/apps/desktop/test/fixtures/startup-retry-smoke.cjs
 +++ b/apps/desktop/test/fixtures/startup-retry-smoke.cjs
-@@ -8,7 +8,14 @@ const {
+@@ -1,14 +1,26 @@
+ const assert = require("node:assert/strict");
+ const { createServer } = require("node:http");
++const { existsSync } = require("node:fs");
+ const {
+   appendFile,
+   chmod,
++  copyFile,
+   mkdir,
++  mkdtemp,
+   readFile,
++  rm,
    writeFile,
  } = require("node:fs/promises");
++const { tmpdir } = require("node:os");
  const { join } = require("node:path");
 -const { app, BrowserWindow, ipcMain, Menu, shell } = require("electron");
 +const {
@@ -923,7 +1049,7 @@ index 8c48973..372eb41 100644
  
  app.setName("bb-dev");
  
-@@ -77,9 +84,30 @@ async function run() {
+@@ -77,9 +89,30 @@ async function run() {
    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
    const port = server.address().port;
    const serverUrl = `http://127.0.0.1:${port}`;
@@ -955,7 +1081,7 @@ index 8c48973..372eb41 100644
    if (scenario === "crashed") {
      const crashingRuntime = join(app.getPath("userData"), "crashing-bb-app");
      await writeFile(
-@@ -97,7 +125,10 @@ async function run() {
+@@ -97,7 +130,10 @@ async function run() {
    await writeFile(
      join(app.getPath("userData"), "server-target.json"),
      JSON.stringify(
@@ -967,10 +1093,43 @@ index 8c48973..372eb41 100644
          ? { target: "builtin", customServerUrl: null }
          : scenario === "connect"
            ? {
-@@ -122,7 +153,105 @@ async function run() {
+@@ -122,7 +158,153 @@ async function run() {
        return loadURL(url, options);
      };
    });
++  /** The cookies each store has written to disk, as a crash would leave them. */
++  const bbCookieDatabases = () =>
++    [
++      app.getPath("userData"),
++      join(app.getPath("userData"), "Partitions", "bb-browser"),
++    ].map((dir) => {
++      const found = [
++        join(dir, "Cookies"),
++        join(dir, "Network", "Cookies"),
++      ].find((file) => existsSync(file));
++      assert.ok(found, `No cookie database in ${dir}`);
++      return found;
++    });
++  const cookiesOnDisk = async (database) => {
++    const copyDir = await mkdtemp(join(tmpdir(), "bb-cookies-"));
++    try {
++      const copy = join(copyDir, "Cookies");
++      await copyFile(database, copy);
++      const { DatabaseSync } = require("node:sqlite");
++      const db = new DatabaseSync(copy, { readOnly: true });
++      try {
++        return db
++          .prepare("SELECT host_key, path, name FROM cookies")
++          .all()
++          .filter((row) => row.host_key.endsWith("example.dev"))
++          .map((row) => `${row.host_key}${row.path} ${row.name}`);
++      } finally {
++        db.close();
++      }
++    } finally {
++      await rm(copyDir, { force: true, recursive: true });
++    }
++  };
 +  const bbCookieStores = () => [
 +    session.defaultSession.cookies,
 +    session.fromPartition("persist:bb-browser").cookies,
@@ -1013,6 +1172,14 @@ index 8c48973..372eb41 100644
 +        url: "https://www.example.dev/",
 +        value: "neighbour-service",
 +      });
++      await cookies.flushStore();
++    }
++    for (const database of bbCookieDatabases()) {
++      assert.equal(
++        (await cookiesOnDisk(database)).length,
++        4,
++        `The seeded cookies are on disk in ${database}`,
++      );
 +    }
 +  }
    require(join(desktopRoot, "dist/main.js"));
@@ -1065,6 +1232,13 @@ index 8c48973..372eb41 100644
 +        "bb connect's sign-ins are deleted; a neighbour's sign-in on the parent domain stays",
 +      );
 +    }
++    for (const database of bbCookieDatabases()) {
++      assert.deepEqual(
++        await cookiesOnDisk(database),
++        [".example.dev/ __Secure-better-auth.session_token"],
++        `bb connect's sign-ins are deleted on disk before the connect server is forgotten, so a crash cannot bring them back (${database})`,
++      );
++    }
 +    server.close();
 +    console.log("STARTUP_RETRY_SMOKE_OK");
 +    app.exit(0);
@@ -1073,7 +1247,7 @@ index 8c48973..372eb41 100644
    if (scenario === "attached") {
      await until(() => contents?.getURL() === `${serverUrl}/`);
      await until(() =>
-@@ -158,11 +287,7 @@ async function run() {
+@@ -158,11 +340,7 @@ async function run() {
      return;
    }
    const errorTitle =
@@ -1086,7 +1260,7 @@ index 8c48973..372eb41 100644
    const hasError = () =>
      contents?.getURL().startsWith("data:") &&
      contents.executeJavaScript(
-@@ -272,7 +397,6 @@ async function run() {
+@@ -272,7 +450,6 @@ async function run() {
    }
    recovered = true;
    const before = loads.length;
@@ -1094,7 +1268,7 @@ index 8c48973..372eb41 100644
    await contents.executeJavaScript(
      'const button = document.querySelector("[data-startup-action=retry]"); for (let i = 0; i < 10; i++) button.click();',
    );
-@@ -286,18 +410,6 @@ async function run() {
+@@ -286,18 +463,6 @@ async function run() {
    console.log(
      JSON.stringify({ scenario, retryLoads: retryLoads.length, mintCount }),
    );
