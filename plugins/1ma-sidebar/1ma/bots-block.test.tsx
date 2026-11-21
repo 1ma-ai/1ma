@@ -582,7 +582,7 @@ describe("Codex review of 7be99a2: another conversation placed on the bot before
     expect(server.owned).toEqual(["keep", "thr_bot", "thr_plain", "thr_other"]);
   });
 
-  it("still says the rest stayed when the call was refused", async () => {
+  it("reports a refusal partway as a partial move", async () => {
     toasts.error.mockClear();
     toasts.success.mockClear();
     const server = dropServer({ refuse: 2, owned: ["keep"], othersAssign: other });
@@ -642,5 +642,30 @@ describe("Codex review of afe5c1f: a refusal is an answer, a lost connection is 
     expect(server.owned).toEqual(["keep", "thr_bot"]);
     server.finishLate();
     expect(server.owned).toEqual(["keep", "thr_bot", "thr_plain"]);
+  });
+});
+
+describe("Codex review of 7c540b3: a partial refusal says what moved, not where the rest is", () => {
+  it("makes no claim about a conversation another client gave the bot meanwhile", async () => {
+    toasts.error.mockClear();
+    toasts.success.mockClear();
+    const server = dropServer({
+      refuse: 2,
+      owned: ["keep"],
+      othersAssign: { threadId: "thr_plain", place: "last" },
+    });
+    render({ bots: server.bots, assign: server.assign });
+    await dropTwo(["thr_plain", "thr_bot"], 10);
+    await waitFor(() => expect(toasts.error).toHaveBeenCalled());
+    const [title, options] = toasts.error.mock.calls[0]!;
+    expect(title).toBe(strings.partlyAssigned("Marketer", 1, 2));
+    expect(title).toContain("Moved 1 of 2");
+    expect(title).not.toMatch(/stayed|where they were/);
+    expect(options).toMatchObject({
+      description: expect.stringContaining("archived"),
+      action: { label: strings.open },
+    });
+    expect(toasts.success).not.toHaveBeenCalled();
+    expect(server.owned).toEqual(["thr_bot", "keep", "thr_plain"]);
   });
 });
