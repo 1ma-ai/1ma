@@ -1,0 +1,81 @@
+name: Bots end-to-end
+
+on:
+  pull_request:
+    paths:
+      - "plugins/1ma-bots/**"
+      - "plugins/1ma-sidebar/**"
+      - "e2e/bots/**"
+      - "e2e/lib/**"
+      - ".github/workflows/bots-e2e.yml"
+      # How the plugins are installed and built: bb-app's own SDK comes from
+      # packageExtensions in pnpm-workspace.yaml.
+      - "package.json"
+      - "pnpm-workspace.yaml"
+      - "pnpm-lock.yaml"
+  workflow_dispatch:
+
+concurrency:
+  group: bots-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PLAYWRIGHT_VERSION: 1.55.0
+
+jobs:
+  e2e:
+    name: One 1ma server with the bots and sidebar plugins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Choose the scratch directories
+        run: |
+          echo "E2E_ROOT=$RUNNER_TEMP/bots-e2e" >> "$GITHUB_ENV"
+          echo "E2E_PLAYWRIGHT_DIR=$RUNNER_TEMP/playwright" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install the pinned 1ma server package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node e2e/lib/install-server.mjs
+      - name: Build the plugins with the server's own bb
+        run: |
+          bb="$E2E_ROOT/server-package/node_modules/bb-app/dist/bb.js"
+          for plugin in 1ma-bots 1ma-sidebar; do
+            (cd "plugins/$plugin" && node "$bb" plugin build)
+          done
+      - name: Install Chromium for Playwright
+        run: |
+          mkdir -p "$E2E_PLAYWRIGHT_DIR"
+          cd "$E2E_PLAYWRIGHT_DIR"
+          npm init -y
+          npm install --no-audit --no-fund "playwright@$PLAYWRIGHT_VERSION"
+          npx playwright install --with-deps chromium
+      - name: Run the end-to-end tests
+        run: node --test --test-concurrency=1 --test-timeout=2400000 e2e/bots/bots.test.mjs
+      - name: Server logs
+        if: always()
+        run: |
+          for log in "$E2E_ROOT"/*.log "$E2E_ROOT"/bots/*.log "$E2E_ROOT"/bots/*/data/logs/*.log; do
+            [ -f "$log" ] || continue
+            echo "::group::$log"
+            tail -n 300 "$log"
+            echo "::endgroup::"
+          done
+      - name: Sidebar screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bots-sidebar-screenshots
+          path: ${{ env.E2E_ROOT }}/bots/screenshots
+          if-no-files-found: warn
