@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": ["*.ts", "*.tsx", "src", "components", "lib", "hooks"],
+  "exclude": ["dist", "node_modules"]
+}

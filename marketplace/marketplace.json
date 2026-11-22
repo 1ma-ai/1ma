@@ -114,6 +114,50 @@
           "tagPrefix": "1ma-auto-updates/"
         }
       }
+    },
+    {
+      "id": "1ma-bots",
+      "displayName": "1ma Bots",
+      "description": "Боты 1ma: ИИ-сотрудники с инструкциями, памятью, областями работы и своими чатами.",
+      "icon": {
+        "url": "./icons/1ma.svg"
+      },
+      "tags": ["bots", "agents"],
+      "author": {
+        "name": "1ma",
+        "github": "1ma-ai",
+        "url": "https://1ma.ai"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/1ma-ai/1ma.git",
+          "subdir": "plugins/1ma-bots",
+          "range": "^0",
+          "tagPrefix": "1ma-bots/"
+        }
+      }
+    },
+    {
+      "id": "1ma-sidebar",
+      "displayName": "1ma Sidebar",
+      "description": "Боковая панель 1ma: штатный список чатов и блок ботов над проектами.",
+      "icon": {
+        "url": "./icons/1ma.svg"
+      },
+      "tags": ["sidebar", "bots"],
+      "author": {
+        "name": "1ma",
+        "github": "1ma-ai",
+        "url": "https://1ma.ai"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/1ma-ai/1ma.git",
+          "subdir": "plugins/1ma-sidebar",
+          "range": "^0",
+          "tagPrefix": "1ma-sidebar/"
+        }
+      }
     }
   ]
 }

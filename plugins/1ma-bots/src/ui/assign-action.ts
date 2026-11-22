@@ -1,0 +1,60 @@
+import {
+  experimental_THREAD_ACTION_GROUPS,
+  experimental_useRpcMutation as useRpcMutation,
+  experimental_useRpcQuery as useRpcQuery,
+  type PluginThreadActionRegistration,
+} from "@get-bb/plugin-sdk/app";
+import { strings } from "../../strings.js";
+import { botsRpc, type BotSummary } from "../contract.js";
+import { findBot } from "./thread-bot-row.js";
+
+const NO_BOT = "none";
+
+interface AssignData {
+  bots: readonly BotSummary[];
+  assign(threadId: string, botId: string | null): Promise<unknown>;
+}
+
+function useAssignData(): AssignData {
+  const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
+  const assign = useRpcMutation({ contract: botsRpc, method: "bots.v1.assign" });
+  return {
+    bots: list.data?.bots ?? [],
+    assign: (threadId, botId) => assign.mutate({ threadId, botId, place: "last" }),
+  };
+}
+
+// Works in any thread list's row menu, the stock one included.
+export const assignToBotAction: PluginThreadActionRegistration<AssignData> = {
+  id: "assign-to-bot",
+  title: strings.threadBot.choose,
+  icon: "Bot",
+  group: experimental_THREAD_ACTION_GROUPS.organize,
+  order: 60,
+  useData: useAssignData,
+  item: ({ thread, data }) => {
+    if (data.bots.length === 0 || thread.parentThreadId !== null || thread.archivedAt !== null) {
+      return null;
+    }
+    const current = findBot(data.bots, thread.id)?.bot.id ?? null;
+    return {
+      label: strings.threadBot.choose,
+      icon: "Bot",
+      choices: {
+        items: [
+          ...data.bots.map((bot) => ({
+            id: bot.id,
+            label: bot.name,
+            selected: bot.id === current,
+            disabled: bot.id === current,
+          })),
+          ...(current === null ? [] : [{ id: NO_BOT, label: strings.threadBot.none }]),
+        ],
+      },
+      run: async ({ value }) => {
+        if (value === undefined) return;
+        await data.assign(thread.id, value === NO_BOT ? null : value);
+      },
+    };
+  },
+};
