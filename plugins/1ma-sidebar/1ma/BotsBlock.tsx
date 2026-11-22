@@ -247,16 +247,29 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
   });
   const { panelId } = state;
   if (state.status === "off" || panelId === null) return null;
+  // The block appears with the first bot, which is made on the Bots page
+  // (owner's decision of 18.11.2026); while the list loads it is not known
+  // yet whether there is one. When bots cannot be read it shows, to say so.
+  if (state.status === "loading" || (state.status === "ready" && state.bots.length === 0)) {
+    return null;
+  }
   const openBotsPage = () => navigation.actions.activate(panelId, { target: "current" });
   return (
     <div className="pb-4" data-1ma-bots-block="">
       <TopLevelSidebarSection
         label={strings.title}
         sectionId="1ma-bots"
-        collapseControl={{
-          isCollapsed: collapsed.includes(BLOCK_KEY),
-          onToggleCollapsed: () => toggle(BLOCK_KEY),
-        }}
+        // A collapsed section hides its body, and the failure notice is
+        // the only thing this block has to say then; the saved choice
+        // applies again once the bots are read.
+        collapseControl={
+          state.status === "unavailable"
+            ? undefined
+            : {
+                isCollapsed: collapsed.includes(BLOCK_KEY),
+                onToggleCollapsed: () => toggle(BLOCK_KEY),
+              }
+        }
         collapsedThreads={visible.flatMap((bot) => conversations.of(bot).open)}
         actionsMobileAlways
         actions={
