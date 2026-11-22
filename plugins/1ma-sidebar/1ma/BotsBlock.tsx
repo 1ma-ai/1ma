@@ -259,10 +259,17 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
       <TopLevelSidebarSection
         label={strings.title}
         sectionId="1ma-bots"
-        collapseControl={{
-          isCollapsed: collapsed.includes(BLOCK_KEY),
-          onToggleCollapsed: () => toggle(BLOCK_KEY),
-        }}
+        // A collapsed section hides its body, and the failure notice is
+        // the only thing this block has to say then; the saved choice
+        // applies again once the bots are read.
+        collapseControl={
+          state.status === "unavailable"
+            ? undefined
+            : {
+                isCollapsed: collapsed.includes(BLOCK_KEY),
+                onToggleCollapsed: () => toggle(BLOCK_KEY),
+              }
+        }
         collapsedThreads={visible.flatMap((bot) => conversations.of(bot).open)}
         actionsMobileAlways
         actions={

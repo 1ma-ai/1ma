@@ -61,6 +61,7 @@ function render(options: {
   setHidden?: (input: unknown) => unknown;
   assign?: (input: unknown) => unknown;
   threads?: typeof THREADS;
+  preferences?: Partial<ReturnType<typeof defaultPreferences>>;
 }) {
   return renderSlot(
     registration,
@@ -76,7 +77,9 @@ function render(options: {
       sidebarNavigation: { items: options.botsInstalled === false ? [] : [BOTS_PANEL] },
       settings: options.settings,
       rpc: {
-        listPreferences: () => ({ preferences: defaultPreferences() }),
+        listPreferences: () => ({
+          preferences: { ...defaultPreferences(), ...options.preferences },
+        }),
         setPreference: options.setPreference ?? ((input: unknown) => input),
         "bots.v1.list": options.bots ?? (() => ({ bots: [] })),
         "bots.v1.setHidden": options.setHidden ?? (() => ({ ok: true })),
@@ -138,6 +141,32 @@ describe("the bots block", () => {
     await view.behavior.experimental_invalidateRpc(null, "1ma-bots");
     await waitFor(() => expect(document.querySelector("[data-1ma-bots-block]")).toBeNull());
     expect(threadIdsInList()).toContain("thr_bot");
+  });
+
+  it("collapsed, it still says when the bots cannot be read", async () => {
+    let bots: SidebarBot[] = [marketer()];
+    let fail = false;
+    const view = render({
+      preferences: { collapsedBots: ["bots"] },
+      bots: () => {
+        if (fail) throw new Error("1ma-bots is reloading");
+        return { bots };
+      },
+    });
+    await waitFor(() => expect(document.querySelector("[data-1ma-bots-block]")).not.toBeNull());
+    expect(screen.queryByText("Marketer")).toBeNull();
+    bots = [];
+    await view.behavior.experimental_invalidateRpc(null, "1ma-bots");
+    await waitFor(() => expect(document.querySelector("[data-1ma-bots-block]")).toBeNull());
+    fail = true;
+    await view.behavior.experimental_invalidateRpc(null, "1ma-bots");
+    await screen.findByText(strings.unavailable);
+    expect(threadIdsInList()).toContain("thr_bot");
+    fail = false;
+    bots = [marketer()];
+    await view.behavior.experimental_invalidateRpc(null, "1ma-bots");
+    await waitFor(() => expect(screen.queryByText(strings.unavailable)).toBeNull());
+    expect(screen.queryByText("Marketer")).toBeNull();
   });
 
   it("draws nothing while it is not yet known whether there is a bot", async () => {
