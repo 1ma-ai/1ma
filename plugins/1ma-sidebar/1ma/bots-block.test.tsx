@@ -54,7 +54,7 @@ function marketer(hidden = false): SidebarBot {
 }
 
 function render(options: {
-  bots?: () => { bots: SidebarBot[] };
+  bots?: () => { bots: SidebarBot[] } | Promise<{ bots: SidebarBot[] }>;
   botsInstalled?: boolean;
   settings?: Record<string, boolean>;
   setPreference?: (input: unknown) => unknown;
@@ -121,6 +121,34 @@ describe("the bots block", () => {
     const bots = screen.getByText("Marketer");
     const plain = screen.getByText("Plain chat");
     expect(bots.compareDocumentPosition(plain) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("is not drawn until the first bot exists, and appears with it", async () => {
+    let bots: SidebarBot[] = [];
+    const view = render({ bots: () => ({ bots }) });
+    await screen.findByText("Creatives");
+    expect(document.querySelector("[data-1ma-bots-block]")).toBeNull();
+    expect(screen.queryByText(strings.title)).toBeNull();
+    expect(screen.queryByRole("button", { name: strings.newBot })).toBeNull();
+    bots = [marketer()];
+    await view.behavior.experimental_invalidateRpc(null, "1ma-bots");
+    await screen.findByText("Marketer");
+    expect(document.querySelector("[data-1ma-bots-block]")).not.toBeNull();
+    bots = [];
+    await view.behavior.experimental_invalidateRpc(null, "1ma-bots");
+    await waitFor(() => expect(document.querySelector("[data-1ma-bots-block]")).toBeNull());
+    expect(threadIdsInList()).toContain("thr_bot");
+  });
+
+  it("draws nothing while it is not yet known whether there is a bot", async () => {
+    render({ bots: () => new Promise<never>(() => undefined) });
+    await screen.findByText("Creatives");
+    expect(document.querySelector("[data-1ma-bots-block]")).toBeNull();
+  });
+
+  it("with only hidden bots it stays, so they can be shown again", async () => {
+    render({ bots: () => ({ bots: [marketer(true)] }) });
+    await screen.findByText(strings.hiddenBots(1));
   });
 
   it("without 1ma Bots the list is bb's own", async () => {
