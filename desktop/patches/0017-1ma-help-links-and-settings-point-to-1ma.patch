@@ -22,12 +22,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../plugin/PluginSidebarFooterItems.test.tsx  |  29 +-
  .../components/settings/ReleaseNotesPanel.tsx |   4 +-
  .../UpdatesSettingsSection.stories.tsx        |  29 +-
- .../settings/UpdatesSettingsSection.test.tsx  | 357 +++++++-----------
+ .../settings/UpdatesSettingsSection.test.tsx  | 375 +++++++-----------
  .../settings/UpdatesSettingsSection.tsx       |  71 +---
- .../settings/release-notes-model.test.ts      | 110 ++++++
- .../settings/release-notes-model.ts           |  42 ++-
+ .../settings/release-notes-model.test.ts      | 110 +++++
+ .../settings/release-notes-model.ts           |  42 +-
  .../src/components/settings/release-notes.ts  |  12 +-
- .../components/settings/settings-nav.test.ts  |  21 ++
+ .../components/settings/settings-nav.test.ts  |  21 +
  .../src/components/settings/settings-nav.tsx  |  10 +-
  .../settings/settings-search-anchors.test.tsx |   5 +-
  .../settings/settings-search.test.ts          |   9 +
@@ -37,7 +37,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../sidebar/sidebarFooterPreferences.ts       |   9 +-
  apps/desktop/src/menu.ts                      |   3 +-
  apps/desktop/test/menu.test.ts                |  19 +-
- 18 files changed, 393 insertions(+), 365 deletions(-)
+ 18 files changed, 411 insertions(+), 365 deletions(-)
 
 diff --git a/apps/app/src/components/plugin/PluginSidebarFooterItems.test.tsx b/apps/app/src/components/plugin/PluginSidebarFooterItems.test.tsx
 index 37080be..fe9cdc0 100644
@@ -216,7 +216,7 @@ index e84bbe9..0f9dee9 100644
              </BbUpdatesCard>
            </div>
 diff --git a/apps/app/src/components/settings/UpdatesSettingsSection.test.tsx b/apps/app/src/components/settings/UpdatesSettingsSection.test.tsx
-index ea4f093..f3a9578 100644
+index ea4f093..233c6f7 100644
 --- a/apps/app/src/components/settings/UpdatesSettingsSection.test.tsx
 +++ b/apps/app/src/components/settings/UpdatesSettingsSection.test.tsx
 @@ -525,18 +525,11 @@ describe("UpdatesSettingsSection", () => {
@@ -519,7 +519,25 @@ index ea4f093..f3a9578 100644
        it("offers no changelog when nothing is incoming", async () => {
          useSourceCheckout("0.48.0", null);
          renderSection();
-@@ -3015,25 +2834,59 @@ The published lede.
+@@ -3009,31 +2828,83 @@ The published lede.
+       return bbCard;
+     }
+ 
++    function updateRow(bbCard: HTMLElement, name: string): HTMLElement {
++      let row = within(bbCard).getByText(name).parentElement;
++      while (
++        row !== null &&
++        row.querySelector('[data-bb-update-role="app"]') === null
++      ) {
++        row = row.parentElement;
++      }
++      if (row === null) throw new Error(`expected the ${name} row`);
++      return row;
++    }
++
+     function notesButton(bbCard: HTMLElement, version: string): HTMLElement {
+       return within(bbCard).getByRole("button", {
+         name: `Changelog for bb ${version}`,
        });
      }
  
@@ -543,13 +561,19 @@ index ea4f093..f3a9578 100644
 +        }),
 +      );
 +      const bbCard = await renderBbCard();
++      const serverRow = updateRow(bbCard, "Server");
++      const desktopRow = updateRow(bbCard, "Desktop");
 +
 +      fireEvent.click(
-+        await within(bbCard).findByRole("button", {
++        await within(serverRow).findByRole("button", {
 +          name: "Changelog for bb 0.49.1-1ma.44995733961.1",
 +        }),
 +      );
-+      fireEvent.click(notesButton(bbCard, "0.49.1-1ma.45000000000.1"));
++      fireEvent.click(
++        within(desktopRow).getByRole("button", {
++          name: "Changelog for bb 0.49.1-1ma.45000000000.1",
++        }),
++      );
 +
 +      expect(openUrlInExternalBrowserMock.mock.calls).toEqual([
 +        [
@@ -589,7 +613,7 @@ index ea4f093..f3a9578 100644
        });
      });
  
-@@ -3074,6 +2927,58 @@ The published lede.
+@@ -3074,6 +2945,58 @@ The published lede.
      ).toBeNull();
    });
  
