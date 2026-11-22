@@ -266,14 +266,6 @@
       "reason": "CLI usage hint for the bb provider-retry command"
     },
     {
-      "text": "BB Community",
-      "reason": "bb's community plugin registry is a bb cloud service (phase 2)"
-    },
-    {
-      "text": "Plugins published to the BB registry and reviewed by the BB team.",
-      "reason": "describes bb's community registry and the bb team's review (phase 2)"
-    },
-    {
       "text": "bb exited with",
       "reason": "names the bb CLI process, which keeps its name until phase 3"
     },
@@ -303,6 +295,26 @@
     }
   ],
   "replace": [
+    {
+      "text": "BB Community",
+      "to": "bb Community",
+      "reason": "owner decision 2026-11-16 (rebrand stage 2): bb's community registry stays in the store, named for what it is, a bb registry 1ma does not run"
+    },
+    {
+      "text": "Plugins published to the BB registry and reviewed by the BB team.",
+      "to": "Plugins from the bb community registry. 1ma does not review them.",
+      "reason": "owner decision 2026-11-16 (rebrand stage 2): the store says plainly that this third-party catalog is not reviewed by 1ma"
+    },
+    {
+      "text": "bb connect is turned off on this server. Enable its plugin to get a private getbb.app address.",
+      "to": "1ma Connect is not available on this server yet. It will give this 1ma a private address that only you can open.",
+      "reason": "owner decision 2026-11-16 (rebrand stage 2): the onboarding Devices row stays and is renamed; bb connect is not shipped in 1ma, so there is no plugin to enable until 1ma Connect exists"
+    },
+    {
+      "text": "bb connect gives this bb a private getbb.app address that only you can open.",
+      "to": "1ma Connect gives this 1ma a private address that only you can open.",
+      "reason": "owner decision 2026-11-16 (rebrand stage 2): the onboarding Devices row stays and is renamed for 1ma Connect"
+    },
     {
       "text": "Written by bb: runs the bb command of the bb installed on this computer.",
       "to": "Written by 1ma: runs the bb command of the 1ma installed on this computer.",
@@ -418,42 +430,6 @@
       "find": "expect(entry?.author).toEqual({ name: \"BB\" });",
       "replace": "expect(entry?.author).toEqual({ name: \"1ma\" });",
       "reason": "the generator names 1ma as the author of the built-in plugins; a two-letter name does not follow the source automatically"
-    },
-    {
-      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
-      "find": "name: `bb ${version} changelog`,",
-      "replace": "name: `1ma ${version} changelog`,",
-      "reason": "the release notes panel names the product and its version (1ma 0.47.0); bb followed by a version in a test cannot be told from a command line, so it does not follow the source"
-    },
-    {
-      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
-      "find": "name: \"bb 0.47.0 changelog\",",
-      "replace": "name: \"1ma 0.47.0 changelog\",",
-      "reason": "the release notes panel names the product and its version (1ma 0.47.0); bb followed by a version in a test cannot be told from a command line, so it does not follow the source"
-    },
-    {
-      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
-      "find": "\"bb 0.48.0 · October 28, 2026\"",
-      "replace": "\"1ma 0.48.0 · October 28, 2026\"",
-      "reason": "the release notes panel names the product and its version (1ma 0.47.0); bb followed by a version in a test cannot be told from a command line, so it does not follow the source"
-    },
-    {
-      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
-      "find": "\"bb 0.47.0 · October 23, 2026\"",
-      "replace": "\"1ma 0.47.0 · October 23, 2026\"",
-      "reason": "the release notes panel names the product and its version (1ma 0.47.0); bb followed by a version in a test cannot be told from a command line, so it does not follow the source"
-    },
-    {
-      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
-      "find": "\"bb 0.0.5 · January 2, 2026\"",
-      "replace": "\"1ma 0.0.5 · January 2, 2026\"",
-      "reason": "the release notes panel names the product and its version (1ma 0.47.0); bb followed by a version in a test cannot be told from a command line, so it does not follow the source"
-    },
-    {
-      "file": "apps/app/src/components/settings/UpdatesSettingsSection.test.tsx",
-      "find": "name: \"What's new in bb 0.0.5\"",
-      "replace": "name: \"What's new in 1ma 0.0.5\"",
-      "reason": "the heading of the release notes; the source is JSX text with &apos;, which a test spells as an apostrophe"
     },
     {
       "file": "apps/app/src/components/promptbox/banner/QueuedMessagesList.test.tsx",
