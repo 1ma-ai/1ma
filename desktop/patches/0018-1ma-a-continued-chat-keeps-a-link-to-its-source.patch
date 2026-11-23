@@ -1,0 +1,182 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Mon, 23 Nov 2026 09:54:17 +0100
+Subject: [PATCH] 1ma: a continued chat keeps a link to its source
+
+"Continue in new chat" (the composer handoff) now sends the source thread's
+id with the create request, so the new thread is stored with
+sourceThreadId set and originKind null. Before, the request carried no
+source at all: the only trace was a mention of the source thread in the
+draft text, which the user can edit away, so plugins could not tell a
+continuation from an unrelated new chat (1ma bots need this to keep the
+continuation with the same bot).
+
+Nothing is copied: history, provider session, title, attachments and the
+fork point stay gated on originKind "fork". Parent, visibility and sidebar
+placement do not change, and environment resolution ignores the source,
+as it did before.
+
+The server no longer rejects sourceThreadId without an originKind; the
+source is still validated the same way (same project, not archived, not
+deleted). The plugin SDK documents sourceThreadId with a null originKind as
+"continued from".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/services/threads/thread-create.ts     | 11 +---
+ .../thread-create-seed-without-run.test.ts    | 55 +++++++++++++++++++
+ .../src/prompt/thread-handoff-request.ts      |  1 +
+ .../test/thread-handoff-request.test.ts       | 12 ++++
+ packages/plugin-sdk/src/app-contract.ts       |  5 +-
+ 5 files changed, 75 insertions(+), 9 deletions(-)
+
+diff --git a/apps/server/src/services/threads/thread-create.ts b/apps/server/src/services/threads/thread-create.ts
+index 6208083..43faa47 100644
+--- a/apps/server/src/services/threads/thread-create.ts
++++ b/apps/server/src/services/threads/thread-create.ts
+@@ -608,13 +608,6 @@ export async function createThreadFromRequest(
+         parentThreadId: hierarchyParentThreadId,
+       })
+     : null;
+-  if (originKind === null && sourceThreadId !== undefined) {
+-    throw new ApiError(
+-      400,
+-      "invalid_request",
+-      "sourceThreadId requires an originKind",
+-    );
+-  }
+   if (originKind === null && requestInput.sourceSeqEnd !== undefined) {
+     throw new ApiError(
+       400,
+@@ -699,7 +692,9 @@ export async function createThreadFromRequest(
+     parentThread:
+       forkSourceEnvironmentId !== undefined
+         ? null
+-        : (sourceThread ?? parentThread),
++        : originKind === null
++          ? parentThread
++          : (sourceThread ?? parentThread),
+     projectId: requestInput.projectId,
+     requestedEnvironment: requestInput.environment,
+   });
+diff --git a/apps/server/test/threads/thread-create-seed-without-run.test.ts b/apps/server/test/threads/thread-create-seed-without-run.test.ts
+index 7b59c11..c76dcd9 100644
+--- a/apps/server/test/threads/thread-create-seed-without-run.test.ts
++++ b/apps/server/test/threads/thread-create-seed-without-run.test.ts
+@@ -541,6 +541,61 @@ describe("thread creation child-thread boundary validation", () => {
+     );
+   });
+ 
++  it("records the source of a continued thread without forking it", async () => {
++    await withChildBoundaryHarness(
++      "continued-thread-source",
++      async ({ harness, hostId, path, projectId, sourceThreadId }) => {
++        seedThreadRuntimeState(harness.deps, {
++          environmentId:
++            getThread(harness.db, sourceThreadId)?.environmentId ?? null,
++          permissionMode: "auto",
++          inputText: "Source question",
++          model: "gpt-5",
++          reasoningLevel: "medium",
++          serviceTier: "default",
++          threadId: sourceThreadId,
++          providerThreadId: "provider-source-session",
++        });
++
++        const continued = await createThreadFromRequest(harness.deps, {
++          environment: {
++            type: "host",
++            hostId,
++            workspace: { type: "unmanaged", path },
++          },
++          input: textInput("Rewritten follow-up"),
++          origin: "app",
++          projectId,
++          providerId: "codex",
++          sourceThreadId,
++          startedOnBehalfOf: null,
++        });
++
++        expect(getThread(harness.db, continued.id)).toMatchObject({
++          sourceThreadId,
++          originKind: null,
++          parentThreadId: null,
++          visibility: "visible",
++        });
++        const queuedStart = await waitForQueuedCommand(
++          harness,
++          ({ command }) =>
++            command.type === "thread.start" &&
++            command.threadId === continued.id,
++        );
++        if (queuedStart.command.type !== "thread.start") {
++          throw new Error("Expected a thread.start command");
++        }
++        expect(queuedStart.command).not.toHaveProperty("fork");
++        expect(
++          listEvents(harness.db, { threadId: continued.id }).filter(
++            (event) => event.type === "client/turn/requested",
++          ),
++        ).toHaveLength(1);
++      },
++    );
++  });
++
+   it("rejects startedOnBehalfOf without an originKind", async () => {
+     await withChildBoundaryHarness(
+       "started-on-behalf-no-origin",
+diff --git a/packages/client-core/src/prompt/thread-handoff-request.ts b/packages/client-core/src/prompt/thread-handoff-request.ts
+index 079b4f6..929b78f 100644
+--- a/packages/client-core/src/prompt/thread-handoff-request.ts
++++ b/packages/client-core/src/prompt/thread-handoff-request.ts
+@@ -160,6 +160,7 @@ export function buildThreadHandoffCreateRequest({
+       ? { serviceTier: execution.serviceTier }
+       : {}),
+     ...(sendAt === undefined ? {} : { sendAt }),
++    sourceThreadId: seed.sourceThreadId,
+     startedOnBehalfOf: null,
+   };
+ }
+diff --git a/packages/client-core/test/thread-handoff-request.test.ts b/packages/client-core/test/thread-handoff-request.test.ts
+index f335354..cc5bd9b 100644
+--- a/packages/client-core/test/thread-handoff-request.test.ts
++++ b/packages/client-core/test/thread-handoff-request.test.ts
+@@ -188,10 +188,22 @@ describe("buildThreadHandoffCreateRequest", () => {
+       providerId: "claude-code",
+       reasoningLevel: "high",
+       serviceTier: "fast",
++      sourceThreadId: "thr_source",
+       startedOnBehalfOf: null,
+     });
+   });
+ 
++  it("names the source thread even when the draft no longer mentions it", () => {
++    const request = buildThreadHandoffCreateRequest({
++      draft: { text: "Rewritten from scratch", mentions: [], attachments: [] },
++      execution: EXECUTION,
++      seed: SEED,
++    });
++
++    expect(request?.sourceThreadId).toBe("thr_source");
++    expect(request).not.toHaveProperty("originKind");
++  });
++
+   it("falls back to the project default environment and drops unsupported service tiers", () => {
+     const request = buildThreadHandoffCreateRequest({
+       draft: { text: "Keep going", mentions: [], attachments: [] },
+diff --git a/packages/plugin-sdk/src/app-contract.ts b/packages/plugin-sdk/src/app-contract.ts
+index 543f65f..895221f 100644
+--- a/packages/plugin-sdk/src/app-contract.ts
++++ b/packages/plugin-sdk/src/app-contract.ts
+@@ -1399,7 +1399,10 @@ export interface PluginSidebarThread {
+    * "stuck" (failures, interruptions, and blockers), or "off".
+    */
+   parentNotifications: ThreadParentNotifications;
+-  /** The thread this one was forked from; null unless `originKind` is "fork". */
++  /**
++   * The thread this one was forked from ("fork") or, with a null `originKind`,
++   * continued from without copying its history; null when it has no source.
++   */
+   sourceThreadId: string | null;
+   sectionId: string | null;
+   /** How this thread came to exist under its parent; null for root threads. */
