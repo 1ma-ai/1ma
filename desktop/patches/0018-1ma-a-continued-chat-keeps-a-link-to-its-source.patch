@@ -26,8 +26,15 @@ source is still validated the same way (same project, not archived, not
 deleted). The plugin SDK documents sourceThreadId with a null originKind as
 "continued from".
 
+The thread banner loads the source only for a fork; a continuation shows no
+source banner, so it no longer fetches and subscribes to its source. The
+CLI help and the guide describe --source-thread without --origin-kind.
+
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
+ .../useParentThreadSection.test.ts            | 44 +++++++++++++++
+ .../thread-detail/useParentThreadSection.ts   |  4 +-
+ apps/cli/src/commands/thread/spawn.ts         |  5 +-
  .../src/services/threads/thread-create.ts     | 11 +---
  .../public/public-thread-parenting.test.ts    | 39 +++++++++++++
  .../thread-create-seed-without-run.test.ts    | 55 +++++++++++++++++++
@@ -35,10 +42,93 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../test/thread-handoff-request.test.ts       | 12 ++++
  packages/db/src/data/threads.ts               |  1 +
  packages/plugin-sdk/src/app-contract.ts       |  5 +-
+ .../src/templates/bb-guide-threads.md         |  2 +-
  plugins/storage-retention/src/policy.ts       |  9 ++-
  .../storage-retention/src/retention.test.ts   | 24 ++++++++
- 9 files changed, 146 insertions(+), 11 deletions(-)
+ 13 files changed, 198 insertions(+), 14 deletions(-)
+ create mode 100644 apps/app/src/views/thread-detail/useParentThreadSection.test.ts
 
+diff --git a/apps/app/src/views/thread-detail/useParentThreadSection.test.ts b/apps/app/src/views/thread-detail/useParentThreadSection.test.ts
+new file mode 100644
+index 0000000..c331617
+--- /dev/null
++++ b/apps/app/src/views/thread-detail/useParentThreadSection.test.ts
+@@ -0,0 +1,44 @@
++// @vitest-environment jsdom
++
++import { cleanup, renderHook } from "@testing-library/react";
++import { afterEach, expect, it, vi } from "vitest";
++import { useThread } from "@/hooks/queries/thread-queries";
++import { makeThreadResponse } from "@/test/fixtures/thread-responses";
++import { useParentThreadSection } from "./useParentThreadSection";
++
++vi.mock("@/hooks/queries/thread-queries", () => ({
++  useThread: vi.fn(() => ({ data: undefined })),
++}));
++
++afterEach(() => {
++  cleanup();
++  vi.clearAllMocks();
++});
++
++it("does not load the source of a continued chat, which shows no banner", () => {
++  const thread = makeThreadResponse({
++    id: "thr_continuation",
++    originKind: null,
++    parentThreadId: null,
++    sourceThreadId: "thr_source",
++  });
++
++  const { result } = renderHook(() => useParentThreadSection(thread, true));
++
++  expect(result.current).toBeNull();
++  expect(useThread).not.toHaveBeenCalledWith("thr_source");
++});
++
++it("loads the source of a fork for its banner", () => {
++  const thread = makeThreadResponse({
++    id: "thr_fork",
++    originKind: "fork",
++    parentThreadId: null,
++    sourceThreadId: "thr_source",
++  });
++
++  const { result } = renderHook(() => useParentThreadSection(thread, true));
++
++  expect(result.current?.relationship).toBe("fork");
++  expect(useThread).toHaveBeenCalledWith("thr_source");
++});
+diff --git a/apps/app/src/views/thread-detail/useParentThreadSection.ts b/apps/app/src/views/thread-detail/useParentThreadSection.ts
+index 49b1334..d965a5a 100644
+--- a/apps/app/src/views/thread-detail/useParentThreadSection.ts
++++ b/apps/app/src/views/thread-detail/useParentThreadSection.ts
+@@ -11,7 +11,9 @@ export function useParentThreadSection(
+ ): ThreadPromptParentThreadSection | null {
+   const threadOriginKind = thread.originKind;
+   const threadSourceThreadId =
+-    thread.sourceThreadId ?? (threadOriginKind ? thread.parentThreadId : null);
++    threadOriginKind === "fork"
++      ? (thread.sourceThreadId ?? thread.parentThreadId)
++      : null;
+   const { data: parentThread } = useThread(
+     enabled ? (thread.parentThreadId ?? "") : "",
+   );
+diff --git a/apps/cli/src/commands/thread/spawn.ts b/apps/cli/src/commands/thread/spawn.ts
+index 2e79e6f..cbae380 100644
+--- a/apps/cli/src/commands/thread/spawn.ts
++++ b/apps/cli/src/commands/thread/spawn.ts
+@@ -414,7 +414,10 @@ export function registerSpawnCommand(
+     )
+     .option("--send-at <when>", SEND_AT_HELP)
+     .option("--origin-kind <kind>", "Thread origin: fork")
+-    .option("--source-thread <id>", "Source thread for a fork")
++    .option(
++      "--source-thread <id>",
++      "Source thread: a fork copies it; without --origin-kind the new thread continues it",
++    )
+     .option(
+       "--source-seq-end <seq>",
+       "Fork after the source turn containing this event sequence",
 diff --git a/apps/server/src/services/threads/thread-create.ts b/apps/server/src/services/threads/thread-create.ts
 index 6208083..43faa47 100644
 --- a/apps/server/src/services/threads/thread-create.ts
@@ -251,6 +341,19 @@ index 543f65f..895221f 100644
    sourceThreadId: string | null;
    sectionId: string | null;
    /** How this thread came to exist under its parent; null for root threads. */
+diff --git a/packages/templates/src/templates/bb-guide-threads.md b/packages/templates/src/templates/bb-guide-threads.md
+index d7b21ff..2faf0df 100644
+--- a/packages/templates/src/templates/bb-guide-threads.md
++++ b/packages/templates/src/templates/bb-guide-threads.md
+@@ -75,7 +75,7 @@ Spawning:
+     --file <path>                  CLI-local absolute path, file: URL, or uploaded file path
+     --image <path>                 CLI-local absolute path, file: URL, or uploaded image path
+     --origin-kind <kind>           Create a fork thread
+-    --source-thread <id>           Source thread for a fork
++    --source-thread <id>           Source thread: a fork copies it; without --origin-kind the new thread continues it
+     --source-seq-end <seq>         Fork after the source turn containing this event sequence
+ 
+   Execution defaults resolve from explicit flags, live parent execution, and
 diff --git a/plugins/storage-retention/src/policy.ts b/plugins/storage-retention/src/policy.ts
 index fc29969..5c8e0f4 100644
 --- a/plugins/storage-retention/src/policy.ts
