@@ -521,9 +521,14 @@ describe("1ma-sidebar with the bots block", () => {
     const first = stubRecords().find(
       (entry) => entry.kind === "prompt" && entry.text.includes("[stub:reply revised]"),
     );
-    assert.ok(
-      first?.text.includes("Use short sentences."),
-      "the fork's first turn has the bot instructions",
+    assert.ok(first, "the agent received the fork's first message");
+    await waitFor("bot_read in the fork's first session", 60 * SECOND, async () =>
+      stubRecords().some(
+        (entry) =>
+          entry.kind === "tools" &&
+          entry.sessionId === first.sessionId &&
+          entry.tools?.includes("bot_read"),
+      ),
     );
     const { context, page } = await openApp(browser, "light");
     try {
