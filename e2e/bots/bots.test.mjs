@@ -539,7 +539,10 @@ describe("1ma-sidebar with the bots block", () => {
       await preview.click();
       const dialog = page.getByRole("dialog", { name: "Instructions from Editor" });
       await dialog.getByText("Use short sentences.", { exact: false }).waitFor();
-      await screenshot(page, "continuation-bot-instructions");
+      await page.screenshot({
+        path: `${screenshotDir}/continuation-bot-instructions.png`,
+        animations: "disabled",
+      });
       await page.keyboard.press("Escape");
       await page.getByRole("button", { name: "Editor", exact: true }).click();
       await page.getByRole("menuitem", { name: "No bot" }).click();

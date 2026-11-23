@@ -384,7 +384,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     if (
       thread.sourceThreadId === null ||
       thread.visibility !== "visible" ||
-      thread.originPluginId === bb.pluginId
+      (thread.originKind === "fork" && thread.originPluginId === bb.pluginId)
     )
       return;
     if (store.bindContinuation(thread.id, thread.sourceThreadId, false)) changed();

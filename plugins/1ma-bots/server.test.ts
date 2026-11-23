@@ -281,21 +281,22 @@ describe("an old conversation bound to a bot", () => {
     });
   });
 
-  it.each(["native fork", "bot action", "configure during fork"] as const)(
+  it.each(["native fork", "native handoff", "bot action", "configure during fork"] as const)(
     "%s puts the continuation immediately before its reopened source",
     async (path) => {
       const t = setup();
       const bot = await t.create("Marketer");
       for (const id of ["thr_first", "thr_source", "thr_last"]) await t.assign(id, bot.id);
       await t.rpc("bots.v1.setCompleted", { threadId: "thr_source", completed: true });
-      const fromBot = path !== "native fork";
-      const fork = makeThreadResponse({
-        id: "thr_fork",
+      const fromBot = path === "bot action" || path === "configure during fork";
+      const continuation = makeThreadResponse({
+        id: "thr_continued",
         sourceThreadId: "thr_source",
-        originKind: "fork",
+        originKind: path === "native handoff" ? null : "fork",
         originPluginId: fromBot ? "1ma-bots" : null,
       });
-      const created = () => t.harness.behavior.emitThreadEvent("thread.created", { thread: fork });
+      const created = () =>
+        t.harness.behavior.emitThreadEvent("thread.created", { thread: continuation });
       if (fromBot) {
         t.harness.sdk.stub(
           "threads.fork",
@@ -303,11 +304,11 @@ describe("an old conversation bound to a bot", () => {
             await created();
             if (path === "configure during fork") {
               const config = await t.harness.behavior.resolveAgentConfiguration(
-                makePluginAgentConfigurationContext({ thread: fork, pluginMetadata }),
+                makePluginAgentConfigurationContext({ thread: continuation, pluginMetadata }),
               );
               expect(config.instructions).toContain("Marketer");
             }
-            return fork;
+            return continuation;
           },
         );
         await t.rpc("bots.v1.continueInBot", { threadId: "thr_source" });
@@ -317,23 +318,38 @@ describe("an old conversation bound to a bot", () => {
       const [listed] = (await t.list()).bots;
       expect(listed!.threads.map((row) => row.threadId)).toEqual([
         "thr_first",
-        "thr_fork",
+        "thr_continued",
         "thr_source",
         "thr_last",
       ]);
       expect(listed!.threads[1]).toMatchObject({ startedFromBot: fromBot, completed: false });
       expect(listed!.threads[2]!.completed).toBe(false);
-      expect((await t.configure(fork.id)).instructions).toContain("Marketer");
-      await t.assign(fork.id, null);
+      expect((await t.configure(continuation.id)).instructions).toContain("Marketer");
+      await t.assign(continuation.id, null);
       expect(
         (
           await t.harness.behavior.resolveAgentConfiguration(
-            makePluginAgentConfigurationContext({ thread: fork }),
+            makePluginAgentConfigurationContext({ thread: continuation }),
           )
         ).instructions,
       ).toBeNull();
     },
   );
+
+  it("keeps a hidden side chat out of its source bot", async () => {
+    const t = setup();
+    const bot = await t.create("Editor");
+    await t.assign("thr_source", bot.id);
+    const thread = makeThreadResponse({
+      id: "thr_side",
+      sourceThreadId: "thr_source",
+      originKind: "fork",
+      originPluginId: "side-chat",
+      visibility: "hidden",
+    });
+    await t.harness.behavior.emitThreadEvent("thread.created", { thread });
+    expect(await t.rpc("bots.v1.forThread", { threadId: thread.id })).toBeNull();
+  });
 
   it("an unbound conversation gets nothing", async () => {
     const t = setup();
