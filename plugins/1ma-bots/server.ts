@@ -3,6 +3,7 @@ import {
   defineCli,
   type BbPluginApi,
   type ExperimentalPluginRpcHandlerContext,
+  type MessageDispatchHookContext,
   type PluginAgentConfigurationContext,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -106,12 +107,13 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   const botOf = (
     threadId: string,
     metadata?: PluginAgentConfigurationContext["pluginMetadata"],
+    sourceThreadId: string | null = null,
   ) => {
     const bound = store.botOfThread(threadId);
     if (bound !== null) return bound;
     const token = metadata ? startToken(metadata) : null;
     if (token === null) return null;
-    const claimed = store.claimPendingStart(threadId, token);
+    const claimed = store.claimPendingStart(threadId, token, sourceThreadId);
     if (claimed !== null) changed();
     return claimed;
   };
@@ -130,7 +132,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   };
 
   bb.agents.configure((ctx) => {
-    const botId = botOf(ctx.thread.id, ctx.pluginMetadata);
+    const botId = botOf(ctx.thread.id, ctx.pluginMetadata, ctx.thread.sourceThreadId);
     const bot = botId === null ? null : store.find(botId);
     if (bot === null) return { tools: [], skills: [] };
     return {
@@ -379,6 +381,26 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       block.type === "text" && block.text !== undefined ? [block.text] : [],
     );
 
+  const inheritBot = (thread: MessageDispatchHookContext["thread"]) => {
+    if (
+      thread.sourceThreadId === null ||
+      thread.visibility !== "visible" ||
+      (thread.originKind === "fork" && thread.originPluginId === bb.pluginId)
+    )
+      return;
+    if (store.bindContinuation(thread.id, thread.sourceThreadId, false)) changed();
+  };
+  bb.events.on("thread.created", ({ thread }) => inheritBot(thread));
+  bb.experimental_hooks.on("message.dispatch", ({ thread }) => {
+    try {
+      if (thread.status === "pending") inheritBot(thread);
+    } catch (error) {
+      bb.log.warn(
+        `Could not apply bot assignment before dispatch for ${thread.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return { action: "proceed" };
+  });
   bb.events.on("message.dispatched", ({ entry }) =>
     accepted({ threadId: entry.threadId, texts: textsOf(entry.content) }),
   );
@@ -449,12 +471,16 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     }
   };
 
-  const startIn = async (botId: string, create: (token: string) => Promise<{ id: string }>) => {
+  const startIn = async (
+    botId: string,
+    create: (token: string) => Promise<{ id: string }>,
+    sourceThreadId: string | null = null,
+  ) => {
     // A failed create keeps its token: the thread may exist anyway, and its
     // first configure still claims it. Old tokens expire in addPendingStart.
     const token = store.addPendingStart(botId);
     const thread = await create(token);
-    store.claimPendingStart(thread.id, token);
+    store.claimPendingStart(thread.id, token, sourceThreadId);
     changed();
     return { threadId: thread.id };
   };
@@ -515,28 +541,28 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         store.get(botId);
         await requireAssignable(threadId);
       }
-      const previous = store.botOfThread(threadId);
-      if (botId === null) {
-        store.unbind(threadId);
-        if (previous !== null) {
-          store.record({
-            botId: previous,
-            kind: "thread.unassigned",
-            actor: actorOf(ctx),
-            detail: { threadId },
-          });
+      const startedFromBot = store.transaction(() => {
+        store.recordAssignmentDecision(threadId);
+        if (botId === null) {
+          const previous = store.botOfThread(threadId);
+          store.unbind(threadId);
+          if (previous !== null) {
+            store.record({
+              botId: previous,
+              kind: "thread.unassigned",
+              actor: actorOf(ctx),
+              detail: { threadId },
+            });
+          }
+          return false;
         }
-        changed();
-        return { botId: null, startedFromBot: false };
-      }
-      const current = store.threadInfo(threadId);
-      store.bind(threadId, botId, {
-        startedFromBot: current?.startedFromBot ?? false,
-        place: place ?? "last",
+        const startedFromBot = store.threadInfo(threadId)?.startedFromBot ?? false;
+        store.bind(threadId, botId, { startedFromBot, place: place ?? "last" });
+        store.record({ botId, kind: "thread.assigned", actor: actorOf(ctx), detail: { threadId } });
+        return startedFromBot;
       });
-      store.record({ botId, kind: "thread.assigned", actor: actorOf(ctx), detail: { threadId } });
       changed();
-      return { botId, startedFromBot: current?.startedFromBot ?? false };
+      return { botId, startedFromBot };
     },
     "bots.v1.reorderThreads": ({ botId, threadIds }) => {
       store.reorderThreads(botId, threadIds);
@@ -578,8 +604,14 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     "bots.v1.continueInBot": async ({ threadId }) => {
       const botId = store.botOfThread(threadId);
       if (botId === null) throw new BotsError("not_found", agentText.notABot);
-      return startIn(botId, (token) =>
-        bb.sdk.threads.fork({ sourceThreadId: threadId, pluginMetadata: { [START_TOKEN]: token } }),
+      return startIn(
+        botId,
+        (token) =>
+          bb.sdk.threads.fork({
+            sourceThreadId: threadId,
+            pluginMetadata: { [START_TOKEN]: token },
+          }),
+        threadId,
       );
     },
   });

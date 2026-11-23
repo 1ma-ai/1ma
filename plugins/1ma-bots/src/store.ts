@@ -85,6 +85,8 @@ export const MIGRATIONS = [
     created_at INTEGER NOT NULL
   );`,
   `ALTER TABLE thread_chains ADD COLUMN owner_turn INTEGER`,
+  `CREATE TABLE thread_assignment_decisions (thread_id TEXT PRIMARY KEY);
+   INSERT INTO thread_assignment_decisions SELECT thread_id FROM bot_threads;`,
 ];
 
 interface BotRow {
@@ -384,9 +386,36 @@ export class BotStore {
     })();
   }
 
+  recordAssignmentDecision(threadId: string): boolean {
+    return (
+      this.db
+        .prepare("INSERT OR IGNORE INTO thread_assignment_decisions (thread_id) VALUES (?)")
+        .run(threadId).changes > 0
+    );
+  }
+
+  bindContinuation(threadId: string, sourceThreadId: string, startedFromBot: boolean): boolean {
+    return this.transaction(() => {
+      const decided = this.db
+        .prepare("SELECT 1 FROM thread_assignment_decisions WHERE thread_id = ?")
+        .get(threadId);
+      if (decided) return false;
+      const botId = this.botOfThread(sourceThreadId);
+      if (botId === null) return false;
+      this.recordAssignmentDecision(threadId);
+      const order = this.threadsOf(botId).map((thread) => thread.threadId);
+      order.splice(order.indexOf(sourceThreadId), 0, threadId);
+      this.bind(threadId, botId, { startedFromBot, place: "last" });
+      this.reorderThreads(botId, order);
+      this.setCompleted(sourceThreadId, false);
+      return true;
+    });
+  }
+
   forgetThread(threadId: string): void {
     this.transaction(() => {
       this.unbind(threadId);
+      this.recordAssignmentDecision(threadId);
       this.db.prepare("DELETE FROM thread_chains WHERE thread_id = ?").run(threadId);
       this.db.prepare("DELETE FROM pending_letters WHERE to_thread = ?").run(threadId);
     });
@@ -506,7 +535,7 @@ export class BotStore {
   }
 
   // Binds a thread created by startThread or continueInBot the first time it is seen.
-  claimPendingStart(threadId: string, token: string): string | null {
+  claimPendingStart(threadId: string, token: string, sourceThreadId: string | null): string | null {
     return this.transaction(() => {
       const pending = this.db
         .prepare<[string], { bot_id: string }>("SELECT bot_id FROM pending_starts WHERE token = ?")
@@ -514,7 +543,11 @@ export class BotStore {
       if (!pending || !this.row(pending.bot_id)) return null;
       this.dropPendingStart(token);
       if (this.botOfThread(threadId) === null) {
-        this.bind(threadId, pending.bot_id, { startedFromBot: true, place: "after-first" });
+        if (sourceThreadId !== null && this.botOfThread(sourceThreadId) === pending.bot_id) {
+          this.bindContinuation(threadId, sourceThreadId, true);
+        } else if (this.recordAssignmentDecision(threadId)) {
+          this.bind(threadId, pending.bot_id, { startedFromBot: true, place: "after-first" });
+        }
       }
       return this.botOfThread(threadId);
     });

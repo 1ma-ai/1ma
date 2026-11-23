@@ -22,7 +22,14 @@ export const pluginDirs = {
 };
 
 export const fleet = new Fleet({ root, packageDir: path.join(scratch, "server-package") });
-export const server = fleet.add("bots");
+// bb's custom ACP agents have no fork support. Exercise its fork-capable omp
+// registration against the same offline agent used for ordinary conversations.
+export const server = fleet.add("bots", {
+  env: {
+    PATH: `${path.join(import.meta.dirname, "bin")}${path.delimiter}${process.env.PATH}`,
+    E2E_STUB_LOG: stubLog,
+  },
+});
 export const projects = {};
 
 export function stubRecords() {

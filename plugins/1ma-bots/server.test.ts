@@ -170,6 +170,7 @@ function setup(settings: Record<string, number> = {}) {
       }>;
     }>("bots.v1.list");
   return {
+    bb: host.bb,
     recordTurn,
     attempt,
     settle,
@@ -281,11 +282,260 @@ describe("an old conversation bound to a bot", () => {
     });
   });
 
+  it.each(["native fork", "native handoff", "bot action", "configure during fork"] as const)(
+    "%s puts the continuation immediately before its reopened source",
+    async (path) => {
+      const t = setup();
+      const bot = await t.create("Marketer");
+      for (const id of ["thr_first", "thr_source", "thr_last"]) await t.assign(id, bot.id);
+      await t.rpc("bots.v1.setCompleted", { threadId: "thr_source", completed: true });
+      const fromBot = path === "bot action" || path === "configure during fork";
+      const continuation = makeThreadResponse({
+        id: "thr_continued",
+        sourceThreadId: "thr_source",
+        originKind: path === "native handoff" ? null : "fork",
+        originPluginId: fromBot ? "1ma-bots" : null,
+      });
+      const created = () =>
+        t.harness.behavior.emitThreadEvent("thread.created", { thread: continuation });
+      if (fromBot) {
+        t.harness.sdk.stub(
+          "threads.fork",
+          async ({ pluginMetadata }: { pluginMetadata: Record<string, string> }) => {
+            await created();
+            if (path === "configure during fork") {
+              const config = await t.harness.behavior.resolveAgentConfiguration(
+                makePluginAgentConfigurationContext({ thread: continuation, pluginMetadata }),
+              );
+              expect(config.instructions).toContain("Marketer");
+            }
+            return continuation;
+          },
+        );
+        await t.rpc("bots.v1.continueInBot", { threadId: "thr_source" });
+      } else {
+        await created();
+      }
+      const [listed] = (await t.list()).bots;
+      expect(listed!.threads.map((row) => row.threadId)).toEqual([
+        "thr_first",
+        "thr_continued",
+        "thr_source",
+        "thr_last",
+      ]);
+      expect(listed!.threads[1]).toMatchObject({ startedFromBot: fromBot, completed: false });
+      expect(listed!.threads[2]!.completed).toBe(false);
+      expect((await t.configure(continuation.id)).instructions).toContain("Marketer");
+      await t.assign(continuation.id, null);
+      expect(
+        (
+          await t.harness.behavior.resolveAgentConfiguration(
+            makePluginAgentConfigurationContext({ thread: continuation }),
+          )
+        ).instructions,
+      ).toBeNull();
+    },
+  );
+
+  it.each([
+    ["fork", "late"],
+    [null, "late"],
+    ["fork", "lost"],
+    [null, "lost"],
+  ] as const)(
+    "configures the first turn when origin is %s and creation is %s",
+    async (originKind, delivery) => {
+      const t = setup();
+      const bot = await t.create("Editor", { instructions: "Follow the glossary." });
+      await t.assign("thr_source", bot.id);
+      const thread = makeThreadResponse({
+        id: "thr_new",
+        status: "pending",
+        sourceThreadId: "thr_source",
+        originKind,
+      });
+      await t.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({ thread }),
+      );
+      const harness =
+        delivery === "lost" ? (await t.harness.lifecycle.reload(botsPlugin)).harness : t.harness;
+      const first = await harness.behavior.resolveAgentConfiguration(
+        makePluginAgentConfigurationContext({ thread }),
+      );
+      if (delivery === "late") await harness.behavior.emitThreadEvent("thread.created", { thread });
+      expect(first.instructions).toContain("Follow the glossary.");
+      expect(first.tools.map((tool) => tool.name)).toContain("bot_read");
+    },
+  );
+
+  it.each(["first dispatch", "replayed creation", "late creation"])(
+    "keeps No bot through %s",
+    async (delivery) => {
+      const t = setup();
+      const bot = await t.create("Editor");
+      await t.assign("thr_source", bot.id);
+      const thread = makeThreadResponse({
+        id: "thr_new",
+        status: "pending",
+        sourceThreadId: "thr_source",
+      });
+      if (delivery !== "late creation")
+        await t.harness.behavior.emitThreadEvent("thread.created", { thread });
+      await t.assign(thread.id, null);
+      await t.rpc("bots.v1.setCompleted", { threadId: "thr_source", completed: true });
+      const { harness } = await t.harness.lifecycle.reload(botsPlugin);
+      if (delivery === "first dispatch") {
+        await harness.registrations.hooks["message.dispatch"]!(
+          makeMessageDispatchHookContext({ thread }),
+        );
+      } else {
+        await harness.behavior.emitThreadEvent("thread.created", { thread });
+      }
+      expect(
+        await harness.behavior.callRpc("bots.v1.forThread", { threadId: thread.id }),
+      ).toBeNull();
+      expect(await harness.behavior.callRpc("bots.v1.list", {})).toMatchObject({
+        bots: [{ threads: [{ threadId: "thr_source", completed: true }] }],
+      });
+    },
+  );
+
+  it.each([
+    {
+      name: "an already started fork",
+      status: "idle",
+      visibility: "visible",
+      sourceThreadId: "thr_source",
+    },
+    {
+      name: "a hidden side chat",
+      status: "pending",
+      visibility: "hidden",
+      sourceThreadId: "thr_source",
+    },
+    {
+      name: "a new chat without a source",
+      status: "pending",
+      visibility: "visible",
+      sourceThreadId: null,
+    },
+  ] as const)(
+    "keeps $name out of the bot on dispatch",
+    async ({ status, visibility, sourceThreadId }) => {
+      const t = setup();
+      const bot = await t.create("Editor");
+      await t.assign("thr_source", bot.id);
+      const thread = makeThreadResponse({
+        id: "thr_other",
+        status,
+        visibility,
+        sourceThreadId,
+        originKind: sourceThreadId ? "fork" : null,
+      });
+      if (status === "pending")
+        await t.harness.behavior.emitThreadEvent("thread.created", { thread });
+      const decision = await t.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({ thread }),
+      );
+      expect(decision).toEqual({ action: "proceed" });
+      expect(await t.rpc("bots.v1.forThread", { threadId: thread.id })).toBeNull();
+    },
+  );
+
   it("an unbound conversation gets nothing", async () => {
     const t = setup();
     await t.create("Marketer");
     expect(await t.configure("thr_free")).toMatchObject({ tools: [], instructions: null });
   });
+});
+
+describe("pending bot continuations", () => {
+  const thread = makeThreadResponse({
+    id: "thr_target",
+    status: "pending",
+    sourceThreadId: "thr_source",
+    originKind: null,
+  });
+  const text = "A private draft for the editor";
+  const dispatch = (t: ReturnType<typeof setup>) =>
+    t.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({ thread, input: { text } }),
+    );
+
+  it.each([false, true])(
+    "inherits a late source assignment unless explicitly detached (detached: %s)",
+    async (detach) => {
+      const t = setup();
+      const bot = await t.create("Editor", { instructions: "Follow the glossary." });
+      await t.harness.behavior.emitThreadEvent("thread.created", { thread });
+      await dispatch(t);
+      if (detach) await t.assign(thread.id, null);
+      await t.assign("thr_source", bot.id);
+      await t.rpc("bots.v1.setCompleted", { threadId: "thr_source", completed: true });
+      await dispatch(t);
+      const first = await t.configure(thread.id);
+      if (detach) {
+        expect(first).toMatchObject({ instructions: null, tools: [] });
+        expect((await t.list()).bots[0]!.threads).toMatchObject([
+          { threadId: "thr_source", completed: true },
+        ]);
+      } else {
+        expect(first.instructions).toContain("Follow the glossary.");
+        expect(first.tools.map((tool) => tool.name)).toContain("bot_read");
+        expect((await t.list()).bots[0]!.threads).toMatchObject([
+          { threadId: thread.id },
+          { threadId: "thr_source", completed: false },
+        ]);
+      }
+    },
+  );
+
+  it("lets a message proceed when the bot database is read-only", async () => {
+    const t = setup();
+    const bot = await t.create("Editor");
+    await t.assign("thr_source", bot.id);
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_source", completed: true });
+    const db = t.bb.storage.database();
+    db.pragma("query_only = ON");
+    try {
+      expect(await dispatch(t)).toEqual({ action: "proceed" });
+    } finally {
+      db.pragma("query_only = OFF");
+    }
+    const warnings = t.harness.inspection.logEntries.filter((entry) => entry.level === "warn");
+    expect(warnings.map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`${thread.id}: attempt to write a readonly database`),
+    );
+    expect(JSON.stringify(warnings)).not.toContain(text);
+    expect((await t.list()).bots[0]!.threads).toMatchObject([
+      { threadId: "thr_source", completed: true },
+    ]);
+    await dispatch(t);
+    expect((await t.list()).bots[0]!.threads).toMatchObject([
+      { threadId: thread.id },
+      { threadId: "thr_source", completed: false },
+    ]);
+  });
+
+  it.each(["dispatch", "creation"])(
+    "keeps a deleted handoff out after a stale %s",
+    async (delivery) => {
+      const t = setup();
+      const bot = await t.create("Editor");
+      await t.assign("thr_source", bot.id);
+      if (delivery === "creation")
+        await t.harness.behavior.emitThreadEvent("thread.created", { thread });
+      await t.harness.behavior.emitThreadEvent("thread.deleted", {
+        thread: { ...thread, deletedAt: START },
+      });
+      await t.rpc("bots.v1.setCompleted", { threadId: "thr_source", completed: true });
+      if (delivery === "dispatch") await dispatch(t);
+      else await t.harness.behavior.emitThreadEvent("thread.created", { thread });
+      expect((await t.list()).bots[0]!.threads).toMatchObject([
+        { threadId: "thr_source", completed: true },
+      ]);
+    },
+  );
 });
 
 describe("letters between bots", () => {
