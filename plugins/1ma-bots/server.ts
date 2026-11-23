@@ -126,6 +126,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     if (store.setCompleted(threadId, false)) changed();
   };
 
+  const showForWork = (threadId: string) => {
+    const botId = store.botOfThread(threadId);
+    if (botId !== null && store.setHidden(botId, false, { kind: "system", id: null })) changed();
+  };
+
   bb.agents.configure((ctx) => {
     const botId = botOf(ctx.thread.id, ctx.pluginMetadata);
     const bot = botId === null ? null : store.find(botId);
@@ -314,13 +319,17 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     },
   });
 
-  // A message is accepted into a turn either through the dispatch hook or,
-  // when the owner presses Send now on a queued row (which skips the hook),
-  // through message.dispatched. Both paths do the same, and repeating it is
-  // harmless: tokens are claimed once and an owner exchange starts empty.
   const accepted = (args: { threadId: string; texts: readonly string[] }) => {
-    if (store.botOfThread(args.threadId) === null) return;
-    acceptDelivery(store, args.threadId, letterTokens(args.texts), false);
+    const botId = store.botOfThread(args.threadId);
+    if (botId === null) return;
+    const tokens = letterTokens(args.texts);
+    if (tokens.length === 0) return;
+    const shown = store.transaction(
+      () =>
+        acceptDelivery(store, args.threadId, tokens, false) &&
+        store.setHidden(botId, false, { kind: "system", id: null }),
+    );
+    if (shown) changed();
   };
 
   // The turn now running in a conversation, when the owner started it: the
@@ -381,7 +390,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   );
   bb.events.on("thread.idle", ({ thread }) => reopenIfTurnStarted(thread.id));
 
-  bb.events.on("interaction.pending", ({ thread }) => reopen(thread.id));
+  bb.events.on("thread.active", ({ thread }) => showForWork(thread.id));
+  bb.events.on("interaction.pending", ({ thread }) => {
+    showForWork(thread.id);
+    reopen(thread.id);
+  });
   bb.events.on("thread.failed", ({ thread }) => reopen(thread.id));
   bb.events.on("thread.deleted", ({ thread }) => {
     store.forgetThread(thread.id);
@@ -485,18 +498,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       return { ok: true as const };
     },
     "bots.v1.setHidden": ({ botId, hidden }, ctx) => {
-      const changedNow = store.transaction(() => {
-        const updated = store.setHidden(botId, hidden);
-        if (updated) {
-          store.record({
-            botId,
-            kind: hidden ? "bot.hidden" : "bot.shown",
-            actor: actorOf(ctx),
-          });
-        }
-        return updated;
-      });
-      if (changedNow) changed();
+      if (store.setHidden(botId, hidden, actorOf(ctx))) changed();
       return { ok: true as const };
     },
     "bots.v1.reorderBots": ({ botIds }) => {

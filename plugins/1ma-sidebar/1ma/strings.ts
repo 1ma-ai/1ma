@@ -12,7 +12,7 @@ export const strings = {
   botActions: (name: string) => `${name} actions`,
   botSettings: "Bot settings",
   newConversationItem: "New conversation",
-  hideBot: "Hide bot",
+  hideBot: "Hide until next activity",
   showBot: "Show in sidebar",
   hiddenBots: (count: number) => `${count} hidden`,
   mainConversationStatus: (status: string | null) => `Main conversation: ${status ?? "idle"}`,

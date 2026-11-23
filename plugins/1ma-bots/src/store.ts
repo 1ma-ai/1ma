@@ -291,13 +291,16 @@ export class BotStore {
 
   // Hiding is a sidebar choice, not an edit of the bot's content, so it needs
   // no revision; it still bumps the revision so an open editor sees it.
-  setHidden(botId: string, hidden: boolean): boolean {
-    const row = this.requireRow(botId);
-    if ((row.hidden === 1) === hidden) return false;
-    this.db
-      .prepare("UPDATE bots SET hidden = ?, revision = revision + 1, updated_at = ? WHERE id = ?")
-      .run(Number(hidden), this.now(), botId);
-    return true;
+  setHidden(botId: string, hidden: boolean, actor: Actor): boolean {
+    return this.transaction(() => {
+      const row = this.requireRow(botId);
+      if ((row.hidden === 1) === hidden) return false;
+      this.db
+        .prepare("UPDATE bots SET hidden = ?, revision = revision + 1, updated_at = ? WHERE id = ?")
+        .run(Number(hidden), this.now(), botId);
+      this.record({ botId, kind: hidden ? "bot.hidden" : "bot.shown", actor });
+      return true;
+    });
   }
 
   saveDefaults(botId: string, defaults: ChatDefaults): void {

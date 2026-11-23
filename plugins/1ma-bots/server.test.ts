@@ -881,6 +881,58 @@ describe("the owner's message steered into a running turn", () => {
 });
 
 describe("hiding a bot from the sidebar", () => {
+  it.each(["thread.active", "interaction.pending"] as const)(
+    "%s brings back exactly the bot whose conversation needs it",
+    async (event) => {
+      const t = await threeBots();
+      await t.assign("thr_other", t.b.id);
+      for (const bot of [t.a, t.b])
+        await t.rpc("bots.v1.setHidden", { botId: bot.id, hidden: true });
+      const fire = (id: string) => {
+        const thread = makeThreadResponse({ id, status: "active" });
+        return event === "thread.active"
+          ? t.harness.behavior.emitThreadEvent(event, { thread })
+          : t.harness.behavior.emitThreadEvent(event, { thread, interaction: {} as never });
+      };
+      await fire("thr_unassigned");
+      await fire("thr_other");
+      await fire("thr_other");
+      const get = (botId: string) => t.rpc<BotDetail>("bots.v1.get", { botId });
+      expect((await get(t.a.id)).hidden).toBe(true);
+      expect(await get(t.b.id)).toMatchObject({ hidden: false, revision: t.b.revision + 2 });
+      const { events } = await t.rpc<{ events: Array<{ kind: string; actor: { kind: string } }> }>(
+        "bots.v1.events",
+        { botId: t.b.id },
+      );
+      expect(events.filter((e) => e.kind === "bot.shown").map((e) => e.actor.kind)).toEqual([
+        "system",
+      ]);
+    },
+  );
+
+  it("an immediately delivered letter shows its recipient", async () => {
+    const t = await threeBots();
+    await t.rpc("bots.v1.setHidden", { botId: t.b.id, hidden: true });
+    await t.letter("thr_a", t.b.id);
+    expect((await t.rpc<BotDetail>("bots.v1.get", { botId: t.b.id })).hidden).toBe(false);
+  });
+
+  it("a queued letter shows its recipient only on its first confirmed delivery", async () => {
+    const t = await threeBots();
+    const hide = () => t.rpc("bots.v1.setHidden", { botId: t.b.id, hidden: true });
+    const hidden = async () => (await t.rpc<BotDetail>("bots.v1.get", { botId: t.b.id })).hidden;
+    await hide();
+    t.delivery.immediate = false;
+    await t.letter("thr_a", t.b.id);
+    const letter = t.delivery.queued[0]!;
+    expect(await hidden()).toBe(true);
+    await t.deliver(letter);
+    expect(await hidden()).toBe(false);
+    await hide();
+    await t.deliver(letter);
+    expect(await hidden()).toBe(true);
+  });
+
   it("needs no revision, shows in an open editor's revision, and logs only real changes", async () => {
     const t = setup();
     const bot = await t.create("Main");
