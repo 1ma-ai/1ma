@@ -518,6 +518,13 @@ describe("1ma-sidebar with the bots block", () => {
       input: [{ type: "text", text: "[stub:reply revised]", mentions: [] }],
     });
     await waitStatus(fork.id, "idle");
+    const first = stubRecords().find(
+      (entry) => entry.kind === "prompt" && entry.text.includes("[stub:reply revised]"),
+    );
+    assert.ok(
+      first?.text.includes("Use short sentences."),
+      "the fork's first turn has the bot instructions",
+    );
     const { context, page } = await openApp(browser, "light");
     try {
       const group = page.locator(`[data-bot-id="${bot.id}"]`);

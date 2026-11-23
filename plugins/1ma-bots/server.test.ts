@@ -336,20 +336,110 @@ describe("an old conversation bound to a bot", () => {
     },
   );
 
-  it("keeps a hidden side chat out of its source bot", async () => {
-    const t = setup();
-    const bot = await t.create("Editor");
-    await t.assign("thr_source", bot.id);
-    const thread = makeThreadResponse({
-      id: "thr_side",
+  it.each([
+    ["fork", "late"],
+    [null, "late"],
+    ["fork", "lost"],
+    [null, "lost"],
+  ] as const)(
+    "configures the first turn when origin is %s and creation is %s",
+    async (originKind, delivery) => {
+      const t = setup();
+      const bot = await t.create("Editor", { instructions: "Follow the glossary." });
+      await t.assign("thr_source", bot.id);
+      const thread = makeThreadResponse({
+        id: "thr_new",
+        status: "pending",
+        sourceThreadId: "thr_source",
+        originKind,
+      });
+      await t.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({ thread }),
+      );
+      const harness =
+        delivery === "lost" ? (await t.harness.lifecycle.reload(botsPlugin)).harness : t.harness;
+      const first = await harness.behavior.resolveAgentConfiguration(
+        makePluginAgentConfigurationContext({ thread }),
+      );
+      if (delivery === "late") await harness.behavior.emitThreadEvent("thread.created", { thread });
+      expect(first.instructions).toContain("Follow the glossary.");
+      expect(first.tools.map((tool) => tool.name)).toContain("bot_read");
+    },
+  );
+
+  it.each(["first dispatch", "replayed creation", "late creation"])(
+    "keeps No bot through %s",
+    async (delivery) => {
+      const t = setup();
+      const bot = await t.create("Editor");
+      await t.assign("thr_source", bot.id);
+      const thread = makeThreadResponse({
+        id: "thr_new",
+        status: "pending",
+        sourceThreadId: "thr_source",
+      });
+      if (delivery !== "late creation")
+        await t.harness.behavior.emitThreadEvent("thread.created", { thread });
+      await t.assign(thread.id, null);
+      await t.rpc("bots.v1.setCompleted", { threadId: "thr_source", completed: true });
+      const { harness } = await t.harness.lifecycle.reload(botsPlugin);
+      if (delivery === "first dispatch") {
+        await harness.registrations.hooks["message.dispatch"]!(
+          makeMessageDispatchHookContext({ thread }),
+        );
+      } else {
+        await harness.behavior.emitThreadEvent("thread.created", { thread });
+      }
+      expect(
+        await harness.behavior.callRpc("bots.v1.forThread", { threadId: thread.id }),
+      ).toBeNull();
+      expect(await harness.behavior.callRpc("bots.v1.list", {})).toMatchObject({
+        bots: [{ threads: [{ threadId: "thr_source", completed: true }] }],
+      });
+    },
+  );
+
+  it.each([
+    {
+      name: "an already started fork",
+      status: "idle",
+      visibility: "visible",
       sourceThreadId: "thr_source",
-      originKind: "fork",
-      originPluginId: "side-chat",
+    },
+    {
+      name: "a hidden side chat",
+      status: "pending",
       visibility: "hidden",
-    });
-    await t.harness.behavior.emitThreadEvent("thread.created", { thread });
-    expect(await t.rpc("bots.v1.forThread", { threadId: thread.id })).toBeNull();
-  });
+      sourceThreadId: "thr_source",
+    },
+    {
+      name: "a new chat without a source",
+      status: "pending",
+      visibility: "visible",
+      sourceThreadId: null,
+    },
+  ] as const)(
+    "keeps $name out of the bot on dispatch",
+    async ({ status, visibility, sourceThreadId }) => {
+      const t = setup();
+      const bot = await t.create("Editor");
+      await t.assign("thr_source", bot.id);
+      const thread = makeThreadResponse({
+        id: "thr_other",
+        status,
+        visibility,
+        sourceThreadId,
+        originKind: sourceThreadId ? "fork" : null,
+      });
+      if (status === "pending")
+        await t.harness.behavior.emitThreadEvent("thread.created", { thread });
+      const decision = await t.harness.registrations.hooks["message.dispatch"]!(
+        makeMessageDispatchHookContext({ thread }),
+      );
+      expect(decision).toEqual({ action: "proceed" });
+      expect(await t.rpc("bots.v1.forThread", { threadId: thread.id })).toBeNull();
+    },
+  );
 
   it("an unbound conversation gets nothing", async () => {
     const t = setup();

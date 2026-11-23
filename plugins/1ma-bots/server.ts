@@ -3,6 +3,7 @@ import {
   defineCli,
   type BbPluginApi,
   type ExperimentalPluginRpcHandlerContext,
+  type MessageDispatchHookContext,
   type PluginAgentConfigurationContext,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -380,7 +381,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       block.type === "text" && block.text !== undefined ? [block.text] : [],
     );
 
-  bb.events.on("thread.created", ({ thread }) => {
+  const inheritBot = (thread: MessageDispatchHookContext["thread"]) => {
     if (
       thread.sourceThreadId === null ||
       thread.visibility !== "visible" ||
@@ -388,6 +389,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     )
       return;
     if (store.bindContinuation(thread.id, thread.sourceThreadId, false)) changed();
+  };
+  bb.events.on("thread.created", ({ thread }) => inheritBot(thread));
+  bb.experimental_hooks.on("message.dispatch", ({ thread }) => {
+    if (thread.status === "pending") inheritBot(thread);
+    return { action: "proceed" };
   });
   bb.events.on("message.dispatched", ({ entry }) =>
     accepted({ threadId: entry.threadId, texts: textsOf(entry.content) }),
@@ -529,28 +535,28 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         store.get(botId);
         await requireAssignable(threadId);
       }
-      const previous = store.botOfThread(threadId);
-      if (botId === null) {
-        store.unbind(threadId);
-        if (previous !== null) {
-          store.record({
-            botId: previous,
-            kind: "thread.unassigned",
-            actor: actorOf(ctx),
-            detail: { threadId },
-          });
+      const startedFromBot = store.transaction(() => {
+        store.recordAssignmentDecision(threadId);
+        if (botId === null) {
+          const previous = store.botOfThread(threadId);
+          store.unbind(threadId);
+          if (previous !== null) {
+            store.record({
+              botId: previous,
+              kind: "thread.unassigned",
+              actor: actorOf(ctx),
+              detail: { threadId },
+            });
+          }
+          return false;
         }
-        changed();
-        return { botId: null, startedFromBot: false };
-      }
-      const current = store.threadInfo(threadId);
-      store.bind(threadId, botId, {
-        startedFromBot: current?.startedFromBot ?? false,
-        place: place ?? "last",
+        const startedFromBot = store.threadInfo(threadId)?.startedFromBot ?? false;
+        store.bind(threadId, botId, { startedFromBot, place: place ?? "last" });
+        store.record({ botId, kind: "thread.assigned", actor: actorOf(ctx), detail: { threadId } });
+        return startedFromBot;
       });
-      store.record({ botId, kind: "thread.assigned", actor: actorOf(ctx), detail: { threadId } });
       changed();
-      return { botId, startedFromBot: current?.startedFromBot ?? false };
+      return { botId, startedFromBot };
     },
     "bots.v1.reorderThreads": ({ botId, threadIds }) => {
       store.reorderThreads(botId, threadIds);

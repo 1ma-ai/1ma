@@ -85,6 +85,8 @@ export const MIGRATIONS = [
     created_at INTEGER NOT NULL
   );`,
   `ALTER TABLE thread_chains ADD COLUMN owner_turn INTEGER`,
+  `CREATE TABLE thread_assignment_decisions (thread_id TEXT PRIMARY KEY);
+   INSERT INTO thread_assignment_decisions SELECT thread_id FROM bot_threads;`,
 ];
 
 interface BotRow {
@@ -384,10 +386,19 @@ export class BotStore {
     })();
   }
 
+  recordAssignmentDecision(threadId: string): boolean {
+    return (
+      this.db
+        .prepare("INSERT OR IGNORE INTO thread_assignment_decisions (thread_id) VALUES (?)")
+        .run(threadId).changes > 0
+    );
+  }
+
   bindContinuation(threadId: string, sourceThreadId: string, startedFromBot: boolean): boolean {
     return this.transaction(() => {
+      if (!this.recordAssignmentDecision(threadId)) return false;
       const botId = this.botOfThread(sourceThreadId);
-      if (botId === null || this.botOfThread(threadId) !== null) return false;
+      if (botId === null) return false;
       const order = this.threadsOf(botId).map((thread) => thread.threadId);
       order.splice(order.indexOf(sourceThreadId), 0, threadId);
       this.bind(threadId, botId, { startedFromBot, place: "last" });
@@ -400,6 +411,7 @@ export class BotStore {
   forgetThread(threadId: string): void {
     this.transaction(() => {
       this.unbind(threadId);
+      this.db.prepare("DELETE FROM thread_assignment_decisions WHERE thread_id = ?").run(threadId);
       this.db.prepare("DELETE FROM thread_chains WHERE thread_id = ?").run(threadId);
       this.db.prepare("DELETE FROM pending_letters WHERE to_thread = ?").run(threadId);
     });
@@ -529,7 +541,7 @@ export class BotStore {
       if (this.botOfThread(threadId) === null) {
         if (sourceThreadId !== null && this.botOfThread(sourceThreadId) === pending.bot_id) {
           this.bindContinuation(threadId, sourceThreadId, true);
-        } else {
+        } else if (this.recordAssignmentDecision(threadId)) {
           this.bind(threadId, pending.bot_id, { startedFromBot: true, place: "after-first" });
         }
       }
