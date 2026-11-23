@@ -504,7 +504,7 @@ describe("pending bot continuations", () => {
     }
     const warnings = t.harness.inspection.logEntries.filter((entry) => entry.level === "warn");
     expect(warnings.map((entry) => entry.message)).toContainEqual(
-      expect.stringContaining(thread.id),
+      expect.stringContaining(`${thread.id}: attempt to write a readonly database`),
     );
     expect(JSON.stringify(warnings)).not.toContain(text);
     expect((await t.list()).bots[0]!.threads).toMatchObject([

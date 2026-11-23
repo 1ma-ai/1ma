@@ -394,8 +394,10 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   bb.experimental_hooks.on("message.dispatch", ({ thread }) => {
     try {
       if (thread.status === "pending") inheritBot(thread);
-    } catch {
-      bb.log.warn(`Could not apply bot assignment before dispatch for ${thread.id}`);
+    } catch (error) {
+      bb.log.warn(
+        `Could not apply bot assignment before dispatch for ${thread.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     return { action: "proceed" };
   });
