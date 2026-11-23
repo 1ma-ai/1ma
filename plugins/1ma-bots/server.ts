@@ -106,12 +106,13 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   const botOf = (
     threadId: string,
     metadata?: PluginAgentConfigurationContext["pluginMetadata"],
+    sourceThreadId: string | null = null,
   ) => {
     const bound = store.botOfThread(threadId);
     if (bound !== null) return bound;
     const token = metadata ? startToken(metadata) : null;
     if (token === null) return null;
-    const claimed = store.claimPendingStart(threadId, token);
+    const claimed = store.claimPendingStart(threadId, token, sourceThreadId);
     if (claimed !== null) changed();
     return claimed;
   };
@@ -130,7 +131,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   };
 
   bb.agents.configure((ctx) => {
-    const botId = botOf(ctx.thread.id, ctx.pluginMetadata);
+    const botId = botOf(ctx.thread.id, ctx.pluginMetadata, ctx.thread.sourceThreadId);
     const bot = botId === null ? null : store.find(botId);
     if (bot === null) return { tools: [], skills: [] };
     return {
@@ -379,6 +380,15 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       block.type === "text" && block.text !== undefined ? [block.text] : [],
     );
 
+  bb.events.on("thread.created", ({ thread }) => {
+    if (
+      thread.sourceThreadId === null ||
+      thread.visibility !== "visible" ||
+      thread.originPluginId === bb.pluginId
+    )
+      return;
+    if (store.bindContinuation(thread.id, thread.sourceThreadId, false)) changed();
+  });
   bb.events.on("message.dispatched", ({ entry }) =>
     accepted({ threadId: entry.threadId, texts: textsOf(entry.content) }),
   );
@@ -449,12 +459,16 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     }
   };
 
-  const startIn = async (botId: string, create: (token: string) => Promise<{ id: string }>) => {
+  const startIn = async (
+    botId: string,
+    create: (token: string) => Promise<{ id: string }>,
+    sourceThreadId: string | null = null,
+  ) => {
     // A failed create keeps its token: the thread may exist anyway, and its
     // first configure still claims it. Old tokens expire in addPendingStart.
     const token = store.addPendingStart(botId);
     const thread = await create(token);
-    store.claimPendingStart(thread.id, token);
+    store.claimPendingStart(thread.id, token, sourceThreadId);
     changed();
     return { threadId: thread.id };
   };
@@ -578,8 +592,14 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     "bots.v1.continueInBot": async ({ threadId }) => {
       const botId = store.botOfThread(threadId);
       if (botId === null) throw new BotsError("not_found", agentText.notABot);
-      return startIn(botId, (token) =>
-        bb.sdk.threads.fork({ sourceThreadId: threadId, pluginMetadata: { [START_TOKEN]: token } }),
+      return startIn(
+        botId,
+        (token) =>
+          bb.sdk.threads.fork({
+            sourceThreadId: threadId,
+            pluginMetadata: { [START_TOKEN]: token },
+          }),
+        threadId,
       );
     },
   });

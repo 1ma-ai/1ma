@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
-import type { BotSummary } from "./src/contract.js";
+import type { BotDetail, BotSummary } from "./src/contract.js";
 import { avatarDataUrl } from "./src/avatar.js";
 import { parseCapabilities, parseRoute } from "./src/ui/bot-pages.js";
 import { strings } from "./strings.js";
@@ -25,7 +25,7 @@ function bot(id: string, name: string, threads: BotSummary["threads"]): BotSumma
   };
 }
 
-async function threadRow(threadId: string, bots: BotSummary[]) {
+async function threadRow(threadId: string, bots: BotSummary[], detail?: BotDetail) {
   const app = await loadPluginApp(() => import("./app.js"));
   const registration = app.threadInfoRows.find((row) => row.id === "thread-bot")!;
   return renderSlot(
@@ -35,6 +35,7 @@ async function threadRow(threadId: string, bots: BotSummary[]) {
       pluginId: "1ma-bots",
       rpc: {
         "bots.v1.list": () => ({ bots }),
+        "bots.v1.get": () => detail,
         "bots.v1.continueInBot": () => ({ threadId: "thr_continued" }),
       },
     },
@@ -53,6 +54,30 @@ describe("the thread's bot row", () => {
         expect.objectContaining({ threadId: "thr_continued" }),
       ),
     );
+  });
+
+  it("previews the instructions, memory and reachable peers contributed by this bot", async () => {
+    const current = bot("bot_a", "Marketer", [
+      { threadId: "thr_a", startedFromBot: true, completed: false },
+    ]);
+    const peer = bot("bot_b", "Analyst", []);
+    const hidden = { ...bot("bot_c", "Hidden peer", []), hidden: true };
+    await threadRow("thr_a", [current, peer, hidden], {
+      ...current,
+      instructions: "Write a short brief.",
+      memory: "Use the approved glossary.",
+      revision: 1,
+      defaults: null,
+      memorySha256: "",
+    });
+    fireEvent.click(await screen.findByRole("button", { name: strings.threadBot.preview }));
+    const dialog = await screen.findByRole("dialog", {
+      name: strings.threadBot.instructionsFrom("Marketer"),
+    });
+    await waitFor(() => expect(dialog.textContent).toContain("Write a short brief."));
+    expect(dialog.textContent).toContain("Use the approved glossary.");
+    expect(dialog.textContent).toContain("Analyst");
+    expect(dialog.textContent).not.toContain("Hidden peer");
   });
 
   it("says nothing more for a conversation started from the bot", async () => {

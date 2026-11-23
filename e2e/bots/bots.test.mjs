@@ -500,6 +500,62 @@ describe("1ma-sidebar with the bots block", () => {
     }
   });
 
+  it("keeps a fork with its bot, previews its instructions and returns it to the project on No bot", async () => {
+    const bot = await createBot("Editor", {
+      role: "Copy editor",
+      instructions: "Use short sentences.",
+    });
+    const source = await startConversation(bot, "[stub:reply source]", projects.beta, {
+      providerId: "acp-omp",
+    });
+    await waitTurns(source, 1);
+    await waitStatus(source, "idle");
+    await rename(source, "Original draft");
+    await rpc("bots.v1.setCompleted", { threadId: source, completed: true });
+    const fork = await server.api("POST", "/threads/fork", {
+      sourceThreadId: source,
+      title: "Revised draft",
+      input: [{ type: "text", text: "[stub:reply revised]", mentions: [] }],
+    });
+    await waitStatus(fork.id, "idle");
+    const { context, page } = await openApp(browser, "light");
+    try {
+      const group = page.locator(`[data-bot-id="${bot.id}"]`);
+      await waitDrawn(page, threadLink(group, fork.id), "continued-bot-conversation");
+      assert.deepEqual(
+        await group
+          .locator("a[data-sidebar-thread-id]")
+          .evaluateAll((rows) => rows.map((row) => row.dataset.sidebarThreadId)),
+        [fork.id, source],
+      );
+      await threadLink(group, fork.id).click();
+      const info = page.getByRole("button", { name: "Show thread info panel" });
+      const preview = page.getByRole("button", { name: "View bot instructions" });
+      if (!(await preview.isVisible())) {
+        if (!(await info.isVisible()))
+          await page.getByRole("button", { name: "Show right panel" }).click();
+        if (!(await preview.isVisible())) await info.click();
+      }
+      await preview.click();
+      const dialog = page.getByRole("dialog", { name: "Instructions from Editor" });
+      await dialog.getByText("Use short sentences.", { exact: false }).waitFor();
+      await screenshot(page, "continuation-bot-instructions");
+      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: "Editor", exact: true }).click();
+      await page.getByRole("menuitem", { name: "No bot" }).click();
+      await threadLink(group, fork.id).waitFor({ state: "detached" });
+      await threadLink(page, fork.id).waitFor();
+      assert.equal(
+        (await groupsOf(page, ["Bots", "Alpha", "Beta"], [fork.id])).groupOf[fork.id],
+        "Beta",
+      );
+      assert.equal(await rpc("bots.v1.forThread", { threadId: fork.id }), null);
+    } finally {
+      await context.close();
+      await rpc("bots.v1.remove", { botId: bot.id });
+    }
+  });
+
   it("draws no block and keeps every conversation in its project when 1ma-bots is disabled", async () => {
     server.bb(["plugin", "disable", BOTS]);
     const { context, page } = await openApp(browser, "light");

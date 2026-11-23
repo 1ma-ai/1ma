@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   experimental_DetailRow as DetailRow,
   experimental_useRpcMutation as useRpcMutation,
@@ -6,6 +7,8 @@ import {
   type ExperimentalThreadInfoProps,
 } from "@get-bb/plugin-sdk/app";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { botInstructions } from "../instructions.js";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -25,6 +28,35 @@ export function findBot(
     if (thread) return { bot, thread };
   }
   return null;
+}
+
+function InstructionPreview({ bot, bots }: { bot: BotSummary; bots: readonly BotSummary[] }) {
+  const [open, setOpen] = useState(false);
+  const detail = useRpcQuery({
+    contract: botsRpc,
+    method: "bots.v1.get",
+    input: { botId: bot.id },
+    enabled: open,
+  });
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="link" size="sm" className="h-auto p-0">
+          {strings.threadBot.preview}
+        </Button>
+      </DialogTrigger>
+      <DialogContent aria-describedby={undefined} className="sm:max-w-2xl">
+        <DialogTitle>{strings.threadBot.instructionsFrom(bot.name)}</DialogTitle>
+        <div className="max-h-[60dvh] overflow-y-auto whitespace-pre-wrap break-words text-sm">
+          {detail.error
+            ? strings.unavailable
+            : detail.data
+              ? botInstructions(detail.data, bots)
+              : strings.loading}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
@@ -72,6 +104,7 @@ export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
+        {current && <InstructionPreview key={current.bot.id} bot={current.bot} bots={bots} />}
         {current && !current.thread.startedFromBot ? (
           <>
             <p className="text-xs text-muted-foreground">{strings.threadBot.notStartedFromBot}</p>

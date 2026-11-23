@@ -384,6 +384,19 @@ export class BotStore {
     })();
   }
 
+  bindContinuation(threadId: string, sourceThreadId: string, startedFromBot: boolean): boolean {
+    return this.transaction(() => {
+      const botId = this.botOfThread(sourceThreadId);
+      if (botId === null || this.botOfThread(threadId) !== null) return false;
+      const order = this.threadsOf(botId).map((thread) => thread.threadId);
+      order.splice(order.indexOf(sourceThreadId), 0, threadId);
+      this.bind(threadId, botId, { startedFromBot, place: "last" });
+      this.reorderThreads(botId, order);
+      this.setCompleted(sourceThreadId, false);
+      return true;
+    });
+  }
+
   forgetThread(threadId: string): void {
     this.transaction(() => {
       this.unbind(threadId);
@@ -506,7 +519,7 @@ export class BotStore {
   }
 
   // Binds a thread created by startThread or continueInBot the first time it is seen.
-  claimPendingStart(threadId: string, token: string): string | null {
+  claimPendingStart(threadId: string, token: string, sourceThreadId: string | null): string | null {
     return this.transaction(() => {
       const pending = this.db
         .prepare<[string], { bot_id: string }>("SELECT bot_id FROM pending_starts WHERE token = ?")
@@ -514,7 +527,11 @@ export class BotStore {
       if (!pending || !this.row(pending.bot_id)) return null;
       this.dropPendingStart(token);
       if (this.botOfThread(threadId) === null) {
-        this.bind(threadId, pending.bot_id, { startedFromBot: true, place: "after-first" });
+        if (sourceThreadId !== null && this.botOfThread(sourceThreadId) === pending.bot_id) {
+          this.bindContinuation(threadId, sourceThreadId, true);
+        } else {
+          this.bind(threadId, pending.bot_id, { startedFromBot: true, place: "after-first" });
+        }
       }
       return this.botOfThread(threadId);
     });

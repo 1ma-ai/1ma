@@ -60,6 +60,8 @@ export const strings = {
   threadBot: {
     title: "Bot",
     none: "No bot",
+    preview: "View bot instructions",
+    instructionsFrom: (name: string) => `Instructions from ${name}`,
     choose: "Assign to bot",
     notStartedFromBot:
       "This conversation was not started from the bot. Tools other plugins give this bot (for example the main bot's actions) are not available here.",

@@ -167,10 +167,15 @@ async function handle(message) {
         id: message.id,
         result: {
           protocolVersion: 1,
-          agentCapabilities: { loadSession: false, promptCapabilities: { image: false } },
+          agentCapabilities: {
+            loadSession: false,
+            sessionCapabilities: { fork: {} },
+            promptCapabilities: { image: false },
+          },
         },
       });
       return;
+    case "session/fork":
     case "session/new": {
       const sessionId = `stub-session-${process.pid}-${nextSession++}`;
       const servers = message.params?.mcpServers ?? [];
