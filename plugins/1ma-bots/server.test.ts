@@ -170,6 +170,7 @@ function setup(settings: Record<string, number> = {}) {
       }>;
     }>("bots.v1.list");
   return {
+    bb: host.bb,
     recordTurn,
     attempt,
     settle,
@@ -446,6 +447,95 @@ describe("an old conversation bound to a bot", () => {
     await t.create("Marketer");
     expect(await t.configure("thr_free")).toMatchObject({ tools: [], instructions: null });
   });
+});
+
+describe("pending bot continuations", () => {
+  const thread = makeThreadResponse({
+    id: "thr_target",
+    status: "pending",
+    sourceThreadId: "thr_source",
+    originKind: null,
+  });
+  const text = "A private draft for the editor";
+  const dispatch = (t: ReturnType<typeof setup>) =>
+    t.harness.registrations.hooks["message.dispatch"]!(
+      makeMessageDispatchHookContext({ thread, input: { text } }),
+    );
+
+  it.each([false, true])(
+    "inherits a late source assignment unless explicitly detached (detached: %s)",
+    async (detach) => {
+      const t = setup();
+      const bot = await t.create("Editor", { instructions: "Follow the glossary." });
+      await t.harness.behavior.emitThreadEvent("thread.created", { thread });
+      await dispatch(t);
+      if (detach) await t.assign(thread.id, null);
+      await t.assign("thr_source", bot.id);
+      await t.rpc("bots.v1.setCompleted", { threadId: "thr_source", completed: true });
+      await dispatch(t);
+      const first = await t.configure(thread.id);
+      if (detach) {
+        expect(first).toMatchObject({ instructions: null, tools: [] });
+        expect((await t.list()).bots[0]!.threads).toMatchObject([
+          { threadId: "thr_source", completed: true },
+        ]);
+      } else {
+        expect(first.instructions).toContain("Follow the glossary.");
+        expect(first.tools.map((tool) => tool.name)).toContain("bot_read");
+        expect((await t.list()).bots[0]!.threads).toMatchObject([
+          { threadId: thread.id },
+          { threadId: "thr_source", completed: false },
+        ]);
+      }
+    },
+  );
+
+  it("lets a message proceed when the bot database is read-only", async () => {
+    const t = setup();
+    const bot = await t.create("Editor");
+    await t.assign("thr_source", bot.id);
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_source", completed: true });
+    const db = t.bb.storage.database();
+    db.pragma("query_only = ON");
+    try {
+      expect(await dispatch(t)).toEqual({ action: "proceed" });
+    } finally {
+      db.pragma("query_only = OFF");
+    }
+    const warnings = t.harness.inspection.logEntries.filter((entry) => entry.level === "warn");
+    expect(warnings.map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(thread.id),
+    );
+    expect(JSON.stringify(warnings)).not.toContain(text);
+    expect((await t.list()).bots[0]!.threads).toMatchObject([
+      { threadId: "thr_source", completed: true },
+    ]);
+    await dispatch(t);
+    expect((await t.list()).bots[0]!.threads).toMatchObject([
+      { threadId: thread.id },
+      { threadId: "thr_source", completed: false },
+    ]);
+  });
+
+  it.each(["dispatch", "creation"])(
+    "keeps a deleted handoff out after a stale %s",
+    async (delivery) => {
+      const t = setup();
+      const bot = await t.create("Editor");
+      await t.assign("thr_source", bot.id);
+      if (delivery === "creation")
+        await t.harness.behavior.emitThreadEvent("thread.created", { thread });
+      await t.harness.behavior.emitThreadEvent("thread.deleted", {
+        thread: { ...thread, deletedAt: START },
+      });
+      await t.rpc("bots.v1.setCompleted", { threadId: "thr_source", completed: true });
+      if (delivery === "dispatch") await dispatch(t);
+      else await t.harness.behavior.emitThreadEvent("thread.created", { thread });
+      expect((await t.list()).bots[0]!.threads).toMatchObject([
+        { threadId: "thr_source", completed: true },
+      ]);
+    },
+  );
 });
 
 describe("letters between bots", () => {

@@ -181,6 +181,8 @@ async function handle(message) {
       const servers = message.params?.mcpServers ?? [];
       const mcp = servers.length > 0 ? startMcp(servers[0]) : undefined;
       sessions.set(sessionId, { mcp });
+      if (message.method === "session/fork")
+        record({ kind: "fork", sourceSessionId: message.params.sessionId, sessionId });
       record({ kind: "session", sessionId, mcpServers: servers.map((server) => server.name) });
       if (mcp !== undefined) {
         mcp.list().then(

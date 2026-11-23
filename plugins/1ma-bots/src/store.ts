@@ -396,9 +396,13 @@ export class BotStore {
 
   bindContinuation(threadId: string, sourceThreadId: string, startedFromBot: boolean): boolean {
     return this.transaction(() => {
-      if (!this.recordAssignmentDecision(threadId)) return false;
+      const decided = this.db
+        .prepare("SELECT 1 FROM thread_assignment_decisions WHERE thread_id = ?")
+        .get(threadId);
+      if (decided) return false;
       const botId = this.botOfThread(sourceThreadId);
       if (botId === null) return false;
+      this.recordAssignmentDecision(threadId);
       const order = this.threadsOf(botId).map((thread) => thread.threadId);
       order.splice(order.indexOf(sourceThreadId), 0, threadId);
       this.bind(threadId, botId, { startedFromBot, place: "last" });
@@ -411,7 +415,7 @@ export class BotStore {
   forgetThread(threadId: string): void {
     this.transaction(() => {
       this.unbind(threadId);
-      this.db.prepare("DELETE FROM thread_assignment_decisions WHERE thread_id = ?").run(threadId);
+      this.recordAssignmentDecision(threadId);
       this.db.prepare("DELETE FROM thread_chains WHERE thread_id = ?").run(threadId);
       this.db.prepare("DELETE FROM pending_letters WHERE to_thread = ?").run(threadId);
     });

@@ -392,7 +392,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   };
   bb.events.on("thread.created", ({ thread }) => inheritBot(thread));
   bb.experimental_hooks.on("message.dispatch", ({ thread }) => {
-    if (thread.status === "pending") inheritBot(thread);
+    try {
+      if (thread.status === "pending") inheritBot(thread);
+    } catch {
+      bb.log.warn(`Could not apply bot assignment before dispatch for ${thread.id}`);
+    }
     return { action: "proceed" };
   });
   bb.events.on("message.dispatched", ({ entry }) =>

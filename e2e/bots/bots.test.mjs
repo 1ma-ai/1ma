@@ -522,11 +522,25 @@ describe("1ma-sidebar with the bots block", () => {
       (entry) => entry.kind === "prompt" && entry.text.includes("[stub:reply revised]"),
     );
     assert.ok(first, "the agent received the fork's first message");
+    const forkSession = stubRecords().find(
+      (entry) => entry.kind === "fork" && entry.sessionId === first.sessionId,
+    );
+    assert.ok(forkSession, "the first message reached the session returned by session/fork");
+    assert.notEqual(forkSession.sessionId, forkSession.sourceSessionId);
+    assert.ok(
+      stubRecords().some(
+        (entry) =>
+          entry.kind === "prompt" &&
+          entry.sessionId === forkSession.sourceSessionId &&
+          entry.text.includes("[stub:reply source]"),
+      ),
+      "the fork cloned the original conversation",
+    );
     await waitFor("bot_read in the fork's first session", 60 * SECOND, async () =>
       stubRecords().some(
         (entry) =>
           entry.kind === "tools" &&
-          entry.sessionId === first.sessionId &&
+          entry.sessionId === forkSession.sessionId &&
           entry.tools?.includes("bot_read"),
       ),
     );
