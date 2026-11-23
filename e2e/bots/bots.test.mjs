@@ -480,6 +480,26 @@ describe("1ma-sidebar with the bots block", () => {
     }
   });
 
+  it("returns a hidden bot and its conversation to the open sidebar when work starts", async () => {
+    const { context, page } = await openApp(browser, "light");
+    const bot = page.locator(`[data-bot-id="${fixture.hidden.id}"]`);
+    try {
+      await waitDrawn(page, page.getByText("1 hidden", { exact: true }), "bot-waiting-for-work");
+      await threadLink(page, fixture.h1).waitFor();
+      assert.equal(await bot.count(), 0);
+      await say(fixture.h1, "[stub:until hidden-bot-working]");
+      await waitStatus(fixture.h1, "active");
+      await waitDrawn(page, threadLink(bot, fixture.h1), "bot-returned-to-work");
+      await page.locator("[data-1ma-hidden-bots]").waitFor({ state: "detached" });
+      assert.equal(await threadLink(page, fixture.h1).count(), 1);
+      assert.equal((await rpc("bots.v1.get", { botId: fixture.hidden.id })).hidden, false);
+      await screenshot(page, "hidden-bot-returned-to-work");
+    } finally {
+      signal("hidden-bot-working");
+      await context.close();
+    }
+  });
+
   it("draws no block and keeps every conversation in its project when 1ma-bots is disabled", async () => {
     server.bb(["plugin", "disable", BOTS]);
     const { context, page } = await openApp(browser, "light");

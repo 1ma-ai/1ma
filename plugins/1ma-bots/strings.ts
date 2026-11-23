@@ -16,7 +16,7 @@ export const strings = {
   cancel: "Cancel",
   remove: "Remove bot",
   removeConfirm: "Remove this bot? Its conversations stay in their projects.",
-  hide: "Hide from sidebar",
+  hide: "Hide from sidebar until next activity",
   hidden: "Hidden",
   randomAppearance: "Random look",
   fields: {

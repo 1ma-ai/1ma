@@ -122,8 +122,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     return botId;
   };
 
-  const reopen = (threadId: string) => {
-    if (store.setCompleted(threadId, false)) changed();
+  const reopen = (threadId: string) => store.setCompleted(threadId, false);
+
+  const showForWork = (threadId: string) => {
+    const botId = store.botOfThread(threadId);
+    return botId !== null && store.setHidden(botId, false, { kind: "system", id: null });
   };
 
   bb.agents.configure((ctx) => {
@@ -314,13 +317,20 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     },
   });
 
-  // A message is accepted into a turn either through the dispatch hook or,
-  // when the owner presses Send now on a queued row (which skips the hook),
-  // through message.dispatched. Both paths do the same, and repeating it is
-  // harmless: tokens are claimed once and an owner exchange starts empty.
+  // send() confirms immediate delivery; message.dispatched confirms a queued
+  // letter, including “Send now”. The dispatch hook runs before bb's waits.
+  // Claiming the token once keeps a repeat from showing a bot hidden again.
   const accepted = (args: { threadId: string; texts: readonly string[] }) => {
-    if (store.botOfThread(args.threadId) === null) return;
-    acceptDelivery(store, args.threadId, letterTokens(args.texts), false);
+    const botId = store.botOfThread(args.threadId);
+    if (botId === null) return;
+    const tokens = letterTokens(args.texts);
+    if (tokens.length === 0) return;
+    const shown = store.transaction(
+      () =>
+        acceptDelivery(store, args.threadId, tokens, false) &&
+        store.setHidden(botId, false, { kind: "system", id: null }),
+    );
+    if (shown) changed();
   };
 
   // The turn now running in a conversation, when the owner started it: the
@@ -362,27 +372,32 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       order: "desc",
       limit: "1",
     });
-    if (latest !== undefined && latest.createdAt > completedAt) reopen(threadId);
+    if (latest !== undefined && latest.createdAt > completedAt && reopen(threadId)) changed();
   };
   const textsOf = (blocks: ReadonlyArray<{ type: string; text?: string }>) =>
     blocks.flatMap((block) =>
       block.type === "text" && block.text !== undefined ? [block.text] : [],
     );
 
-  // A letter is accepted only once bb confirms it reached a turn: send()
-  // answers "sent" (handled in bot_message), or a queued row leaves the
-  // queue (message.dispatched). The dispatch hook could not know: other
-  // plugins' hooks and bb's own waits are decided after it. The owner's own
-  // message needs no hook either: bot_message reads the request bb recorded
-  // for the current turn (ownerTurnOf), and a started turn reopens a done
-  // conversation (thread.active).
   bb.events.on("message.dispatched", ({ entry }) =>
     accepted({ threadId: entry.threadId, texts: textsOf(entry.content) }),
   );
   bb.events.on("thread.idle", ({ thread }) => reopenIfTurnStarted(thread.id));
 
-  bb.events.on("interaction.pending", ({ thread }) => reopen(thread.id));
-  bb.events.on("thread.failed", ({ thread }) => reopen(thread.id));
+  bb.events.on("thread.active", ({ thread }) => {
+    if (showForWork(thread.id)) changed();
+  });
+  bb.events.on("interaction.pending", ({ thread }) => {
+    const updated = store.transaction(() => {
+      const shown = showForWork(thread.id);
+      const reopened = reopen(thread.id);
+      return shown || reopened;
+    });
+    if (updated) changed();
+  });
+  bb.events.on("thread.failed", ({ thread }) => {
+    if (reopen(thread.id)) changed();
+  });
   bb.events.on("thread.deleted", ({ thread }) => {
     store.forgetThread(thread.id);
     changed();
@@ -485,18 +500,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       return { ok: true as const };
     },
     "bots.v1.setHidden": ({ botId, hidden }, ctx) => {
-      const changedNow = store.transaction(() => {
-        const updated = store.setHidden(botId, hidden);
-        if (updated) {
-          store.record({
-            botId,
-            kind: hidden ? "bot.hidden" : "bot.shown",
-            actor: actorOf(ctx),
-          });
-        }
-        return updated;
-      });
-      if (changedNow) changed();
+      if (store.setHidden(botId, hidden, actorOf(ctx))) changed();
       return { ok: true as const };
     },
     "bots.v1.reorderBots": ({ botIds }) => {
