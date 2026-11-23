@@ -51,9 +51,9 @@ function setup(settings: Record<string, number> = {}) {
       lastAssistantText: null,
     });
   // Stands in for bb taking a queued letter out of the queue into a turn.
-  const deliver = async (letter: SentLetter) => {
-    recordTurn(letter.threadId, "agent", letter.senderThreadId ?? null);
-    await settle(letter.threadId);
+  const deliver = async (letter: SentLetter, kind: "start" | "steer" = "start") => {
+    recordTurn(letter.threadId, "agent", letter.senderThreadId ?? null, kind);
+    if (kind === "start") await settle(letter.threadId);
     await host.harness.behavior.emitThreadEvent("message.dispatched", {
       entry: makeQueueEntry({
         threadId: letter.threadId,
@@ -909,6 +909,46 @@ describe("hiding a bot from the sidebar", () => {
       ]);
     },
   );
+
+  it("a pending question reopens the conversation and shows its bot with one notification", async () => {
+    const t = setup();
+    const bot = await t.create("Beta");
+    const thread = makeThreadResponse({ id: "thr_b", status: "active" });
+    await t.assign(thread.id, bot.id);
+    t.threads.set(thread.id, thread);
+    await t.rpc("bots.v1.setCompleted", { threadId: thread.id, completed: true });
+    await t.rpc("bots.v1.setHidden", { botId: bot.id, hidden: true });
+    const before = t.harness.experimental_rpcInvalidations.length;
+
+    await t.harness.behavior.emitThreadEvent("interaction.pending", {
+      thread,
+      interaction: {} as never,
+    });
+
+    expect(await t.rpc<BotDetail>("bots.v1.get", { botId: bot.id })).toMatchObject({
+      hidden: false,
+      threads: [{ threadId: thread.id, completed: false }],
+    });
+    expect(t.harness.experimental_rpcInvalidations).toHaveLength(before + 1);
+  });
+
+  it("a queued letter steered into a reassigned conversation shows its current bot", async () => {
+    const t = await threeBots();
+    t.recordTurn("thr_b", "user", null);
+    await t.rpc("bots.v1.setHidden", { botId: t.b.id, hidden: true });
+    await t.rpc("bots.v1.setHidden", { botId: t.c.id, hidden: true });
+    t.delivery.immediate = false;
+    await t.letter("thr_a", t.b.id, "thr_b");
+    await t.assign("thr_b", t.c.id);
+    const hidden = async (botId: string) =>
+      (await t.rpc<BotDetail>("bots.v1.get", { botId })).hidden;
+    expect(await hidden(t.c.id)).toBe(true);
+
+    await t.deliver(t.delivery.queued[0]!, "steer");
+
+    expect(await hidden(t.c.id)).toBe(false);
+    expect(await hidden(t.b.id)).toBe(true);
+  });
 
   it("an immediately delivered letter shows its recipient", async () => {
     const t = await threeBots();

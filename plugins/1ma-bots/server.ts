@@ -122,13 +122,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     return botId;
   };
 
-  const reopen = (threadId: string) => {
-    if (store.setCompleted(threadId, false)) changed();
-  };
+  const reopen = (threadId: string) => store.setCompleted(threadId, false);
 
   const showForWork = (threadId: string) => {
     const botId = store.botOfThread(threadId);
-    if (botId !== null && store.setHidden(botId, false, { kind: "system", id: null })) changed();
+    return botId !== null && store.setHidden(botId, false, { kind: "system", id: null });
   };
 
   bb.agents.configure((ctx) => {
@@ -319,6 +317,9 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     },
   });
 
+  // send() confirms immediate delivery; message.dispatched confirms a queued
+  // letter, including “Send now”. The dispatch hook runs before bb's waits.
+  // Claiming the token once keeps a repeat from showing a bot hidden again.
   const accepted = (args: { threadId: string; texts: readonly string[] }) => {
     const botId = store.botOfThread(args.threadId);
     if (botId === null) return;
@@ -371,31 +372,32 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       order: "desc",
       limit: "1",
     });
-    if (latest !== undefined && latest.createdAt > completedAt) reopen(threadId);
+    if (latest !== undefined && latest.createdAt > completedAt && reopen(threadId)) changed();
   };
   const textsOf = (blocks: ReadonlyArray<{ type: string; text?: string }>) =>
     blocks.flatMap((block) =>
       block.type === "text" && block.text !== undefined ? [block.text] : [],
     );
 
-  // A letter is accepted only once bb confirms it reached a turn: send()
-  // answers "sent" (handled in bot_message), or a queued row leaves the
-  // queue (message.dispatched). The dispatch hook could not know: other
-  // plugins' hooks and bb's own waits are decided after it. The owner's own
-  // message needs no hook either: bot_message reads the request bb recorded
-  // for the current turn (ownerTurnOf), and a started turn reopens a done
-  // conversation (thread.active).
   bb.events.on("message.dispatched", ({ entry }) =>
     accepted({ threadId: entry.threadId, texts: textsOf(entry.content) }),
   );
   bb.events.on("thread.idle", ({ thread }) => reopenIfTurnStarted(thread.id));
 
-  bb.events.on("thread.active", ({ thread }) => showForWork(thread.id));
-  bb.events.on("interaction.pending", ({ thread }) => {
-    showForWork(thread.id);
-    reopen(thread.id);
+  bb.events.on("thread.active", ({ thread }) => {
+    if (showForWork(thread.id)) changed();
   });
-  bb.events.on("thread.failed", ({ thread }) => reopen(thread.id));
+  bb.events.on("interaction.pending", ({ thread }) => {
+    const updated = store.transaction(() => {
+      const shown = showForWork(thread.id);
+      const reopened = reopen(thread.id);
+      return shown || reopened;
+    });
+    if (updated) changed();
+  });
+  bb.events.on("thread.failed", ({ thread }) => {
+    if (reopen(thread.id)) changed();
+  });
   bb.events.on("thread.deleted", ({ thread }) => {
     store.forgetThread(thread.id);
     changed();
