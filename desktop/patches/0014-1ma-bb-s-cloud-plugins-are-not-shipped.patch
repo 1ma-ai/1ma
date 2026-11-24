@@ -21,10 +21,16 @@ purged the same way.
 
 Desktop: without connect the app starts no account server sync, session
 renewal or machine enrollment and opens no sign-in window, so the Server
-menu has no "Sign in to bb Connect" item and nothing reaches getbb.app. The
-server target store drops a saved connect server on load and never chooses
-or adopts one. A server that moved away through bb connect is not opened:
-the moved-server page explains it and offers only Choose server.
+menu has no "Sign in to bb Connect" item and none of connect's code reaches
+getbb.app. The server target store drops a saved connect server on load and
+never chooses or adopts one. A server that moved away through bb connect is
+not opened: the moved-server page explains it and offers only Choose server.
+
+Desktop, the saved server list: bb reads server-target.json once at start
+and treats any read error as "no file", so the next change writes an empty
+list over the saved servers. A file that exists but could not be read is now
+left alone for that start: changes stay in memory, and a move to a direct
+server is not recorded as shown, so the next start repeats it.
 
 The AI services text and search keyword no longer mention bb cloud.
 
@@ -32,25 +38,27 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../settings/AiServicesSettingsSection.tsx    |   2 +-
  .../components/settings/settings-search.ts    |   2 +-
- apps/desktop/src/main.ts                      | 158 +++++++++++-------
- apps/desktop/src/server-target.ts             |  22 ++-
- .../test/fixtures/startup-retry-smoke.cjs     |  82 ++++++---
+ apps/desktop/src/main.ts                      | 161 +++++++++-------
+ apps/desktop/src/server-moved.ts              |   6 +-
+ apps/desktop/src/server-target.ts             |  49 ++++-
+ .../test/fixtures/startup-retry-smoke.cjs     |  82 +++++++--
  apps/desktop/test/preload-build.test.ts       |   1 +
- apps/desktop/test/server-target.test.ts       |  69 ++++++++
+ apps/desktop/test/server-moved.test.ts        |  69 ++++++-
+ apps/desktop/test/server-target.test.ts       | 172 +++++++++++++++++-
  .../src/services/plugins/builtin-registry.ts  |  16 +-
- .../src/services/plugins/plugin-service.ts    |  30 +++-
- .../public/public-host-management.test.ts     |  50 +-----
+ .../src/services/plugins/plugin-service.ts    |  30 ++-
+ .../public/public-host-management.test.ts     |  50 +----
  .../plugin-catalog-routes.test.ts             |   9 +-
  .../plugin-catalog-service.test.ts            |  23 ++-
- .../services/plugins/builtin-plugins.test.ts  |  66 ++++++++
- .../services/plugins/builtin-registry.test.ts |  38 ++++-
+ .../services/plugins/builtin-plugins.test.ts  |  66 +++++++
+ .../services/plugins/builtin-registry.test.ts |  38 +++-
  .../services/plugins/plugin-install.test.ts   |  26 +--
  packages/bb-app/scripts/smoke-tarball.mjs     |   1 -
  packages/db/src/data/index.ts                 |   1 +
  packages/db/src/data/plugins.ts               |  11 ++
  packages/domain/src/bb-cloud.ts               |  14 ++
  packages/domain/src/index.ts                  |   1 +
- 20 files changed, 461 insertions(+), 161 deletions(-)
+ 22 files changed, 663 insertions(+), 167 deletions(-)
  create mode 100644 packages/domain/src/bb-cloud.ts
 
 diff --git a/apps/app/src/components/settings/AiServicesSettingsSection.tsx b/apps/app/src/components/settings/AiServicesSettingsSection.tsx
@@ -80,7 +88,7 @@ index c7d16a5..9f08062 100644
        {
          title: "Thread titles",
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 92cdadc..147ffc9 100644
+index 92cdadc..97a6460 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
 @@ -45,6 +45,7 @@ import {
@@ -162,15 +170,18 @@ index 92cdadc..147ffc9 100644
    if (target.kind === "builtin") {
      startServerMovedWatcher();
      const attached = await ensureBuiltinRuntimeAttached();
-@@ -3056,6 +3087,7 @@ async function runDesktopApp(): Promise<void> {
+@@ -3056,6 +3087,10 @@ async function runDesktopApp(): Promise<void> {
    });
  
    serverTargetStore = createServerTargetStore({
 +    connect: BB_CONNECT_SHIPPED,
++    log: (message) => {
++      desktopLogger.warn(`[desktop] ${message}`);
++    },
      storagePath: join(userDataPath, SERVER_TARGET_FILE_NAME),
    });
    await serverTargetStore.load();
-@@ -3071,63 +3103,65 @@ async function runDesktopApp(): Promise<void> {
+@@ -3071,63 +3106,65 @@ async function runDesktopApp(): Promise<void> {
    machineServiceNoticeStore = createServerMoveNoticeStore({
      storagePath: join(userDataPath, MACHINE_SERVICE_NOTICE_FILE_NAME),
    });
@@ -293,7 +304,7 @@ index 92cdadc..147ffc9 100644
  
    const desktopUpdateSupport = resolveDesktopUpdateSupport({
      canReplaceAppImage,
-@@ -3410,7 +3444,7 @@ async function runDesktopApp(): Promise<void> {
+@@ -3410,7 +3447,7 @@ async function runDesktopApp(): Promise<void> {
      await initializeRuntime({ bridgePath, serverUrl, userDataPath });
    } else {
      await applyServerTarget();
@@ -302,11 +313,35 @@ index 92cdadc..147ffc9 100644
    }
  }
  
+diff --git a/apps/desktop/src/server-moved.ts b/apps/desktop/src/server-moved.ts
+index 748464c..81469dc 100644
+--- a/apps/desktop/src/server-moved.ts
++++ b/apps/desktop/src/server-moved.ts
+@@ -81,7 +81,7 @@ interface ApplyServerMoveArgs {
+   showNotice(notice: ServerMovedNotice): void;
+   targetStore: Pick<
+     ServerTargetStore,
+-    "getTarget" | "setConnectServer" | "setCustomServerUrl"
++    "getTarget" | "savesChanges" | "setConnectServer" | "setCustomServerUrl"
+   >;
+ }
+ 
+@@ -365,7 +365,9 @@ export async function applyServerMove(
+   if (alreadyNoticed) {
+     return { noticeShown: false, switched };
+   }
+-  await args.noticeStore.markShown(args.move.moveId);
++  if (args.targetStore.savesChanges()) {
++    await args.noticeStore.markShown(args.move.moveId);
++  }
+   args.showNotice(formatServerMovedNotice(args.move));
+   return { noticeShown: true, switched };
+ }
 diff --git a/apps/desktop/src/server-target.ts b/apps/desktop/src/server-target.ts
-index c6257b8..c63bcf7 100644
+index c6257b8..af16a51 100644
 --- a/apps/desktop/src/server-target.ts
 +++ b/apps/desktop/src/server-target.ts
-@@ -43,6 +43,11 @@ export interface ServerTargetFs {
+@@ -43,13 +43,25 @@ export interface ServerTargetFs {
  }
  
  interface CreateServerTargetStoreArgs {
@@ -316,9 +351,23 @@ index c6257b8..c63bcf7 100644
 +   */
 +  connect?: boolean;
    fs?: ServerTargetFs;
++  /** Told once when the file exists but could not be read. */
++  log?: (message: string) => void;
    storagePath: string;
  }
-@@ -134,6 +139,7 @@ export function createServerTargetStore(
+ 
+ export interface ServerTargetStore {
+   adoptConnectServers(servers: readonly ConnectServerRef[]): Promise<boolean>;
+   getConnectServer(): ConnectServerRef | null;
++  /**
++   * False when load() found the file but could not read it: changes then
++   * stay in memory for this start, and writes resolve without saving.
++   */
++  savesChanges(): boolean;
+   getConnectServerName(handle: string): string | null;
+   getCustomServerUrl(): string | null;
+   getCustomServerUrls(): string[];
+@@ -134,6 +146,7 @@ export function createServerTargetStore(
    args: CreateServerTargetStoreArgs,
  ): ServerTargetStore {
    const fsImpl = args.fs ?? defaultFs;
@@ -326,7 +375,24 @@ index c6257b8..c63bcf7 100644
    let connectServer: ConnectServerRef | null = null;
    let customServerUrl: string | null = null;
    let customServers: CustomServer[] = [];
-@@ -183,6 +189,9 @@ export function createServerTargetStore(
+@@ -142,8 +155,16 @@ export function createServerTargetStore(
+   let showBuiltinServer = true;
+   let persistedSettings: PersistedServerTarget | null = null;
+   let pendingPersist: Promise<void> = Promise.resolve();
++  /**
++   * The file exists but could not be read this start. It holds the user's
++   * servers, so it is not overwritten until a load reads it.
++   */
++  let unreadable = false;
+ 
+   function persist(): Promise<void> {
++    if (unreadable) {
++      return Promise.resolve();
++    }
+     const customServerNames = Object.fromEntries(
+       customServers
+         .filter((server) => server.name !== null)
+@@ -183,6 +204,9 @@ export function createServerTargetStore(
        await persist();
      },
      async adoptConnectServers(servers) {
@@ -336,7 +402,38 @@ index c6257b8..c63bcf7 100644
        const serversByUrl = new Map<string, ConnectServerRef>();
        for (const server of servers) {
          const url = normalizeCustomServerUrl(server.url);
-@@ -300,6 +309,10 @@ export function createServerTargetStore(
+@@ -222,6 +246,9 @@ export function createServerTargetStore(
+     getConnectServer() {
+       return connectServer === null ? null : { ...connectServer };
+     },
++    savesChanges() {
++      return !unreadable;
++    },
+     getConnectServerName(handle) {
+       return connectServerNames.get(handle) ?? null;
+     },
+@@ -245,12 +272,19 @@ export function createServerTargetStore(
+     },
+     async load() {
+       let persisted: PersistedServerTarget | null = null;
++      unreadable = false;
+       try {
+         persisted = parsePersistedServerTarget(
+           await fsImpl.readFile(args.storagePath, "utf8"),
+         );
+-      } catch {
++      } catch (error) {
+         persisted = null;
++        if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
++          unreadable = true;
++          args.log?.(
++            `could not read ${args.storagePath}; it stays unchanged until the next start, and server changes made now are not saved: ${error instanceof Error ? error.message : String(error)}`,
++          );
++        }
+       }
+       persistedSettings = persisted;
+       showBuiltinServer = persisted?.showBuiltinServer ?? true;
+@@ -300,6 +334,10 @@ export function createServerTargetStore(
            },
          ),
        );
@@ -347,7 +444,7 @@ index c6257b8..c63bcf7 100644
        if (persisted.target === "custom" && customServerUrl !== null) {
          target = "custom";
        } else if (persisted.target === "connect" && connectServer !== null) {
-@@ -321,6 +334,9 @@ export function createServerTargetStore(
+@@ -321,6 +359,9 @@ export function createServerTargetStore(
        return true;
      },
      async setConnectServer(server) {
@@ -357,7 +454,7 @@ index c6257b8..c63bcf7 100644
        connectServer = { ...server };
        target = "connect";
        await persist();
-@@ -361,7 +377,11 @@ export function createServerTargetStore(
+@@ -361,7 +402,11 @@ export function createServerTargetStore(
          if (target === "custom") {
            const fallbackConnectServer =
              connectServer ??
@@ -512,14 +609,234 @@ index ae9566d..a071c18 100644
          ]) {
            const retryProfile = join(smokeRoot, `retry-${scenario}`);
            await mkdir(retryProfile);
+diff --git a/apps/desktop/test/server-moved.test.ts b/apps/desktop/test/server-moved.test.ts
+index 65b4553..02fac31 100644
+--- a/apps/desktop/test/server-moved.test.ts
++++ b/apps/desktop/test/server-moved.test.ts
+@@ -60,18 +60,32 @@ function movedFile(overrides: Partial<ServerMovedFile> = {}): ServerMovedFile {
+   };
+ }
+ 
+-function createMemoryFs(): { files: Map<string, string>; fs: ServerTargetFs } {
++function createMemoryFs(): {
++  failNextRead(): void;
++  files: Map<string, string>;
++  fs: ServerTargetFs;
++} {
+   const files = new Map<string, string>();
++  let failRead = false;
+   return {
++    failNextRead() {
++      failRead = true;
++    },
+     files,
+     fs: {
+       async mkdir() {
+         return undefined;
+       },
+       async readFile(path) {
++        if (failRead) {
++          failRead = false;
++          throw Object.assign(new Error(`EIO: ${path}`), { code: "EIO" });
++        }
+         const content = files.get(path);
+         if (content === undefined) {
+-          throw new Error(`ENOENT: ${path}`);
++          throw Object.assign(new Error(`ENOENT: ${path}`), {
++            code: "ENOENT",
++          });
+         }
+         return content;
+       },
+@@ -296,6 +310,57 @@ describe("applyServerMove", () => {
+     expect(restartedTargetStore.getTarget().kind).toBe("connect");
+   });
+ 
++  it("moves again on the next start when the first start could not save the move", async () => {
++    const memory = createMemoryFs();
++    const storagePath = "/user-data/server-target.json";
++    const old = createServerTargetStore({ fs: memory.fs, storagePath });
++    await old.load();
++    await old.setCustomServerUrl("https://old.example");
++    const start = async () => {
++      const targetStore = createServerTargetStore({
++        fs: memory.fs,
++        log: () => undefined,
++        storagePath,
++      });
++      await targetStore.load();
++      const notices: ServerMovedNotice[] = [];
++      await applyServerMove({
++        move: DIRECT_MOVE,
++        noticeStore: createServerMoveNoticeStore({
++          fs: memory.fs,
++          storagePath: "/user-data/server-move-notice.json",
++        }),
++        showNotice(notice) {
++          notices.push(notice);
++        },
++        targetStore,
++      });
++      return { notices, target: targetStore.getTarget() };
++    };
++
++    memory.failNextRead();
++    const unsaved = await start();
++    expect(unsaved.target).toEqual({
++      kind: "custom",
++      url: "https://studio.tailnet.ts.net:38886",
++    });
++    expect(unsaved.notices).toHaveLength(1);
++    expect(memory.files.get(storagePath)).toContain("https://old.example");
++
++    const next = await start();
++    expect(next.target).toEqual({
++      kind: "custom",
++      url: "https://studio.tailnet.ts.net:38886",
++    });
++    expect(next.notices).toHaveLength(1);
++    expect(memory.files.get(storagePath)).toContain(
++      "https://studio.tailnet.ts.net:38886",
++    );
++
++    const after = await start();
++    expect(after.notices).toEqual([]);
++  });
++
+   it("keeps a target the user chose after the notice", async () => {
+     const stores = await createStores();
+     await applyServerMove({ move: CONNECT_MOVE, ...stores });
 diff --git a/apps/desktop/test/server-target.test.ts b/apps/desktop/test/server-target.test.ts
-index 2a7e6cc..835bf0f 100644
+index 2a7e6cc..324a142 100644
 --- a/apps/desktop/test/server-target.test.ts
 +++ b/apps/desktop/test/server-target.test.ts
-@@ -379,3 +379,72 @@ describe("server target store", () => {
+@@ -16,20 +16,31 @@ describe("builtinServerName", () => {
+ });
+ 
+ function createMemoryFs(initial: Record<string, string> = {}): {
++  failNextRead(): void;
+   files: Map<string, string>;
+   fs: ServerTargetFs;
+ } {
+   const files = new Map(Object.entries(initial));
++  let failRead = false;
+   return {
++    failNextRead() {
++      failRead = true;
++    },
+     files,
+     fs: {
+       async mkdir() {
+         return undefined;
+       },
+       async readFile(path) {
++        if (failRead) {
++          failRead = false;
++          throw Object.assign(new Error(`EIO: ${path}`), { code: "EIO" });
++        }
+         const content = files.get(path);
+         if (content === undefined) {
+-          throw new Error(`ENOENT: ${path}`);
++          throw Object.assign(new Error(`ENOENT: ${path}`), {
++            code: "ENOENT",
++          });
+         }
+         return content;
+       },
+@@ -379,3 +390,162 @@ describe("server target store", () => {
      expect(invalidUrl.getCustomServerUrl()).toBeNull();
    });
  });
++
++describe("server target store whose file could not be read", () => {
++  const saved = `${JSON.stringify(
++    {
++      customServerUrl: "https://studio.example",
++      customServerUrls: ["https://studio.example", "https://office.example"],
++      customServerNames: {
++        "https://office.example": "Office",
++        "https://studio.example": "Studio",
++      },
++      laterVersionSetting: "kept",
++      target: "custom",
++    },
++    null,
++    2,
++  )}\n`;
++
++  it("keeps the saved servers: changes of this start are not written over them", async () => {
++    const memory = createMemoryFs({ "/tmp/t.json": saved });
++    const messages: string[] = [];
++    const store = createServerTargetStore({
++      fs: memory.fs,
++      log: (message) => messages.push(message),
++      storagePath: "/tmp/t.json",
++    });
++    memory.failNextRead();
++    await store.load();
++
++    await store.setShowBuiltinServer(false);
++    await store.setCustomServerUrl("https://new.example");
++
++    expect(memory.files.get("/tmp/t.json")).toBe(saved);
++    expect(store.savesChanges()).toBe(false);
++    expect(store.getTarget()).toEqual({
++      kind: "custom",
++      url: "https://new.example",
++    });
++    expect(messages).toHaveLength(1);
++    expect(messages[0]).toContain("/tmp/t.json");
++
++    const next = createServerTargetStore({
++      fs: memory.fs,
++      storagePath: "/tmp/t.json",
++    });
++    await next.load();
++    expect(next.savesChanges()).toBe(true);
++    expect(next.getCustomServers()).toEqual([
++      { name: "Studio", url: "https://studio.example" },
++      { name: "Office", url: "https://office.example" },
++    ]);
++    await next.setShowBuiltinServer(false);
++    expect(JSON.parse(memory.files.get("/tmp/t.json") ?? "")).toMatchObject({
++      customServerUrls: ["https://studio.example", "https://office.example"],
++      laterVersionSetting: "kept",
++      showBuiltinServer: false,
++    });
++  });
++
++  it("saves again once a later load reads the file", async () => {
++    const memory = createMemoryFs({ "/tmp/t.json": saved });
++    const store = createServerTargetStore({
++      fs: memory.fs,
++      log: () => undefined,
++      storagePath: "/tmp/t.json",
++    });
++    memory.failNextRead();
++    await store.load();
++    await store.load();
++
++    expect(store.savesChanges()).toBe(true);
++    await store.setCustomServerName("https://office.example", "Warsaw");
++    expect(memory.files.get("/tmp/t.json")).toContain("Warsaw");
++  });
++
++  it("writes a first file when there was none", async () => {
++    const memory = createMemoryFs();
++    const messages: string[] = [];
++    const store = createServerTargetStore({
++      fs: memory.fs,
++      log: (message) => messages.push(message),
++      storagePath: "/tmp/t.json",
++    });
++    await store.load();
++
++    expect(store.savesChanges()).toBe(true);
++    await store.setCustomServerUrl("https://studio.example");
++    expect(memory.files.get("/tmp/t.json")).toContain("https://studio.example");
++    expect(messages).toEqual([]);
++  });
++});
 +
 +describe("server target store without bb connect", () => {
 +  const savedConnect = JSON.stringify({

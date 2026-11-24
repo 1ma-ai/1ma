@@ -1,5 +1,6 @@
-// Puts the 1ma plugins into a prepared bb tree as built-in plugins (patch
-// 0014). Run after bb's dependencies are installed and before bb is built:
+// Puts the 1ma plugins into a prepared bb tree as built-in plugins (the
+// built-in 1ma plugins patch). Run after bb's dependencies are installed and
+// before bb is built:
 //
 //   node desktop/scripts/embed-plugins.mjs <bb tree>
 //
