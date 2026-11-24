@@ -13,7 +13,8 @@ export type ReadJournal = (signal: AbortSignal) => Promise<JournalTail>;
 
 export interface MainWatchRow {
   repo: string;
-  lastHead: string;
+  anchor: string;
+  observedHead: string;
   state: "ok" | "needs_reconcile" | "bypass" | "unknown";
   detail: string | null;
   checkedAt: number;
@@ -35,13 +36,15 @@ export function mainWatchRows(db: Database.Database): MainWatchRow[] {
   const rows = db.prepare(`SELECT * FROM main_watch ORDER BY repo`).all() as Array<{
     repo: string;
     last_head: string;
+    observed_head: string | null;
     state: string;
     detail: string | null;
     checked_at: number;
   }>;
   return rows.map((row) => ({
     repo: row.repo,
-    lastHead: row.last_head,
+    anchor: row.last_head,
+    observedHead: row.observed_head ?? row.last_head,
     state:
       row.state === "ok" || row.state === "needs_reconcile" || row.state === "bypass"
         ? row.state
@@ -62,11 +65,23 @@ export interface JournalObservation {
 export const ROLLBACK_KIND = "main_rollback";
 
 function saver(db: Database.Database) {
-  return db.prepare(
-    `INSERT INTO main_watch (repo, last_head, state, detail, checked_at) VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT (repo) DO UPDATE SET last_head = excluded.last_head, state = excluded.state,
-       detail = excluded.detail, checked_at = excluded.checked_at`,
+  const statement = db.prepare(
+    `INSERT INTO main_watch (repo, last_head, observed_head, state, detail, checked_at) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (repo) DO UPDATE SET last_head = excluded.last_head, observed_head = excluded.observed_head,
+       state = excluded.state, detail = excluded.detail, checked_at = excluded.checked_at`,
   );
+  return (
+    repo: string,
+    anchor: string,
+    observed: string,
+    state: MainWatchRow["state"],
+    detail: string | null,
+    now: number,
+  ) => statement.run(repo, anchor, observed, state, detail, now);
+}
+
+function transition(row: Pick<MainWatchRow, "anchor" | "observedHead">): string {
+  return `${row.anchor}>${row.observedHead}`;
 }
 
 export function rollbackKind(db: Database.Database): QuestionKind {
@@ -75,20 +90,25 @@ export function rollbackKind(db: Database.Database): QuestionKind {
     const at = subject.lastIndexOf("@");
     return at < 0 ? null : { repo: subject.slice(0, at), sha: subject.slice(at + 1) };
   };
+  const row = (repo: string) => mainWatchRows(db).find((candidate) => candidate.repo === repo);
   return {
     currentVersion(subject) {
       const target = head(subject);
       if (target === null) return null;
-      return mainWatchRows(db).find((row) => row.repo === target.repo)?.lastHead ?? null;
+      const current = row(target.repo);
+      return current === undefined ? null : transition(current);
     },
     onAnswer(question, optionId, now) {
       const target = head(question.subject);
-      if (target === null) return "stale";
+      const current = target === null ? undefined : row(target.repo);
+      if (target === null || current === undefined || current.observedHead !== target.sha)
+        return "stale";
       if (optionId === "yes")
-        save.run(target.repo, target.sha, "ok", "rollback confirmed by the owner", now);
+        save(target.repo, target.sha, target.sha, "ok", "rollback confirmed by the owner", now);
       else
-        save.run(
+        save(
           target.repo,
+          target.sha,
           target.sha,
           "bypass",
           "the owner said this was not the train's rollback",
@@ -139,32 +159,34 @@ export async function runMainWatch(deps: MainWatchDeps): Promise<string[]> {
     if (!current.connected.has(repo)) continue;
     const before = previous.get(repo);
     if (before === undefined) {
-      save.run(repo, head, "ok", "first observation", deps.now);
+      save(repo, head, head, "ok", "first observation", deps.now);
       continue;
     }
-    if (before.lastHead === head) continue;
-    const verdict = judgeMainMove(records, repo, before.lastHead, head, journal.truncated);
+    if (before.state !== "needs_reconcile" && before.observedHead === head) continue;
+    const anchor = before.anchor;
+    const verdict = judgeMainMove(records, repo, anchor, head, journal.truncated);
     if (verdict.kind === "explained") {
-      save.run(repo, head, "ok", null, deps.now);
+      save(repo, head, head, "ok", null, deps.now);
     } else if (verdict.kind === "needs_reconcile") {
-      save.run(repo, head, "needs_reconcile", verdict.detail, deps.now);
+      save(repo, anchor, head, "needs_reconcile", verdict.detail, deps.now);
     } else if (verdict.kind === "rollback") {
-      save.run(
+      save(
         repo,
-        before.lastHead,
+        anchor,
+        head,
         "needs_reconcile",
         `main moved to ${head.slice(0, 12)} after attempt ${verdict.attempt} was rolled back; waiting for the owner`,
         deps.now,
       );
       deps.questions.ask(
         {
-          key: `${ROLLBACK_KIND}:${repo}:${head}`,
+          key: `${ROLLBACK_KIND}:${repo}:${anchor}>${head}`,
           kind: ROLLBACK_KIND,
           subject: `${repo}@${head}`,
-          expectedVersion: before.lastHead,
+          expectedVersion: transition({ anchor, observedHead: head }),
           card: {
             title: strings.rollbackTitle(repo),
-            observed: strings.rollbackObserved(repo, before.lastHead, head, verdict.attempt),
+            observed: strings.rollbackObserved(repo, anchor, head, verdict.attempt),
             affected: strings.rollbackAffected,
             recommendation: strings.rollbackRecommendation,
             options: [
@@ -177,7 +199,7 @@ export async function runMainWatch(deps: MainWatchDeps): Promise<string[]> {
         deps.now,
       );
     } else {
-      save.run(repo, head, "bypass", verdict.detail, deps.now);
+      save(repo, head, head, "bypass", verdict.detail, deps.now);
       deps.questions.ask(
         {
           key: `${BYPASS_KIND}:${repo}:${head}`,

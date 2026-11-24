@@ -40,6 +40,29 @@ describe("train journal", () => {
     ]);
   });
 
+  it("takes the base from the push-intent of the same attempt and final head when merged has none", () => {
+    const records = journalOf(
+      { event: "push-intent", base: A, final_sha: B, merges: [7] },
+      { event: "merged", final_sha: B },
+    );
+    expect(judgeMainMove(records, "example/app", A, B, false)).toEqual({ kind: "explained" });
+    const otherAttempt = journalOf(
+      { attempt: "t0", event: "push-intent", base: A, final_sha: B },
+      { event: "merged", final_sha: B },
+    );
+    expect(judgeMainMove(otherAttempt, "example/app", A, B, false).kind).toBe("needs_reconcile");
+    const shortSha = journalOf(
+      { event: "push-intent", base: A, final_sha: B.slice(0, 12) },
+      { event: "merged", final_sha: B.slice(0, 12) },
+    );
+    expect(judgeMainMove(shortSha, "example/app", A, B, false).kind).toBe("needs_reconcile");
+    const ownBase = journalOf(
+      { event: "push-intent", base: X, final_sha: B },
+      { event: "merged", base_sha: A, final_sha: B },
+    );
+    expect(judgeMainMove(ownBase, "example/app", A, B, false)).toEqual({ kind: "explained" });
+  });
+
   it("explains a move only when the train's chain leads from the last head to the new one", () => {
     const one = journalOf({ event: "merged", base_sha: A, final_sha: B });
     expect(judgeMainMove(one, "example/app", A, B, false)).toEqual({ kind: "explained" });
@@ -77,7 +100,8 @@ describe("train journal", () => {
   });
 });
 
-function setup(journal: string) {
+function setup(initialJournal: string) {
+  let journal = initialJournal;
   const db = new Database(":memory:");
   for (const statement of MIGRATIONS) db.exec(statement);
   const questions = new QuestionStore(db);
@@ -105,11 +129,20 @@ function setup(journal: string) {
       now: 1_000,
       signal: new AbortController().signal,
     });
-  return { db, questions, run, watch, setHead: (value: string) => (head = value) };
+  return {
+    db,
+    questions,
+    run,
+    watch,
+    setHead: (value: string) => (head = value),
+    setJournal: (...lines: string[]) => (journal = lines.join("\n")),
+  };
 }
 
-function answer(t: ReturnType<typeof setup>, optionId: string) {
-  const [question] = t.questions.waiting();
+function answer(t: ReturnType<typeof setup>, optionId: string, subject?: string) {
+  const question = t.questions
+    .waiting()
+    .find((candidate) => subject === undefined || candidate.subject === subject);
   if (question === undefined) throw new Error("no question");
   t.questions.markOpen(question.id, "thr_bot", "tok", 1_000);
   return t.questions.answer(
@@ -136,13 +169,68 @@ describe("main watch", () => {
     expect(mainWatchRows(t.db)[0]?.state).toBe("bypass");
   });
 
-  it("marks an unconfirmed push as needing a reconcile instead of asking", async () => {
-    const t = setup(line({ event: "push-intent", final_sha: B }));
+  it("marks an unconfirmed push as needing a reconcile and keeps the confirmed head", async () => {
+    const t = setup(line({ event: "push-intent", base: A, final_sha: B }));
     await t.run();
     t.setHead(B);
     await t.run();
     expect(t.questions.waiting()).toEqual([]);
-    expect(mainWatchRows(t.db)[0]).toMatchObject({ state: "needs_reconcile" });
+    expect(mainWatchRows(t.db)[0]).toMatchObject({
+      anchor: A,
+      observedHead: B,
+      state: "needs_reconcile",
+    });
+  });
+
+  it("confirms the push once merged arrives for the same head, without main moving again", async () => {
+    const t = setup(line({ event: "push-intent", base: A, final_sha: B }));
+    await t.run();
+    t.setHead(B);
+    await t.run();
+    t.setJournal(
+      line({ event: "push-intent", base: A, final_sha: B }),
+      line({ event: "merged", final_sha: B }),
+    );
+    await t.run();
+    expect(mainWatchRows(t.db)[0]).toMatchObject({ anchor: B, observedHead: B, state: "ok" });
+    expect(t.questions.waiting()).toEqual([]);
+  });
+
+  it("explains a normal train whose base is written only in its push-intent", async () => {
+    const t = setup(
+      [
+        line({ event: "push-intent", base: A, final_sha: B, merges: [12, 13] }),
+        line({ event: "merged", final_sha: B }),
+      ].join("\n"),
+    );
+    await t.run();
+    t.setHead(B);
+    await t.run();
+    expect(mainWatchRows(t.db)[0]).toMatchObject({ anchor: B, state: "ok", detail: null });
+  });
+
+  it("refuses an answer to a rollback card once another head is observed", async () => {
+    const t = setup(
+      [
+        line({ event: "merged", base_sha: C, final_sha: A }),
+        line({ event: "rolled-back", final_sha: A }),
+      ].join("\n"),
+    );
+    await t.run();
+    t.setHead(C);
+    await t.run();
+    t.setHead(X);
+    await t.run();
+    expect(t.questions.waiting().map((question) => question.subject)).toEqual([
+      `example/app@${C}`,
+      `example/app@${X}`,
+    ]);
+    expect(answer(t, "yes", `example/app@${C}`)).toBe("stale");
+    expect(mainWatchRows(t.db)[0]).toMatchObject({
+      anchor: A,
+      observedHead: X,
+      state: "needs_reconcile",
+    });
   });
 
   it("asks nothing about a repository excluded, or a check turned off, while the journal was read", async () => {
@@ -159,7 +247,7 @@ describe("main watch", () => {
     };
     await t.run();
     expect(t.questions.waiting()).toEqual([]);
-    expect(mainWatchRows(t.db)[0]).toMatchObject({ lastHead: A, state: "ok" });
+    expect(mainWatchRows(t.db)[0]).toMatchObject({ anchor: A, state: "ok" });
   });
 
   it("is off unless enabled", async () => {
@@ -209,9 +297,9 @@ describe("main watch", () => {
     await t.run();
     await t.run();
     expect(t.questions.waiting().map((question) => question.kind)).toEqual(["main_rollback"]);
-    expect(mainWatchRows(t.db)[0]).toMatchObject({ lastHead: A, state: "needs_reconcile" });
+    expect(mainWatchRows(t.db)[0]).toMatchObject({ anchor: A, state: "needs_reconcile" });
     expect(answer(t, "yes")).toBe("applied");
-    expect(mainWatchRows(t.db)[0]).toMatchObject({ lastHead: C, state: "ok" });
+    expect(mainWatchRows(t.db)[0]).toMatchObject({ anchor: C, state: "ok" });
     await t.run();
     expect(t.questions.waiting()).toEqual([]);
   });

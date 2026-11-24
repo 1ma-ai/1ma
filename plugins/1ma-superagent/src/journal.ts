@@ -11,6 +11,7 @@ const recordSchema = z
     type: z.string().optional(),
     final_sha: z.string().optional(),
     base_sha: z.string().optional(),
+    base: z.string().optional(),
   })
   .loose();
 
@@ -44,7 +45,7 @@ export function parseJournal(text: string): TrainRecord[] {
       attempt: String(attempt),
       event,
       finalSha: parsed.data.final_sha ?? null,
-      baseSha: parsed.data.base_sha ?? null,
+      baseSha: parsed.data.base_sha ?? parsed.data.base ?? null,
     });
   }
   return records;
@@ -57,6 +58,12 @@ export type MainVerdict =
   | { kind: "needs_reconcile"; detail: string }
   | { kind: "rollback"; attempt: string }
   | { kind: "unexplained"; detail: string };
+
+function fullSha(value: string | null): string | null {
+  return value !== null && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value)
+    ? value.toLowerCase()
+    : null;
+}
 
 function sameSha(left: string | null, right: string): boolean {
   if (left === null) return false;
@@ -75,6 +82,18 @@ export function judgeMainMove(
   const ofRepo = records.filter((record) => record.repo === repo);
   const lastMerge = (sha: string) =>
     ofRepo.findLast((record) => record.event === "merged" && sameSha(record.finalSha, sha));
+  const intentBase = (merge: TrainRecord) => {
+    const final = fullSha(merge.finalSha);
+    if (final === null) return null;
+    const intent = ofRepo.findLast(
+      (record) =>
+        record.event === "push-intent" &&
+        record.attempt === merge.attempt &&
+        fullSha(record.finalSha) === final &&
+        record.baseSha !== null,
+    );
+    return intent?.baseSha ?? null;
+  };
   const missing = (detail: string): MainVerdict =>
     truncated
       ? { kind: "needs_reconcile", detail: `the journal tail is incomplete: ${detail}` }
@@ -102,12 +121,13 @@ export function judgeMainMove(
     const merge = lastMerge(cursor);
     if (merge === undefined)
       return missing(`a train was built on ${cursor.slice(0, 12)}, which no train wrote`);
-    if (merge.baseSha === null)
+    const base = merge.baseSha ?? intentBase(merge);
+    if (base === null)
       return {
         kind: "needs_reconcile",
-        detail: `merged record of attempt ${merge.attempt} has no base`,
+        detail: `merged record of attempt ${merge.attempt} has no base, and no push-intent of that attempt with the same final_sha carries one`,
       };
-    cursor = merge.baseSha;
+    cursor = base;
   }
   return { kind: "needs_reconcile", detail: `more than ${MAX_CHAIN} trains since the last check` };
 }

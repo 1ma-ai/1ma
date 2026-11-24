@@ -111,6 +111,7 @@ export const workRpcContract = defineRpcContract({
         z.object({
           repo: z.string(),
           mainHead: z.string(),
+          confirmedHead: z.string(),
           state: z.enum(["ok", "needs_reconcile", "bypass", "unknown"]),
           detail: z.string().nullable(),
           checkedAt: z.number(),
@@ -219,7 +220,8 @@ export function workRpcHandlers(
   questions: QuestionStore,
   releases: () => Array<{
     repo: string;
-    lastHead: string;
+    anchor: string;
+    observedHead: string;
     state: "ok" | "needs_reconcile" | "bypass" | "unknown";
     detail: string | null;
     checkedAt: number;
@@ -248,7 +250,8 @@ export function workRpcHandlers(
         github: await githubDto(),
         releases: releases().map((row) => ({
           repo: row.repo,
-          mainHead: row.lastHead,
+          mainHead: row.observedHead,
+          confirmedHead: row.anchor,
           state: row.state,
           detail: row.detail,
           checkedAt: row.checkedAt,
