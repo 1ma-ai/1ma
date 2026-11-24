@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { FaultProxy } from "./proxy.mjs";
-import { Server, requireEnv, waitFor } from "./servers.mjs";
+import { GH_ALLOW } from "./github-paths.mjs";
+import { FaultProxy } from "../lib/fault-proxy.mjs";
+import { STUB_MODEL, STUB_PROVIDER, Server, requireEnv, waitFor } from "../lib/servers.mjs";
 
 const root = path.join(requireEnv("E2E_ROOT"), "bot");
 const pluginDir = path.resolve(import.meta.dirname, "../../plugins/1ma-superagent");
 const packageDir = path.join(requireEnv("E2E_ROOT"), "server-package");
-const stubPath = path.resolve(import.meta.dirname, "stub-acp-agent.mjs");
-const fakeGhDir = path.resolve(import.meta.dirname, "fake-gh");
+const fakeGhDir = path.resolve(import.meta.dirname, "../lib/fake-gh");
 const stubLog = path.join(root, "stub.log");
 const ghFixtures = path.join(root, "github.json");
 const ghLog = path.join(root, "gh-calls.log");
@@ -17,8 +17,8 @@ const REPOS = JSON.stringify([{ repo: "example/app", accounts: { linux: ["linux-
 const FIRST_PROMPT =
   "[stub:reply создай чат на linux и вызови sa_start_chat]\n  второй абзац  с  пробелами \n\tи табуляцией ";
 const PLUGIN = "1ma-superagent";
-const PROVIDER = "acp-stub";
-const MODEL = "acp-default";
+const PROVIDER = STUB_PROVIDER;
+const MODEL = STUB_MODEL;
 const PASS = 200_000;
 
 const control = new Server({
@@ -31,6 +31,7 @@ const control = new Server({
     PATH: `${fakeGhDir}${path.delimiter}${process.env.PATH ?? ""}`,
     E2E_GH_FIXTURES: ghFixtures,
     E2E_GH_LOG: ghLog,
+    E2E_GH_ALLOW: GH_ALLOW,
   },
 });
 const executor = new Server({
@@ -219,19 +220,10 @@ describe("1ma-superagent bot actions with a model turn", () => {
     executor.start();
     await Promise.all([control.waitReady(), executor.waitReady()]);
     await proxy.listen(0);
-    const agents = JSON.stringify([
-      {
-        id: "stub",
-        displayName: "Stub",
-        command: process.execPath,
-        args: [stubPath],
-        env: { E2E_STUB_LOG: stubLog },
-      },
-    ]);
     for (const server of [control, executor]) {
-      server.bb(["plugin", "install", pluginDir, "--yes"]);
-      server.bb(["plugin", "config", "provider-acp", "set", "customAgents", agents]);
-      server.bb(["plugin", "config", PLUGIN, "set", "repos", REPOS]);
+      server.installPlugin(pluginDir);
+      server.registerStubAgent(stubLog);
+      server.configurePlugin(PLUGIN, "repos", REPOS);
     }
     control.bb(["plugin", "config", PLUGIN, "set", "role", "control"]);
     control.bb(["plugin", "config", PLUGIN, "set", "linuxServerUrl", proxy.url]);

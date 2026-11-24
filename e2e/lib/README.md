@@ -3,9 +3,8 @@
 Helpers for end-to-end suites that run real 1ma servers in GitHub Actions only.
 Never start a server, a browser or these tests on the workstation.
 
-These files come from `e2e/superagent` on the `superagent` branch, made generic.
-Whichever pull request merges first brings `e2e/lib`; the other one then switches
-its tests to it and drops its copy.
+Used by `e2e/bots` and `e2e/superagent`; a change here runs both suites. A
+helper one suite needs goes here, not into a copy inside the suite.
 
 - `server-version.txt`: the one pinned 1ma server release both suites install.
 - `install-server.mjs`: downloads that release, checks it against `SHA256SUMS`,

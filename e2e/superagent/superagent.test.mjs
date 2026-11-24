@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { Server, requireEnv, waitFor } from "./servers.mjs";
+import { GH_ALLOW } from "./github-paths.mjs";
+import { Server, requireEnv, waitFor } from "../lib/servers.mjs";
 
 const root = requireEnv("E2E_ROOT");
 const pluginDir = path.resolve(import.meta.dirname, "../../plugins/1ma-superagent");
@@ -11,7 +12,7 @@ const PLUGIN = "1ma-superagent";
 
 const ghFixtures = path.join(root, "github.json");
 const ghLog = path.join(root, "gh-calls.log");
-const fakeGhDir = path.resolve(import.meta.dirname, "fake-gh");
+const fakeGhDir = path.resolve(import.meta.dirname, "../lib/fake-gh");
 const REMOTE = "https://github.com/example/app.git";
 const journal = path.join(root, "journal.jsonl");
 const HEAD_A = "a".repeat(40);
@@ -62,6 +63,7 @@ const control = new Server({
     PATH: `${fakeGhDir}${path.delimiter}${process.env.PATH ?? ""}`,
     E2E_GH_FIXTURES: ghFixtures,
     E2E_GH_LOG: ghLog,
+    E2E_GH_ALLOW: GH_ALLOW,
   },
 });
 const executor = new Server({ name: "executor", port: 39887, daemonPort: 39897, root, packageDir });
