@@ -32,15 +32,18 @@ function run(command, args, options = {}) {
   return result.stdout;
 }
 
-// The names patch 0014 registers, read from the tree it was applied to, so the
-// list here and the list in bb cannot drift apart.
+// The names the built-in 1ma plugins patch registers, read from the tree it
+// was applied to, so the list here and the list in bb cannot drift apart.
 export function registeredNames(tree) {
   const source = readFileSync(
     path.join(tree, "apps/server/src/services/plugins/builtin-registry.ts"),
     "utf8",
   );
   const block = /export const ONE_MA_PLUGINS[^=]*=\s*\[([^\]]*)\]/u.exec(source);
-  if (block === null) throw new Error("this bb tree has no ONE_MA_PLUGINS (patch 0014)");
+  if (block === null)
+    throw new Error(
+      "this bb tree has no ONE_MA_PLUGINS (the built-in 1ma plugins patch is not applied)",
+    );
   return [...block[1].matchAll(/"([^"]+)"/gu)].map((match) => match[1]);
 }
 
@@ -66,7 +69,7 @@ export function embedPlugin({ tree, name, log = () => {} }) {
     mkdirSync(path.dirname(path.join(staging, file)), { recursive: true });
     cpSync(path.join(source, file), path.join(staging, file));
   }
-  // Part of the bundled-plugins build's turbo inputs (patch 0014), which see
+  // Part of the bundled-plugins build's turbo inputs (the same patch), which see
   // the sources here but not the git-ignored node_modules and dist: a change
   // to 1ma's locked dependencies rebuilds the plugin too.
   writeFileSync(
@@ -124,7 +127,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const registered = registeredNames(tree);
   if (JSON.stringify(registered) !== JSON.stringify(EMBEDDED)) {
     throw new Error(
-      `desktop/embedded-plugins.json lists ${EMBEDDED.join(", ")}, patch 0014 registers ${registered.join(", ")}`,
+      `desktop/embedded-plugins.json lists ${EMBEDDED.join(", ")}, the bb tree registers ${registered.join(", ")}`,
     );
   }
   // The generated sources bb's builder needs, as bb's own prepare:bundled

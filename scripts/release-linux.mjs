@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -96,11 +96,6 @@ const blocked = deployPlugins({
   replaceManaged,
   add,
   log: (line) => console.log(line),
-  mark: (directory) =>
-    writeFileSync(
-      path.join(directory, ".1ma-release.json"),
-      `${JSON.stringify({ repository: "https://github.com/1ma-ai/1ma", commit: sha }, null, 2)}\n`,
-    ),
   bb: {
     activeTheme: () => JSON.parse(run(bb, ["theme", "list", "--json"])).active?.themeId ?? null,
     setTheme: (id) => run(bb, ["theme", "set", id]),

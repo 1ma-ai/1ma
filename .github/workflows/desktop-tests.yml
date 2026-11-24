@@ -120,7 +120,7 @@ jobs:
             filters=(--filter '!@bb/mobile')
           fi
           bash .github/actions/setup-workspace/install-dependencies.sh "${filters[@]}"
-      - name: Put the 1ma plugins in as built-in plugins (patch 0014)
+      - name: Put the 1ma plugins in as built-in plugins
         working-directory: ${{ runner.temp }}/bb-src
         run: node "$GITHUB_WORKSPACE/desktop/scripts/embed-plugins.mjs" "$PWD"
       - name: Regenerate the PWA icon variants from the 1ma icons, as bb's app build does

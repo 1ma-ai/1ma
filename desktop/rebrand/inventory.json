@@ -744,7 +744,6 @@
 ["[desktop] bb-app exited while a bb installer is running; waiting for it to finish","[desktop] bb-app exited while a 1ma installer is running; waiting for it to finish"],
 ["[desktop] could not clear bb Connect sign-in: ${…}"],
 ["[desktop] could not enroll this app with bb Connect (${…}): ${…}"],
-["[desktop] could not finish deleting bb connect's sign-ins; the next start tries again: ${…}"],
 ["[desktop] could not open bb Connect sign-in: ${…}"],
 ["[desktop] could not read ${…} for this computer's bb Connect access: ${…}"],
 ["[desktop] could not switch to the moved bb server: ${…}","[desktop] could not switch to the moved 1ma server: ${…}"],

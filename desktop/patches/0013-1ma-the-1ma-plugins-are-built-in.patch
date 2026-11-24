@@ -22,7 +22,7 @@ using bb's list.
  7 files changed, 74 insertions(+), 10 deletions(-)
 
 diff --git a/apps/server/src/services/plugins/builtin-registry.ts b/apps/server/src/services/plugins/builtin-registry.ts
-index ab47686..9822203 100644
+index 5f831c6..21c84af 100644
 --- a/apps/server/src/services/plugins/builtin-registry.ts
 +++ b/apps/server/src/services/plugins/builtin-registry.ts
 @@ -291,6 +291,31 @@ export const BUNDLED_PLUGINS: readonly BundledPluginDefinition[] = [

@@ -1,4 +1,0 @@
-{
-  "tag": "desktop/v0.49.1-1ma.43515096970.1",
-  "why": "the last 1ma release without the built-in 1ma plugins (patches 0014, 0015); desktop/scripts/check-rollback.mjs goes back to it"
-}
