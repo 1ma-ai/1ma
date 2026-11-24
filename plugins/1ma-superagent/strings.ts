@@ -53,6 +53,8 @@ export const strings = {
   cardRecommendation: "Рекомендация",
   cardBroken: "Карточку не удалось показать.",
   cardDismiss: "Закрыть",
+  settingsChanged:
+    "The superagent's settings changed while this was checked; nothing was proposed. Call the tool again.",
   cardNotRecorded: "Решение не записано. Попробуйте ещё раз.",
   cardAnswerNotTaken:
     "Прошлый ответ пришёл мимо кнопок карточки и не записан. Выберите вариант кнопкой.",

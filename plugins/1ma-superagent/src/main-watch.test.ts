@@ -89,18 +89,23 @@ function setup(journal: string) {
     recentPulls: async () => ({ pulls: [], complete: true }),
     mainHead: async () => head,
   };
+  const watch = { enabled: true, excluded: [] as string[], duringRead: () => {} };
   const run = (enabled = true) =>
     runMainWatch({
       db,
       github,
-      readJournal: async () => ({ status: "ok", text: journal, truncated: false }),
-      enabled,
-      policy: repoPolicy([{ repo: "example/app", accounts: { mac: [], linux: [] } }], []),
+      readJournal: async () => {
+        watch.duringRead();
+        return { status: "ok", text: journal, truncated: false };
+      },
+      enabled: () => enabled && watch.enabled,
+      policy: () =>
+        repoPolicy([{ repo: "example/app", accounts: { mac: [], linux: [] } }], watch.excluded),
       questions,
       now: 1_000,
       signal: new AbortController().signal,
     });
-  return { db, questions, run, setHead: (value: string) => (head = value) };
+  return { db, questions, run, watch, setHead: (value: string) => (head = value) };
 }
 
 function answer(t: ReturnType<typeof setup>, optionId: string) {
@@ -140,6 +145,23 @@ describe("main watch", () => {
     expect(mainWatchRows(t.db)[0]).toMatchObject({ state: "needs_reconcile" });
   });
 
+  it("asks nothing about a repository excluded, or a check turned off, while the journal was read", async () => {
+    const t = setup("");
+    await t.run();
+    t.setHead(C);
+    t.watch.duringRead = () => {
+      t.watch.excluded = ["example/app"];
+    };
+    await t.run();
+    t.watch.excluded = [];
+    t.watch.duringRead = () => {
+      t.watch.enabled = false;
+    };
+    await t.run();
+    expect(t.questions.waiting()).toEqual([]);
+    expect(mainWatchRows(t.db)[0]).toMatchObject({ lastHead: A, state: "ok" });
+  });
+
   it("is off unless enabled", async () => {
     const t = setup("");
     await t.run(false);
@@ -162,8 +184,8 @@ describe("main watch", () => {
       readJournal: async () => {
         throw new Error("host worker exited");
       },
-      enabled: true,
-      policy: repoPolicy([{ repo: "example/app", accounts: { mac: [], linux: [] } }], []),
+      enabled: () => true,
+      policy: () => repoPolicy([{ repo: "example/app", accounts: { mac: [], linux: [] } }], []),
       questions: new QuestionStore(db),
       now: 5_000,
       signal: new AbortController().signal,

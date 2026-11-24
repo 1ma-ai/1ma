@@ -53,6 +53,9 @@ export function registerClaimTool(
       const existing = readClaims(
         await bb.sdk.threads.getPluginMetadata({ threadId: ctx.threadId, signal: ctx.signal }),
       );
+      const settled = policy();
+      if (isExcludedRepo(settled, projectRepo) || !isWatchedRepo(settled, projectRepo))
+        return refuse("The superagent's settings changed during the claim; nothing was claimed.");
       await bb.sdk.threads.updatePluginMetadata({
         threadId: ctx.threadId,
         set: {

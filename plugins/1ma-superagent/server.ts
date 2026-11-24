@@ -108,6 +108,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
     const settings = defineSettings(bb);
     const initial = await settings.get();
     let config = toConfig(initial);
+    let generation = 0;
     const warnRepos = (raw: string) => {
       const problem = reposProblem(raw);
       if (problem !== null) bb.log.warn(`watched repositories setting ignored: ${problem}`);
@@ -115,6 +116,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
     warnRepos(initial.repos);
     settings.onChange((next) => {
       config = toConfig(next);
+      generation += 1;
       warnRepos(next.repos);
     });
 
@@ -164,13 +166,24 @@ export function createPlugin(options: SuperagentOptions = {}) {
       changed: () => bb.rpc.experimental_invalidate([QUESTIONS_TAG]),
     });
     const executorsFor = options.executors ?? defaultExecutors;
+    let built: { generation: number; executors: readonly Executor[] } | null = null;
+    const currentExecutors = () => {
+      if (built?.generation !== generation)
+        built = { generation, executors: executorsFor(config, bb) };
+      return built.executors;
+    };
+    const actionSettings = () => ({
+      generation,
+      policy: policy(),
+      executors: new Map(currentExecutors().map((executor) => [executor.serverId, executor])),
+    });
     const runner = new PassRunner(
       (scope) =>
         runPass(
           {
             store,
             prStore,
-            executors: () => executorsFor(config, bb),
+            executors: currentExecutors,
             github: () => github,
             policy,
             mainBotThreadId: () => config.mainBotThreadId,
@@ -188,9 +201,8 @@ export function createPlugin(options: SuperagentOptions = {}) {
                       runActions({
                         actions,
                         questions,
-                        executors,
+                        settings: actionSettings,
                         observed,
-                        policy: policy(),
                         claimant,
                         now: Date.now,
                         signal: lifecycle.signal,
@@ -204,8 +216,8 @@ export function createPlugin(options: SuperagentOptions = {}) {
                         db,
                         github,
                         readJournal,
-                        enabled: config.mainCheckEnabled,
-                        policy: policy(),
+                        enabled: () => config.mainCheckEnabled,
+                        policy,
                         questions,
                         now,
                         signal: lifecycle.signal,
@@ -327,8 +339,9 @@ export function createPlugin(options: SuperagentOptions = {}) {
       actions,
       questions,
       executor: (serverId) =>
-        executorsFor(config, bb).find((candidate) => candidate.serverId === serverId) ?? null,
+        currentExecutors().find((candidate) => candidate.serverId === serverId) ?? null,
       policy,
+      generation: () => generation,
       allowed: botAllowed,
       afterProposal: () => dispatcher.dispatch(),
       now: Date.now,

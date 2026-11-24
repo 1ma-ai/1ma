@@ -23,12 +23,17 @@ export const NOTICE_KIND = "notice";
 export const STOPPING_LATE = "stopping late";
 export const STOPPED_LATE = "stopped late";
 
+export interface ActionSettings {
+  readonly generation: number;
+  readonly policy: RepoPolicy;
+  readonly executors: ReadonlyMap<ServerId, Executor>;
+}
+
 export interface ActionDeps {
   readonly actions: ActionStore;
   readonly questions: QuestionStore;
-  readonly executors: ReadonlyMap<ServerId, Executor>;
+  readonly settings: () => ActionSettings;
   readonly observed: ReadonlyMap<ServerId, Completeness>;
-  readonly policy: RepoPolicy;
   readonly claimant: string;
   readonly now: () => number;
   readonly signal: AbortSignal;
@@ -117,62 +122,66 @@ export function ambiguousKind(): QuestionKind {
   return { currentVersion: () => "1", onAnswer: () => {} };
 }
 
-async function targetChange(
-  deps: ActionDeps,
-  executor: Executor,
-  action: ActionRow,
-): Promise<string | null> {
-  const proposed = action.params.repo ?? null;
-  if (isExcludedRepo(deps.policy, proposed)) return strings.targetExcluded;
-  const repo = repoFromRemoteUrl(
-    await executor.projectRemote(action.params.projectId, deps.signal),
+function cancelForTarget(deps: ActionDeps, action: ActionRow, reason: string): void {
+  if (
+    !deps.actions.transition(action.id, ["confirmed"], "canceled", deps.now(), { result: reason })
+  )
+    return;
+  deps.questions.ask(
+    {
+      key: `${NOTICE_KIND}:target:${action.id}`,
+      kind: NOTICE_KIND,
+      subject: action.id,
+      expectedVersion: "1",
+      card: ackCard(
+        strings.targetChangedTitle,
+        strings.targetChangedObserved(action.serverId, reason),
+        strings.targetChangedAffected,
+        strings.targetChangedRecommendation,
+      ),
+      priority: 40,
+    },
+    deps.now(),
   );
-  if (repo !== proposed) return strings.targetMoved;
-  if (isExcludedRepo(deps.policy, repo)) return strings.targetExcluded;
-  return null;
 }
 
 async function send(deps: ActionDeps, action: ActionRow): Promise<void> {
-  const executor = deps.executors.get(action.serverId);
+  const before = deps.settings();
+  const executor = before.executors.get(action.serverId);
   if (executor === undefined) {
     deps.actions.transition(action.id, ["confirmed"], "failed", deps.now(), {
       result: "server not configured",
     });
     return;
   }
-  let changed: string | null;
+  const proposed = action.params.repo ?? null;
+  if (isExcludedRepo(before.policy, proposed)) {
+    cancelForTarget(deps, action, strings.targetExcluded);
+    return;
+  }
+  let repo: string | null;
   try {
-    changed = await targetChange(deps, executor, action);
+    repo = repoFromRemoteUrl(await executor.projectRemote(action.params.projectId, deps.signal));
   } catch (error) {
     deps.warn(`checking the target of ${action.id}: ${describeError(error)}`);
     return;
   }
   if (deps.signal.aborted) return;
-  if (changed !== null) {
-    if (
-      deps.actions.transition(action.id, ["confirmed"], "canceled", deps.now(), {
-        result: changed,
-      })
-    )
-      deps.questions.ask(
-        {
-          key: `${NOTICE_KIND}:target:${action.id}`,
-          kind: NOTICE_KIND,
-          subject: action.id,
-          expectedVersion: "1",
-          card: ackCard(
-            strings.targetChangedTitle,
-            strings.targetChangedObserved(action.serverId, changed),
-            strings.targetChangedAffected,
-            strings.targetChangedRecommendation,
-          ),
-          priority: 40,
-        },
-        deps.now(),
-      );
+  const after = deps.settings();
+  if (isExcludedRepo(after.policy, proposed)) {
+    cancelForTarget(deps, action, strings.targetExcluded);
     return;
   }
-  if (deps.signal.aborted || !deps.actions.claim(action.id, deps.claimant, deps.now())) return;
+  if (after.generation !== before.generation) return;
+  if (repo !== proposed) {
+    cancelForTarget(deps, action, strings.targetMoved);
+    return;
+  }
+  if (isExcludedRepo(after.policy, repo)) {
+    cancelForTarget(deps, action, strings.targetExcluded);
+    return;
+  }
+  if (!deps.actions.claim(action.id, deps.claimant, deps.now())) return;
   try {
     const { threadId } = await executor.spawn(
       { ...action.params, label: labelOf(action) },
@@ -225,9 +234,10 @@ export async function runActions(deps: ActionDeps): Promise<void> {
     );
   const servers = new Set([...unknown, ...late].map((action) => action.serverId));
   const spawned = new Map<ServerId, SpawnedThread[]>();
+  const read = deps.settings();
   await Promise.all(
     [...servers].map(async (serverId) => {
-      const executor = deps.executors.get(serverId);
+      const executor = read.executors.get(serverId);
       if (executor === undefined || deps.observed.get(serverId) === "failed") return;
       try {
         spawned.set(serverId, await executor.findSpawned(deps.signal));
@@ -301,12 +311,13 @@ export async function runActions(deps: ActionDeps): Promise<void> {
   await Promise.all(
     late.map(async (action) => {
       const rows = spawned.get(action.serverId);
-      const executor = deps.executors.get(action.serverId);
+      const executor = read.executors.get(action.serverId);
       if (rows === undefined || executor === undefined) return;
       const found = matching(rows, action);
       if (found.length === 0) return;
       const stopped = await Promise.all(
         found.map(async (threadId) => {
+          if (deps.settings().generation !== read.generation) return null;
           try {
             await executor.clearQueueAndStop(threadId, deps.signal);
             return (await executor.queuedWaits(threadId, deps.signal)).length === 0;
@@ -318,6 +329,7 @@ export async function runActions(deps: ActionDeps): Promise<void> {
           }
         }),
       );
+      if (stopped.includes(null)) return;
       const first = found[0] ?? "";
       const chats = found.map((id) => chatRef(action.serverId, id)).join(", ");
       if (!stopped.every(Boolean)) {

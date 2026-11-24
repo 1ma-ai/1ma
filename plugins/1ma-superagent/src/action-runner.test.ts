@@ -66,12 +66,15 @@ function setup() {
     runActions({
       actions,
       questions,
-      executors: new Map([["linux", executor]]),
+      settings: () => ({
+        generation: 0,
+        executors: new Map([["linux", executor]]),
+        policy: repoPolicy(
+          [{ repo: "example/app", accounts: { mac: [], linux: [] } }],
+          target.excluded,
+        ),
+      }),
       observed: new Map([["linux", "complete"]]),
-      policy: repoPolicy(
-        [{ repo: "example/app", accounts: { mac: [], linux: [] } }],
-        target.excluded,
-      ),
       claimant,
       now: () => clock,
       signal,

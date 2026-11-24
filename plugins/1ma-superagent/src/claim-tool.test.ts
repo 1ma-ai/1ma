@@ -14,6 +14,7 @@ const REPOS = JSON.stringify([
 
 async function setup(remoteUrl: string | null) {
   const metadata: Record<string, unknown> = {};
+  const reading = { during: async () => {} };
   const { bb, harness } = createFakePluginHost({
     pluginId: "1ma-superagent",
     settings: { repos: REPOS, excludedRepos: "example/private" },
@@ -21,7 +22,10 @@ async function setup(remoteUrl: string | null) {
       projects: { get: async () => ({ id: "proj_app", gitRemoteUrl: remoteUrl }) },
       threads: {
         get: async () => makeThreadResponse({ id: "thr_1", environmentId: "env_1" }),
-        getPluginMetadata: async () => metadata,
+        getPluginMetadata: async () => {
+          await reading.during();
+          return metadata;
+        },
         updatePluginMetadata: async (args: { set?: Record<string, unknown> }) =>
           Object.assign(metadata, args.set),
       },
@@ -32,7 +36,7 @@ async function setup(remoteUrl: string | null) {
     executors: () => [],
     gh: () => async () => ({ status: "error", message: "unused" }),
   })(bb);
-  return { harness, metadata };
+  return { harness, metadata, reading };
 }
 
 function configure(gitRemoteUrl: string | null) {
@@ -53,6 +57,20 @@ describe("sa_claim_pr", () => {
         { repo: "example/app", number: 7, branch: "feature/x", claimedAt: expect.any(Number) },
       ],
     });
+    await harness.lifecycle.dispose();
+  });
+
+  it("writes no claim when the project is excluded while the claim is being prepared", async () => {
+    const { harness, metadata, reading } = await setup("https://github.com/example/app.git");
+    reading.during = () =>
+      harness.behavior.setSettings({ excludedRepos: "example/private, example/app" });
+    const result = await harness.behavior.callAgentTool(
+      CLAIM_TOOL,
+      { url: "https://github.com/example/app/pull/7" },
+      { threadId: "thr_1", projectId: "proj_app" },
+    );
+    expect(result).toMatchObject({ isError: true });
+    expect(metadata).toEqual({});
     await harness.lifecycle.dispose();
   });
 

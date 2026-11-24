@@ -23,8 +23,8 @@ export interface MainWatchDeps {
   readonly db: Database.Database;
   readonly github: GitHubReader;
   readonly readJournal: ReadJournal;
-  readonly enabled: boolean;
-  readonly policy: RepoPolicy;
+  readonly enabled: () => boolean;
+  readonly policy: () => RepoPolicy;
   readonly questions: QuestionStore;
   readonly now: number;
   readonly signal: AbortSignal;
@@ -99,11 +99,12 @@ export function rollbackKind(db: Database.Database): QuestionKind {
 }
 
 export async function runMainWatch(deps: MainWatchDeps): Promise<string[]> {
-  if (!deps.enabled || deps.policy.connected.size === 0) return [];
+  const watched = deps.policy();
+  if (!deps.enabled() || watched.connected.size === 0) return [];
   const problems: string[] = [];
   const heads = new Map<string, string>();
   await Promise.all(
-    [...deps.policy.connected.keys()].map(async (repo) => {
+    [...watched.connected.keys()].map(async (repo) => {
       try {
         heads.set(repo, await deps.github.mainHead(repo, deps.signal));
       } catch (error) {
@@ -129,10 +130,13 @@ export async function runMainWatch(deps: MainWatchDeps): Promise<string[]> {
   });
   if (journal.status === "unconfigured") return [...problems, strings.mainCheckNoJournal];
   if (journal.status === "error") return [...problems, `train journal: ${journal.message}`];
+  if (!deps.enabled()) return problems;
+  const current = deps.policy();
   const records = parseJournal(journal.text);
   const previous = new Map(mainWatchRows(deps.db).map((row) => [row.repo, row]));
   const save = saver(deps.db);
   for (const [repo, head] of heads) {
+    if (!current.connected.has(repo)) continue;
     const before = previous.get(repo);
     if (before === undefined) {
       save.run(repo, head, "ok", "first observation", deps.now);

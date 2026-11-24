@@ -9,8 +9,28 @@ import { answerCard, fakeExecutor, snapshot } from "./test-helpers.js";
 const BOT = "thr_bot";
 const PROMPT = "Rename the setting, nothing else. Do not touch the release scripts.";
 
+interface Gate {
+  armed: boolean;
+  entered: () => void;
+  release: Promise<void>;
+}
+
+function gate(): Gate & { reached: Promise<void>; open: () => void } {
+  let entered = () => {};
+  let open = () => {};
+  const reached = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { armed: false, entered, release, reached, open };
+}
+
 async function setup(remote = "https://github.com/example/app.git") {
   const spawned: SpawnRequest[] = [];
+  const spawnedElsewhere: SpawnRequest[] = [];
+  const wait = gate();
   const { bb, harness } = createFakePluginHost({
     pluginId: "1ma-superagent",
     settings: { role: "control", mainBotThreadId: BOT, excludedRepos: "example/private" },
@@ -18,14 +38,32 @@ async function setup(remote = "https://github.com/example/app.git") {
   });
   const linux = fakeExecutor("linux", {
     snapshot: async () => snapshot([]),
-    projectRemote: async () => remote,
+    projectRemote: async () => {
+      if (wait.armed) {
+        wait.entered();
+        await wait.release;
+      }
+      return remote;
+    },
     spawn: async (request) => {
       spawned.push(request);
       return { threadId: "thr_task" };
     },
   });
+  const otherLinux = fakeExecutor("linux", {
+    snapshot: async () => snapshot([]),
+    projectRemote: async () => remote,
+    spawn: async (request) => {
+      spawnedElsewhere.push(request);
+      return { threadId: "thr_elsewhere" };
+    },
+  });
+  const mac = fakeExecutor("mac", { snapshot: async () => snapshot([]) });
   await createPlugin({
-    executors: () => [fakeExecutor("mac", { snapshot: async () => snapshot([]) }), linux],
+    executors: (config) => [
+      mac,
+      config.linuxServerUrl === "http://linux-new:7000" ? otherLinux : linux,
+    ],
     gh: () => async () => ({ status: "error", message: "unused" }),
   })(bb);
   const propose = (threadId = BOT) =>
@@ -40,7 +78,24 @@ async function setup(remote = "https://github.com/example/app.git") {
       },
       { threadId, projectId: "proj_bot" },
     );
-  return { harness, spawned, propose };
+  return { harness, spawned, spawnedElsewhere, propose, wait };
+}
+
+async function confirmedWhileTargetIsChecked(t: Awaited<ReturnType<typeof setup>>) {
+  await t.propose();
+  t.wait.armed = true;
+  await answerCard(t.harness, openCard(t.harness), "start");
+  await t.wait.reached;
+  t.wait.armed = false;
+}
+
+function passSettled() {
+  return new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+async function actionState(t: Awaited<ReturnType<typeof setup>>) {
+  const result = await t.harness.behavior.callRpc("work.v1.actions", {});
+  return JSON.stringify(result).match(/"state":"(\w+)"/)?.[1];
 }
 
 function openCard(harness: Awaited<ReturnType<typeof setup>>["harness"]) {
@@ -97,6 +152,62 @@ describe("sa_start_chat", () => {
     expect(await excluded.propose()).toMatchObject({ isError: true });
     expect(excluded.harness.inspection.pendingInteractions).toEqual([]);
     await excluded.harness.lifecycle.dispose();
+  });
+});
+
+describe("settings changed while a confirmed start checks its target", () => {
+  it("sends nothing and cancels with a notice when the project is excluded during the check", async () => {
+    const t = await setup();
+    await confirmedWhileTargetIsChecked(t);
+    await t.harness.behavior.setSettings({ excludedRepos: "example/private, example/app" });
+    t.wait.open();
+    await passSettled();
+    expect(t.spawned).toEqual([]);
+    expect(await actionState(t)).toBe("canceled");
+    expect(t.harness.inspection.pendingInteractions.map((request) => request.title)).toContain(
+      "Запуск чата отменён",
+    );
+    await t.harness.lifecycle.dispose();
+  });
+
+  it("does not send through the old server when its address changes during the check", async () => {
+    const t = await setup();
+    await confirmedWhileTargetIsChecked(t);
+    await t.harness.behavior.setSettings({ linuxServerUrl: "http://linux-new:7000" });
+    t.wait.open();
+    await passSettled();
+    expect(t.spawned).toEqual([]);
+    expect(await actionState(t)).toBe("confirmed");
+    await t.harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    expect(t.spawned).toEqual([]);
+    expect(t.spawnedElsewhere).toHaveLength(1);
+    await t.harness.lifecycle.dispose();
+  });
+
+  it("proposes nothing when the settings change while the proposal checks its project", async () => {
+    const t = await setup();
+    t.wait.armed = true;
+    const proposal = t.propose();
+    await t.wait.reached;
+    await t.harness.behavior.setSettings({ role: "executor" });
+    t.wait.open();
+    expect(await proposal).toMatchObject({ isError: true });
+    expect(t.harness.inspection.pendingInteractions).toEqual([]);
+    expect(await t.harness.behavior.callRpc("work.v1.actions", {})).toEqual({ actions: [] });
+    await t.harness.lifecycle.dispose();
+  });
+
+  it("sends nothing once the plugin became an executor during the check", async () => {
+    const t = await setup();
+    await confirmedWhileTargetIsChecked(t);
+    await t.harness.behavior.setSettings({ role: "executor" });
+    t.wait.open();
+    await passSettled();
+    await t.harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    expect(t.spawned).toEqual([]);
+    expect(t.spawnedElsewhere).toEqual([]);
+    expect(await actionState(t)).toBe("confirmed");
+    await t.harness.lifecycle.dispose();
   });
 });
 
