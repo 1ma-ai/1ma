@@ -68,6 +68,12 @@ export const strings = {
   cardAnswerNotTaken:
     "Прошлый ответ пришёл мимо кнопок карточки и не записан. Выберите вариант кнопкой.",
   cardDecided: (label: string) => `Решение уже записано: ${label}`,
+  cardCloseFailed: "Решение записано, но карточка не закрылась.",
+  cardRetryClose: (label: string) => `Закрыть карточку с ответом «${label}»`,
+  cardOutdatedStale:
+    "Карточка устарела: ситуация изменилась, пока она ждала ответа. Решение не принято.",
+  cardOutdatedExpired: "Срок ответа на карточку истёк. Решение не принято.",
+  cardOutdatedClosed: "Вопрос больше не актуален. Решение не принято.",
   startChatDescription:
     "Propose to start a chat for the owner's task on the mac or linux 1ma server. Pass the owner's words verbatim as prompt. Nothing starts until the owner answers the card that appears in this chat; this call returns at once.",
   startChatPending: "Proposing a chat",

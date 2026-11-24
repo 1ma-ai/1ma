@@ -10,6 +10,7 @@ import {
 } from "./questions.js";
 
 const RETRY_MS = 5 * 60 * 1000;
+export const CARD_CLOSE_GRACE_MS = 60 * 1000;
 
 export interface DispatcherDeps {
   readonly requestInput: PluginUi["requestInput"];
@@ -20,14 +21,23 @@ export interface DispatcherDeps {
   readonly now: () => number;
   readonly signal: AbortSignal;
   readonly changed?: () => void;
+  readonly closeGraceMs?: number;
+}
+
+interface LiveCard {
+  readonly questionId: string;
+  readonly token: string;
+  readonly close: AbortController;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 export class QuestionDispatcher {
   readonly #deps: DispatcherDeps;
-  #live: { questionId: string; token: string } | null = null;
+  #live: LiveCard | null = null;
 
   constructor(deps: DispatcherDeps) {
     this.#deps = deps;
+    deps.signal.addEventListener("abort", () => this.#settle(), { once: true });
   }
 
   get liveQuestionId(): string | null {
@@ -37,7 +47,10 @@ export class QuestionDispatcher {
   dispatch(): void {
     if (this.#deps.signal.aborted) return;
     this.#deps.changed?.();
-    if (this.#live !== null) return;
+    if (this.#live !== null) {
+      this.#closeWhenSettled(this.#live);
+      return;
+    }
     const chat = this.#deps.chat();
     if (chat === null) return;
     const now = this.#deps.now();
@@ -45,7 +58,13 @@ export class QuestionDispatcher {
     if (question === null) return;
     const token = newToken();
     if (!this.#deps.store.markOpen(question.id, chat, token, now)) return;
-    this.#live = { questionId: question.id, token };
+    const live: LiveCard = {
+      questionId: question.id,
+      token,
+      close: new AbortController(),
+      timer: null,
+    };
+    this.#live = live;
     const waiting = Math.max(0, this.#deps.store.waiting().length - 1);
     const payload: QuestionPayload = {
       ...question.card,
@@ -76,12 +95,12 @@ export class QuestionDispatcher {
                 : { title: `${question.card.title}: ${option.label}` };
             },
           },
-          { signal: this.#deps.signal },
+          { signal: AbortSignal.any([this.#deps.signal, live.close.signal]) },
         ),
       )
       .then(
         (result) => {
-          this.#live = null;
+          this.#settle();
           if (this.#deps.signal.aborted) return;
           if (result.outcome === "submitted") {
             const recorded = this.#deps.store.get(question.id);
@@ -97,7 +116,7 @@ export class QuestionDispatcher {
           if (!this.#deps.signal.aborted) this.dispatch();
         },
         (error: unknown) => {
-          this.#live = null;
+          this.#settle();
           if (this.#deps.signal.aborted) return;
           this.#deps.store.requeue(question.id, token, this.#deps.now() + RETRY_MS);
           this.#deps.warn(
@@ -105,5 +124,20 @@ export class QuestionDispatcher {
           );
         },
       );
+  }
+
+  #closeWhenSettled(live: LiveCard): void {
+    if (live.timer !== null) return;
+    const question = this.#deps.store.get(live.questionId);
+    if (question?.state === "open" && question.token === live.token) return;
+    live.timer = setTimeout(
+      () => live.close.abort(),
+      this.#deps.closeGraceMs ?? CARD_CLOSE_GRACE_MS,
+    );
+  }
+
+  #settle(): void {
+    if (this.#live !== null && this.#live.timer !== null) clearTimeout(this.#live.timer);
+    this.#live = null;
   }
 }

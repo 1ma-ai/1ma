@@ -45,7 +45,7 @@ function setup() {
   };
   const kinds = new Map([["test", kind]]);
   const { bb, harness } = createFakePluginHost({ pluginId: "1ma-superagent" });
-  const makeDispatcher = (signal = new AbortController().signal) =>
+  const makeDispatcher = (signal = new AbortController().signal, closeGraceMs?: number) =>
     new QuestionDispatcher({
       requestInput: (request, requestOptions) => bb.ui.requestInput(request, requestOptions),
       warn: () => {},
@@ -54,6 +54,7 @@ function setup() {
       chat: () => CHAT,
       now: () => 1_000,
       signal,
+      ...(closeGraceMs === undefined ? {} : { closeGraceMs }),
     });
   const decide = (request: { payload: unknown }, optionId: string) => {
     const { questionId, token } = payloadOf(request);
@@ -257,6 +258,43 @@ describe("question dispatcher", () => {
     expect(answers).toEqual([{ subject: "first", optionId: "yes" }]);
     expect(store.latest("first")?.state).toBe("answered");
     expect(pending().map((request) => payloadOf(request).title)).toEqual(["second"]);
+  });
+
+  it("closes a card whose decision is recorded when the client never closes it, and shows the next question", async () => {
+    const { makeDispatcher, ask, pending, decide, store } = setup();
+    ask("first");
+    ask("second");
+    const dispatcher = makeDispatcher(undefined, 5);
+    dispatcher.dispatch();
+    const first = pending()[0];
+    if (first === undefined) throw new Error("no card");
+    expect(decide(first, "yes")).toBe("applied");
+    dispatcher.dispatch();
+    expect(pending().map((request) => payloadOf(request).title)).toEqual(["first"]);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(pending().map((request) => payloadOf(request).title)).toEqual(["second"]);
+    expect(store.latest("first")).toMatchObject({ state: "answered", answer: "yes" });
+  });
+
+  it("closes a card that went stale while open when the client never closes it", async () => {
+    const { makeDispatcher, ask, pending, versions, decide, store } = setup();
+    ask("first");
+    ask("second");
+    const dispatcher = makeDispatcher(undefined, 5);
+    dispatcher.dispatch();
+    const first = pending()[0];
+    if (first === undefined) throw new Error("no card");
+    versions.set("first", "v2");
+    expect(decide(first, "yes")).toBe("stale");
+    expect(store.cardState(payloadOf(first).questionId, payloadOf(first).token)).toMatchObject({
+      open: false,
+      decided: null,
+      outdated: "stale",
+    });
+    dispatcher.dispatch();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(pending().map((request) => payloadOf(request).title)).toEqual(["second"]);
+    expect(store.latest("first")?.state).toBe("stale");
   });
 
   it("does not ask again after a restart that came between recording a decision and closing the card", () => {

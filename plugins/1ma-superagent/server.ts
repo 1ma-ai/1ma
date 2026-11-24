@@ -271,7 +271,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
       "questions.v1.decide": ({ questionId, token, optionId }) => {
         const outcome = questions.answer(questionId, token, optionId, kinds, Date.now());
         if (outcome === "applied") afterAnswer();
-        bb.rpc.experimental_invalidate([QUESTIONS_TAG]);
+        dispatcher.dispatch();
         return { outcome };
       },
       "questions.v1.state": ({ questionId, token }) => questions.cardState(questionId, token),

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import { type AnswerOutcome, type Card, cardSchema } from "./card.js";
+import { type AnswerOutcome, type Card, type CardState, cardSchema } from "./card.js";
 
 export { answerSchema, cardSchema, questionPayloadSchema } from "./card.js";
 export type { AnswerOutcome, Card, QuestionPayload } from "./card.js";
@@ -250,14 +250,15 @@ export class QuestionStore {
     return apply();
   }
 
-  cardState(id: string, token: string): { open: boolean; decided: string | null; waiting: number } {
+  cardState(id: string, token: string): CardState {
     const waiting = this.waiting().filter((question) => question.id !== id).length;
     const question = this.get(id);
     if (question === null || question.token !== token)
-      return { open: false, decided: null, waiting };
+      return { open: false, decided: null, outdated: null, waiting };
     return {
       open: question.state === "open",
       decided: question.state === "answered" ? question.answer : null,
+      outdated: question.state === "stale" || question.state === "expired" ? question.state : null,
       waiting,
     };
   }

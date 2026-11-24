@@ -37,6 +37,16 @@ export type AnswerOutcome = (typeof ANSWER_OUTCOMES)[number];
 
 export const QUESTIONS_TAG = "questions";
 
+export const cardStateSchema = z
+  .object({
+    open: z.boolean(),
+    decided: z.string().nullable(),
+    outdated: z.enum(["stale", "expired"]).nullable(),
+    waiting: z.number().int().min(0),
+  })
+  .strict();
+export type CardState = z.infer<typeof cardStateSchema>;
+
 export const questionRpcContract = {
   "questions.v1.decide": {
     input: z
@@ -50,13 +60,7 @@ export const questionRpcContract = {
   },
   "questions.v1.state": {
     input: z.object({ questionId: z.string().max(80), token: z.string().max(80) }).strict(),
-    output: z
-      .object({
-        open: z.boolean(),
-        decided: z.string().nullable(),
-        waiting: z.number().int().min(0),
-      })
-      .strict(),
+    output: cardStateSchema,
     tags: () => [QUESTIONS_TAG],
   },
 } satisfies Record<string, PluginRpcMethodContract>;

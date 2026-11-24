@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useReducer } from "react";
 import {
   definePluginApp,
   experimental_useRpcQuery,
@@ -6,18 +6,19 @@ import {
   useRpc,
 } from "@get-bb/plugin-sdk/app";
 import { questionPayloadSchema, questionRpcContract } from "./src/card.js";
+import { cardView, closeRequest, initialCard, reduceCard, shouldClose } from "./src/card-model.js";
 import { strings } from "./strings.js";
-
-const RECORDED = new Set(["applied", "recorded", "stale"]);
 
 function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionProps) {
   const rpc = useRpc<typeof questionRpcContract>();
-  const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
-  const closing = useRef(false);
   const parsed = questionPayloadSchema.safeParse(interaction.payload);
   const questionId = parsed.success ? parsed.data.questionId : null;
   const token = parsed.success ? parsed.data.token : null;
+  const [model, send] = useReducer(
+    reduceCard,
+    parsed.success ? parsed.data.waiting : 0,
+    initialCard,
+  );
 
   const state = experimental_useRpcQuery({
     contract: questionRpcContract,
@@ -26,18 +27,21 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
     enabled: questionId !== null && token !== null,
   }).data;
 
-  const decided = state?.decided ?? null;
+  useEffect(() => {
+    if (state !== undefined) send({ type: "state", state });
+  }, [state]);
 
   useEffect(() => {
-    if (state === undefined || token === null || closing.current) return;
-    if (state.decided !== null) {
-      closing.current = true;
-      void submit({ token, optionId: state.decided }).catch(() => {});
-    } else if (!state.open) {
-      closing.current = true;
-      void cancel().catch(() => {});
-    }
-  }, [state, token, submit, cancel]);
+    const request = shouldClose(model) ? closeRequest(model) : null;
+    if (request === null || token === null) return;
+    send({ type: "closeStarted" });
+    const closing =
+      request.kind === "submit" ? submit({ token, optionId: request.optionId }) : cancel();
+    closing.then(
+      () => send({ type: "closed" }),
+      () => send({ type: "closeFailed" }),
+    );
+  }, [model, token, submit, cancel]);
 
   if (!parsed.success) {
     return (
@@ -55,24 +59,16 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
   }
   const card = parsed.data;
   const choose = (optionId: string) => {
-    if (closing.current) return;
-    setBusy(true);
-    setProblem(null);
+    if (model.phase !== "choosing") return;
+    send({ type: "choose", optionId });
     rpc
       .call("questions.v1.decide", { questionId: card.questionId, token: card.token, optionId })
-      .then(async ({ outcome }) => {
-        if (!RECORDED.has(outcome)) {
-          setProblem(strings.cardNotRecorded);
-          return;
-        }
-        if (closing.current) return;
-        closing.current = true;
-        await submit({ token: card.token, optionId });
-      })
-      .catch(() => setProblem(strings.cardNotRecorded))
-      .finally(() => setBusy(false));
+      .then(
+        ({ outcome }) => send({ type: "decided", outcome }),
+        () => send({ type: "decideFailed" }),
+      );
   };
-  const decidedLabel = card.options.find((option) => option.id === decided)?.label;
+  const view = cardView(model, card);
   return (
     <div className="space-y-3 text-sm">
       <p className="font-medium">{card.title}</p>
@@ -98,28 +94,35 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
           {card.quote}
         </blockquote>
       )}
-      <div className="flex flex-wrap gap-2">
-        {card.options.map((option) => (
-          <button
-            key={option.id}
-            type="button"
-            disabled={busy || decided !== null}
-            className={`rounded-md px-3 py-1.5 ${option.recommended ? "bg-primary text-primary-foreground" : "border"} disabled:opacity-50`}
-            onClick={() => choose(option.id)}
-          >
-            {option.recommended ? `${option.label} (${strings.recommended})` : option.label}
-          </button>
-        ))}
-      </div>
-      {decidedLabel === undefined ? null : (
-        <p className="text-xs text-muted-foreground">{strings.cardDecided(decidedLabel)}</p>
+      {view.options === "hidden" ? null : (
+        <div className="flex flex-wrap gap-2">
+          {card.options.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              disabled={view.options === "disabled"}
+              className={`rounded-md px-3 py-1.5 ${option.recommended ? "bg-primary text-primary-foreground" : "border"} disabled:opacity-50`}
+              onClick={() => choose(option.id)}
+            >
+              {option.recommended ? `${option.label} (${strings.recommended})` : option.label}
+            </button>
+          ))}
+        </div>
       )}
-      {problem === null ? null : <p className="text-xs text-destructive">{problem}</p>}
-      {(state?.waiting ?? card.waiting) > 0 ? (
-        <p className="text-xs text-muted-foreground">
-          {strings.moreWaiting(state?.waiting ?? card.waiting)}
-        </p>
-      ) : null}
+      {view.notice === null ? null : <p className="text-xs text-muted-foreground">{view.notice}</p>}
+      {view.problem === null ? null : <p className="text-xs text-destructive">{view.problem}</p>}
+      {view.closeLabel === null ? null : (
+        <button
+          type="button"
+          className="rounded-md border px-3 py-1"
+          onClick={() => send({ type: "closeRequested" })}
+        >
+          {view.closeLabel}
+        </button>
+      )}
+      {view.waiting === null ? null : (
+        <p className="text-xs text-muted-foreground">{view.waiting}</p>
+      )}
     </div>
   );
 }
