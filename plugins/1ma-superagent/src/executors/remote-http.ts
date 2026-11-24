@@ -16,6 +16,15 @@ import { METADATA_BATCH, chunks, combineSnapshot, toThreadSummary } from "./snap
 
 const DEFINITE_REFUSALS = new Set([400, 401, 403, 404, 422]);
 
+const serverErrorSchema = z
+  .object({
+    code: z.string().regex(/^[a-z][a-z0-9_]*$/),
+    message: z.string(),
+    details: z.unknown().optional(),
+    retryable: z.boolean().optional(),
+  })
+  .strict();
+
 const threadSchema = z.object({
   id: z.string().regex(/^thr_/),
   projectId: z.string(),
@@ -71,12 +80,27 @@ export const SPAWN_TIMEOUT_MS = 30_000;
 
 export class RemoteHttpError extends Error {
   readonly status: number | null;
+  readonly serverCode: string | null;
 
-  constructor(message: string, status: number | null) {
+  constructor(message: string, status: number | null, serverCode: string | null = null) {
     super(message);
     this.name = "RemoteHttpError";
     this.status = status;
+    this.serverCode = serverCode;
   }
+}
+
+async function serverErrorCode(response: Response): Promise<string | null> {
+  if (response.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json")
+    return null;
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return null;
+  }
+  const parsed = serverErrorSchema.safeParse(body);
+  return parsed.success ? parsed.data.code : null;
 }
 
 export type Fetch = (
@@ -117,7 +141,12 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (!response.ok) {
-      throw new RemoteHttpError(`${method} ${path} answered ${response.status}`, response.status);
+      const code = await serverErrorCode(response);
+      throw new RemoteHttpError(
+        `${method} ${path} answered ${response.status}${code === null ? "" : ` (${code})`}`,
+        response.status,
+        code,
+      );
     }
     const parsed = schema.safeParse(await response.json());
     if (!parsed.success) {
@@ -224,6 +253,7 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
         if (
           error instanceof RemoteHttpError &&
           error.status !== null &&
+          error.serverCode !== null &&
           DEFINITE_REFUSALS.has(error.status)
         ) {
           throw new DefiniteSpawnFailure(error.message);

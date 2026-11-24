@@ -53,6 +53,38 @@ const environments = json([
   { id: "env_app", projectId: "proj_app", branchName: "feature/x", status: "ready" },
 ]);
 
+async function outcomeOf(
+  status: number,
+  answer: (status: number) => Response = (code) =>
+    Response.json({ code: "invalid_request", message: "refused" }, { status: code }),
+) {
+  const server = fakeServer({
+    "/api/v1/threads": () => answer(status),
+  });
+  const executor = createRemoteHttpExecutor({
+    serverId: "linux",
+    baseUrl: "http://linux.test",
+    fetch: server.fetch,
+    limits,
+  });
+  return executor
+    .spawn(
+      {
+        projectId: "proj_app",
+        providerId: "claude-code",
+        model: "m",
+        prompt: "p",
+        title: "t",
+        label: { nonce: "lbl_x" },
+      },
+      new AbortController().signal,
+    )
+    .then(
+      () => "bound",
+      (error: unknown) => (error instanceof DefiniteSpawnFailure ? "failed" : "unknown"),
+    );
+}
+
 describe("remote-http executor", () => {
   it("pages through live chats and maps them", async () => {
     const server = fakeServer({
@@ -197,36 +229,39 @@ describe("remote-http time limits", () => {
   });
 
   it("treats only refusals that prove nothing was written as final, every other answer as unknown", async () => {
-    const outcome = async (status: number) => {
-      const server = fakeServer({
-        "/api/v1/threads": () => new Response("refused", { status }),
-      });
-      const executor = createRemoteHttpExecutor({
-        serverId: "linux",
-        baseUrl: "http://linux.test",
-        fetch: server.fetch,
-        limits,
-      });
-      return executor
-        .spawn(
-          {
-            projectId: "proj_app",
-            providerId: "claude-code",
-            model: "m",
-            prompt: "p",
-            title: "t",
-            label: { nonce: "lbl_x" },
-          },
-          new AbortController().signal,
-        )
-        .then(
-          () => "bound",
-          (error: unknown) => (error instanceof DefiniteSpawnFailure ? "failed" : "unknown"),
-        );
-    };
     const definite = [400, 401, 403, 404, 422];
     const other = [408, 409, 425, 429, 500, 502];
-    expect(await Promise.all(definite.map(outcome))).toEqual(definite.map(() => "failed"));
-    expect(await Promise.all(other.map(outcome))).toEqual(other.map(() => "unknown"));
+    expect(await Promise.all(definite.map((status) => outcomeOf(status)))).toEqual(
+      definite.map(() => "failed"),
+    );
+    expect(await Promise.all(other.map((status) => outcomeOf(status)))).toEqual(
+      other.map(() => "unknown"),
+    );
+  });
+
+  it("treats a refusal as final only when the 1ma server itself answered it", async () => {
+    const fromServer = (status: number) =>
+      Response.json(
+        { code: "project_not_found", message: "Project not found", retryable: false },
+        { status },
+      );
+    const html = (status: number) =>
+      new Response("<html><body><h1>404 Not Found</h1></body></html>", {
+        status,
+        headers: { "content-type": "text/html" },
+      });
+    const plain = (status: number) => new Response("404 Not Found", { status });
+    const foreignJson = (status: number) =>
+      Response.json({ error: "not found", requestId: "r1" }, { status });
+    const wrongType = (status: number) =>
+      new Response(JSON.stringify({ code: "invalid_request", message: "refused" }), {
+        status,
+        headers: { "content-type": "text/plain" },
+      });
+    expect(await outcomeOf(404, fromServer)).toBe("failed");
+    expect(await outcomeOf(404, html)).toBe("unknown");
+    expect(await outcomeOf(404, plain)).toBe("unknown");
+    expect(await outcomeOf(403, foreignJson)).toBe("unknown");
+    expect(await outcomeOf(400, wrongType)).toBe("unknown");
   });
 });
