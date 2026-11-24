@@ -49,6 +49,14 @@ export interface ThreadMetadataRow {
 export interface SpawnedThread extends ThreadMetadataRow {
   readonly projectId: string;
   readonly createdAt: number;
+  readonly status: string;
+  readonly queuedWork: string;
+}
+
+const RUNNING = new Set(["pending", "starting", "active", "stopping"]);
+
+export function isLive(thread: Pick<SpawnedThread, "status" | "queuedWork">): boolean {
+  return RUNNING.has(thread.status) || thread.queuedWork !== "none";
 }
 
 export interface Executor {

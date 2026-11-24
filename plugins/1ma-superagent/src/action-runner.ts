@@ -8,6 +8,7 @@ import {
   type Executor,
   type ServerId,
   type SpawnedThread,
+  isLive,
 } from "./observation.js";
 import type { Card, QuestionKind, QuestionStore } from "./questions.js";
 import { type RepoPolicy, isExcludedRepo } from "./repos.js";
@@ -197,18 +198,20 @@ async function send(deps: ActionDeps, action: ActionRow): Promise<void> {
 }
 
 function matching(rows: readonly SpawnedThread[], action: ActionRow): string[] {
-  return rows
-    .filter((row) => {
-      const parsed = labelSchema.safeParse(row.metadata);
-      return (
-        parsed.success &&
-        parsed.data.spawn.nonce === action.label &&
-        row.projectId === action.params.projectId &&
-        action.sentAt !== null &&
-        row.createdAt >= action.sentAt - CLOCK_SKEW_MS
-      );
-    })
-    .map((row) => row.threadId);
+  return matchingRows(rows, action).map((row) => row.threadId);
+}
+
+function matchingRows(rows: readonly SpawnedThread[], action: ActionRow): SpawnedThread[] {
+  return rows.filter((row) => {
+    const parsed = labelSchema.safeParse(row.metadata);
+    return (
+      parsed.success &&
+      parsed.data.spawn.nonce === action.label &&
+      row.projectId === action.params.projectId &&
+      action.sentAt !== null &&
+      row.createdAt >= action.sentAt - CLOCK_SKEW_MS
+    );
+  });
 }
 
 export async function runActions(deps: ActionDeps): Promise<void> {
@@ -230,6 +233,7 @@ export async function runActions(deps: ActionDeps): Promise<void> {
       (action) =>
         action.sentAt !== null &&
         (action.result === STOPPING_LATE ||
+          action.result === STOPPED_LATE ||
           (action.threadId === null && deps.now() - action.sentAt < LATE_WINDOW_MS)),
     );
   const servers = new Set([...unknown, ...late].map((action) => action.serverId));
@@ -313,7 +317,10 @@ export async function runActions(deps: ActionDeps): Promise<void> {
       const rows = spawned.get(action.serverId);
       const executor = read.executors.get(action.serverId);
       if (rows === undefined || executor === undefined) return;
-      const found = matching(rows, action);
+      const revived = action.result === STOPPED_LATE;
+      const found = matchingRows(rows, action)
+        .filter((row) => !revived || isLive(row))
+        .map((row) => row.threadId);
       if (found.length === 0) return;
       const stopped = await Promise.all(
         found.map(async (threadId) => {
@@ -361,16 +368,23 @@ export async function runActions(deps: ActionDeps): Promise<void> {
       });
       deps.questions.ask(
         {
-          key: `${NOTICE_KIND}:late:${action.id}`,
+          key: `${NOTICE_KIND}:${revived ? "revived" : "late"}:${action.id}`,
           kind: NOTICE_KIND,
           subject: action.id,
           expectedVersion: "1",
-          card: ackCard(
-            strings.lateTitle,
-            strings.lateObserved(chats),
-            strings.lateAffected,
-            strings.lateRecommendation,
-          ),
+          card: revived
+            ? ackCard(
+                strings.revivedTitle,
+                strings.revivedObserved(chats),
+                strings.lateAffected,
+                strings.revivedRecommendation,
+              )
+            : ackCard(
+                strings.lateTitle,
+                strings.lateObserved(chats),
+                strings.lateAffected,
+                strings.lateRecommendation,
+              ),
           priority: 40,
         },
         deps.now(),

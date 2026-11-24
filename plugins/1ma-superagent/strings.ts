@@ -114,6 +114,11 @@ export const strings = {
     `Чат отменённой попытки появился позже: ${chat}. Его очередь сообщений удалена, чат остановлен.`,
   lateAffected: "Чат успел начать работу до остановки.",
   lateRecommendation: "Если он что-то изменил, посмотрите его и при необходимости откатите.",
+  revivedTitle: "Остановленный чат отменённого запуска снова ожил",
+  revivedObserved: (chat: string) =>
+    `Чат отменённой попытки после подтверждённой остановки снова работал или получил очередь: ${chat}. Очередь снова удалена, чат снова остановлен.`,
+  revivedRecommendation:
+    "Посмотрите, кто или что снова запустило чат (автоматизация, сообщение другого чата), и при необходимости откатите сделанное.",
   serverNotConfigured:
     "The linux server is not configured on this superagent; nothing was proposed.",
   projectExcluded: "That project is excluded from the superagent; nothing was proposed.",

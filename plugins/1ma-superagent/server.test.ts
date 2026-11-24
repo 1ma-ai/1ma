@@ -176,6 +176,8 @@ describe("a pass whose train journal read throws", () => {
               metadata: { spawn: labels[0] },
               projectId: "proj_app",
               createdAt: Date.now(),
+              status: "idle",
+              queuedWork: "none",
             })),
         }),
       ],

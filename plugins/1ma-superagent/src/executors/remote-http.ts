@@ -250,7 +250,15 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
         const thread = threads.get(row.threadId);
         return thread === undefined
           ? []
-          : [{ ...row, projectId: thread.projectId, createdAt: thread.createdAt }];
+          : [
+              {
+                ...row,
+                projectId: thread.projectId,
+                createdAt: thread.createdAt,
+                status: thread.status,
+                queuedWork: thread.queuedWork,
+              },
+            ];
       });
     },
     async clearQueueAndStop(threadId, signal) {

@@ -51,7 +51,13 @@ function setup() {
       return spawnBehavior(request);
     },
     findSpawned: async () =>
-      existing.map((row) => ({ projectId: "proj_app", createdAt: clock, ...row })),
+      existing.map((row) => ({
+        projectId: "proj_app",
+        createdAt: clock,
+        status: "idle",
+        queuedWork: "none",
+        ...row,
+      })),
     projectRemote: async () => target.remote,
     clearQueueAndStop: async (threadId) => {
       if (stopping.failures > 0) {
@@ -352,6 +358,43 @@ describe("spawn actions", () => {
     expect(t.actions.get(id)?.result).toBe("stopped late");
     await t.run();
     expect(t.stopped).toEqual(["thr_late"]);
+  });
+
+  it("stops a late chat again whenever it runs or has a queue after a confirmed stop, and tells the owner", async () => {
+    const t = setup();
+    const id = t.confirmed();
+    t.setSpawn(async () => {
+      throw new Error("timeout");
+    });
+    await t.run();
+    const action = t.actions.get(id);
+    if (action === null) throw new Error("no action");
+    t.actions.transition(id, ["unknown"], "canceled", t.now(), { result: "replaced" });
+    const chat: { threadId: string; metadata: unknown; status?: string; queuedWork?: string } = {
+      threadId: "thr_late",
+      metadata: { spawn: { nonce: action.label } },
+    };
+    t.existing.push(chat);
+    await t.run();
+    expect(t.actions.get(id)?.result).toBe("stopped late");
+    for (const question of t.questions.waiting()) t.questions.cancel(question.key);
+
+    chat.status = "active";
+    await t.run();
+    expect(t.stopped).toEqual(["thr_late", "thr_late"]);
+    expect(t.actions.get(id)).toMatchObject({ state: "canceled", result: "stopped late" });
+    expect(t.questions.waiting().map((item) => item.card.title)).toEqual([
+      "Остановленный чат отменённого запуска снова ожил",
+    ]);
+
+    chat.status = "idle";
+    chat.queuedWork = "waiting";
+    await t.run();
+    expect(t.stopped).toEqual(["thr_late", "thr_late", "thr_late"]);
+
+    chat.queuedWork = "none";
+    await t.run();
+    expect(t.stopped).toEqual(["thr_late", "thr_late", "thr_late"]);
   });
 });
 
