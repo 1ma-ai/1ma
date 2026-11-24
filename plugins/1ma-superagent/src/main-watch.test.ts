@@ -1,7 +1,6 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import type { GitHubReader } from "./github/reader.js";
-import { judgeMainMove, parseJournal } from "./journal.js";
 import { mainWatchRows, rollbackKind, runMainWatch } from "./main-watch.js";
 import { QuestionStore } from "./questions.js";
 import { repoPolicy } from "./repos.js";
@@ -10,95 +9,18 @@ import { MIGRATIONS } from "./schema.js";
 const A = "a".repeat(40);
 const B = "b".repeat(40);
 const C = "c".repeat(40);
-
-function line(record: Record<string, unknown>) {
-  return JSON.stringify({ author: "release-train", repo: "example/app", attempt: "t1", ...record });
-}
-
 const X = "d".repeat(40);
 
-function journalOf(...records: Array<Record<string, unknown>>) {
-  return parseJournal(records.map(line).join("\n"));
+function line(record: Record<string, unknown>) {
+  return JSON.stringify({ author: "release-train", repo: "example/app", token: "t1", ...record });
 }
 
-describe("train journal", () => {
-  it("ignores old lines of other shapes and lines not written by the train", () => {
-    const text = [
-      "not json",
-      JSON.stringify({ note: "legacy line" }),
-      JSON.stringify({
-        author: "someone",
-        repo: "example/app",
-        attempt: 1,
-        event: "merged",
-        final_sha: A,
-      }),
-      line({ event: "merged", base_sha: C, final_sha: A }),
-    ].join("\n");
-    expect(parseJournal(text)).toEqual([
-      { repo: "example/app", attempt: "t1", event: "merged", finalSha: A, baseSha: C },
-    ]);
-  });
-
-  it("takes the base from the push-intent of the same attempt and final head when merged has none", () => {
-    const records = journalOf(
-      { event: "push-intent", base: A, final_sha: B, merges: [7] },
-      { event: "merged", final_sha: B },
-    );
-    expect(judgeMainMove(records, "example/app", A, B, false)).toEqual({ kind: "explained" });
-    const otherAttempt = journalOf(
-      { attempt: "t0", event: "push-intent", base: A, final_sha: B },
-      { event: "merged", final_sha: B },
-    );
-    expect(judgeMainMove(otherAttempt, "example/app", A, B, false).kind).toBe("needs_reconcile");
-    const shortSha = journalOf(
-      { event: "push-intent", base: A, final_sha: B.slice(0, 12) },
-      { event: "merged", final_sha: B.slice(0, 12) },
-    );
-    expect(judgeMainMove(shortSha, "example/app", A, B, false).kind).toBe("needs_reconcile");
-    const ownBase = journalOf(
-      { event: "push-intent", base: X, final_sha: B },
-      { event: "merged", base_sha: A, final_sha: B },
-    );
-    expect(judgeMainMove(ownBase, "example/app", A, B, false)).toEqual({ kind: "explained" });
-  });
-
-  it("explains a move only when the train's chain leads from the last head to the new one", () => {
-    const one = journalOf({ event: "merged", base_sha: A, final_sha: B });
-    expect(judgeMainMove(one, "example/app", A, B, false)).toEqual({ kind: "explained" });
-    const two = journalOf(
-      { event: "merged", base_sha: A, final_sha: B },
-      { attempt: "t2", event: "merged", base_sha: B, final_sha: C },
-    );
-    expect(judgeMainMove(two, "example/app", A, C, false)).toEqual({ kind: "explained" });
-  });
-
-  it("treats a train built on a head it did not write as a direct commit", () => {
-    const records = journalOf({ event: "merged", base_sha: X, final_sha: C });
-    expect(judgeMainMove(records, "example/app", A, C, false).kind).toBe("unexplained");
-  });
-
-  it("applies a rollback only to the move away from the rolled-back head", () => {
-    const records = journalOf(
-      { event: "merged", base_sha: C, final_sha: A },
-      { event: "rolled-back", final_sha: A },
-    );
-    expect(judgeMainMove(records, "example/app", A, C, false)).toEqual({
-      kind: "rollback",
-      attempt: "t1",
-    });
-    expect(judgeMainMove(records, "example/app", B, C, false).kind).toBe("unexplained");
-  });
-
-  it("needs a reconcile for an unconfirmed push, a record without a base or an incomplete tail", () => {
-    const intent = journalOf({ event: "started" }, { event: "push-intent", final_sha: B });
-    expect(judgeMainMove(intent, "example/app", A, B, false).kind).toBe("needs_reconcile");
-    const baseless = journalOf({ event: "merged", final_sha: B });
-    expect(judgeMainMove(baseless, "example/app", A, B, false).kind).toBe("needs_reconcile");
-    expect(judgeMainMove([], "example/app", A, B, true).kind).toBe("needs_reconcile");
-    expect(judgeMainMove([], "example/app", A, B, false).kind).toBe("unexplained");
-  });
-});
+function train(base: string, finalSha: string) {
+  return [
+    line({ outcome: "push-intent", base, final_sha: finalSha, merges: [finalSha] }),
+    line({ outcome: "merged", final_sha: finalSha }),
+  ].join("\n");
+}
 
 function setup(initialJournal: string) {
   let journal = initialJournal;
@@ -156,7 +78,7 @@ function answer(t: ReturnType<typeof setup>, optionId: string, subject?: string)
 
 describe("main watch", () => {
   it("takes the first head as a baseline and asks once about a head the train did not write", async () => {
-    const t = setup(line({ event: "merged", base_sha: A, final_sha: B }));
+    const t = setup(train(A, B));
     await t.run();
     expect(t.questions.waiting()).toEqual([]);
     t.setHead(B);
@@ -170,7 +92,7 @@ describe("main watch", () => {
   });
 
   it("marks an unconfirmed push as needing a reconcile and keeps the confirmed head", async () => {
-    const t = setup(line({ event: "push-intent", base: A, final_sha: B }));
+    const t = setup(line({ outcome: "push-intent", base: A, final_sha: B }));
     await t.run();
     t.setHead(B);
     await t.run();
@@ -183,13 +105,13 @@ describe("main watch", () => {
   });
 
   it("confirms the push once merged arrives for the same head, without main moving again", async () => {
-    const t = setup(line({ event: "push-intent", base: A, final_sha: B }));
+    const t = setup(line({ outcome: "push-intent", base: A, final_sha: B }));
     await t.run();
     t.setHead(B);
     await t.run();
     t.setJournal(
-      line({ event: "push-intent", base: A, final_sha: B }),
-      line({ event: "merged", final_sha: B }),
+      line({ outcome: "push-intent", base: A, final_sha: B }),
+      line({ outcome: "merged", final_sha: B }),
     );
     await t.run();
     expect(mainWatchRows(t.db)[0]).toMatchObject({ anchor: B, observedHead: B, state: "ok" });
@@ -199,8 +121,8 @@ describe("main watch", () => {
   it("explains a normal train whose base is written only in its push-intent", async () => {
     const t = setup(
       [
-        line({ event: "push-intent", base: A, final_sha: B, merges: [12, 13] }),
-        line({ event: "merged", final_sha: B }),
+        line({ outcome: "push-intent", base: A, final_sha: B, merges: [B] }),
+        line({ outcome: "merged", final_sha: B }),
       ].join("\n"),
     );
     await t.run();
@@ -210,12 +132,7 @@ describe("main watch", () => {
   });
 
   it("refuses an answer to a rollback card once another head is observed", async () => {
-    const t = setup(
-      [
-        line({ event: "merged", base_sha: C, final_sha: A }),
-        line({ event: "rolled-back", final_sha: A }),
-      ].join("\n"),
-    );
+    const t = setup([train(C, A), line({ outcome: "rolled-back", final_sha: A })].join("\n"));
     await t.run();
     t.setHead(C);
     await t.run();
@@ -286,12 +203,7 @@ describe("main watch", () => {
   });
 
   it("takes the head after a rollback as the baseline only once the owner confirms it", async () => {
-    const t = setup(
-      [
-        line({ event: "merged", base_sha: C, final_sha: A }),
-        line({ event: "rolled-back", final_sha: A }),
-      ].join("\n"),
-    );
+    const t = setup([train(C, A), line({ outcome: "rolled-back", final_sha: A })].join("\n"));
     await t.run();
     t.setHead(C);
     await t.run();
