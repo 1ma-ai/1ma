@@ -138,6 +138,15 @@ jobs:
         run: |
           bash .github/actions/setup-workspace/install-electron-libraries.sh
           ELECTRON_RUN_AS_NODE=1 pnpm --filter @bb/desktop exec electron --version
+      # Owner decision 24.11.2026: tests of bb parts 1ma does not ship are not
+      # run. @bb/ai-gateway is bb's cloud AI gateway (its rate-limit test counts
+      # per clock minute and fails when the requests straddle one);
+      # pr-approval-workflows tests bb's own GitHub PR gate (pr-gate.yml) and
+      # times out on loaded runners. rm fails once bb moves the file, so the
+      # entry is reviewed with the new release.
+      - name: Leave out the tests of bb parts 1ma does not ship
+        working-directory: ${{ runner.temp }}/bb-src
+        run: rm packages/scripts/test/pr-approval-workflows.test.ts
       - name: Test
         working-directory: ${{ runner.temp }}/bb-src
         env:
@@ -147,7 +156,7 @@ jobs:
         # with a reason in desktop/known-test-failures.json; any other failure fails.
         run: |
           set +e
-          ${{ contains(matrix.filter, '--filter=@bb/desktop') && 'xvfb-run -a' || '' }} pnpm exec turbo run test ${{ matrix.filter }} --continue --output-logs=new-only --concurrency=4 2>&1 | tee "$RUNNER_TEMP/test.log"
+          ${{ contains(matrix.filter, '--filter=@bb/desktop') && 'xvfb-run -a' || '' }} pnpm exec turbo run test ${{ matrix.filter }} --filter='!@bb/ai-gateway' --continue --output-logs=new-only --concurrency=4 2>&1 | tee "$RUNNER_TEMP/test.log"
           status="${PIPESTATUS[0]}"
           set -e
           node "$GITHUB_WORKSPACE/desktop/scripts/known-test-failures.mjs" "$RUNNER_TEMP/test.log" "$status"

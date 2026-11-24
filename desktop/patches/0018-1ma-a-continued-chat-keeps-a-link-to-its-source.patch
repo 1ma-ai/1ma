@@ -1,0 +1,439 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Mon, 23 Nov 2026 09:54:17 +0100
+Subject: [PATCH] 1ma: a continued chat keeps a link to its source
+
+"Continue in new chat" (the composer handoff) now sends the source thread's
+id with the create request, so the new thread is stored with
+sourceThreadId set and originKind null. Before, the request carried no
+source at all: the only trace was a mention of the source thread in the
+draft text, which the user can edit away, so plugins could not tell a
+continuation from an unrelated new chat (1ma bots need this to keep the
+continuation with the same bot).
+
+Nothing is copied: history, provider session, title, attachments and the
+fork point stay gated on originKind "fork". Parent, visibility and sidebar
+placement do not change, and environment resolution ignores the source,
+as it did before.
+
+A hidden thread still belongs to its source only when it is a fork: the
+archive cascade (listNonDeletedHiddenSourceThreads) and the storage-retention
+archive groups now also require originKind "fork", so a hidden continuation
+is archived on its own, not with its source.
+
+The server no longer rejects sourceThreadId without an originKind; the
+source is still validated the same way (same project, not archived, not
+deleted). The plugin SDK documents sourceThreadId with a null originKind as
+"continued from".
+
+The thread banner loads the source only for a fork; a continuation shows no
+source banner, so it no longer fetches and subscribes to its source. The
+CLI help and the guide describe --source-thread without --origin-kind.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../useParentThreadSection.test.ts            | 44 +++++++++++++++
+ .../thread-detail/useParentThreadSection.ts   |  4 +-
+ apps/cli/src/commands/thread/spawn.ts         |  5 +-
+ .../src/services/threads/thread-create.ts     | 11 +---
+ .../public/public-thread-parenting.test.ts    | 39 +++++++++++++
+ .../thread-create-seed-without-run.test.ts    | 55 +++++++++++++++++++
+ .../src/prompt/thread-handoff-request.ts      |  1 +
+ .../test/thread-handoff-request.test.ts       | 12 ++++
+ packages/db/src/data/threads.ts               |  1 +
+ packages/plugin-sdk/src/app-contract.ts       |  5 +-
+ .../src/templates/bb-guide-threads.md         |  2 +-
+ plugins/storage-retention/src/policy.ts       |  9 ++-
+ .../storage-retention/src/retention.test.ts   | 24 ++++++++
+ 13 files changed, 198 insertions(+), 14 deletions(-)
+ create mode 100644 apps/app/src/views/thread-detail/useParentThreadSection.test.ts
+
+diff --git a/apps/app/src/views/thread-detail/useParentThreadSection.test.ts b/apps/app/src/views/thread-detail/useParentThreadSection.test.ts
+new file mode 100644
+index 0000000..c331617
+--- /dev/null
++++ b/apps/app/src/views/thread-detail/useParentThreadSection.test.ts
+@@ -0,0 +1,44 @@
++// @vitest-environment jsdom
++
++import { cleanup, renderHook } from "@testing-library/react";
++import { afterEach, expect, it, vi } from "vitest";
++import { useThread } from "@/hooks/queries/thread-queries";
++import { makeThreadResponse } from "@/test/fixtures/thread-responses";
++import { useParentThreadSection } from "./useParentThreadSection";
++
++vi.mock("@/hooks/queries/thread-queries", () => ({
++  useThread: vi.fn(() => ({ data: undefined })),
++}));
++
++afterEach(() => {
++  cleanup();
++  vi.clearAllMocks();
++});
++
++it("does not load the source of a continued chat, which shows no banner", () => {
++  const thread = makeThreadResponse({
++    id: "thr_continuation",
++    originKind: null,
++    parentThreadId: null,
++    sourceThreadId: "thr_source",
++  });
++
++  const { result } = renderHook(() => useParentThreadSection(thread, true));
++
++  expect(result.current).toBeNull();
++  expect(useThread).not.toHaveBeenCalledWith("thr_source");
++});
++
++it("loads the source of a fork for its banner", () => {
++  const thread = makeThreadResponse({
++    id: "thr_fork",
++    originKind: "fork",
++    parentThreadId: null,
++    sourceThreadId: "thr_source",
++  });
++
++  const { result } = renderHook(() => useParentThreadSection(thread, true));
++
++  expect(result.current?.relationship).toBe("fork");
++  expect(useThread).toHaveBeenCalledWith("thr_source");
++});
+diff --git a/apps/app/src/views/thread-detail/useParentThreadSection.ts b/apps/app/src/views/thread-detail/useParentThreadSection.ts
+index 49b1334..d965a5a 100644
+--- a/apps/app/src/views/thread-detail/useParentThreadSection.ts
++++ b/apps/app/src/views/thread-detail/useParentThreadSection.ts
+@@ -11,7 +11,9 @@ export function useParentThreadSection(
+ ): ThreadPromptParentThreadSection | null {
+   const threadOriginKind = thread.originKind;
+   const threadSourceThreadId =
+-    thread.sourceThreadId ?? (threadOriginKind ? thread.parentThreadId : null);
++    threadOriginKind === "fork"
++      ? (thread.sourceThreadId ?? thread.parentThreadId)
++      : null;
+   const { data: parentThread } = useThread(
+     enabled ? (thread.parentThreadId ?? "") : "",
+   );
+diff --git a/apps/cli/src/commands/thread/spawn.ts b/apps/cli/src/commands/thread/spawn.ts
+index 2e79e6f..cbae380 100644
+--- a/apps/cli/src/commands/thread/spawn.ts
++++ b/apps/cli/src/commands/thread/spawn.ts
+@@ -414,7 +414,10 @@ export function registerSpawnCommand(
+     )
+     .option("--send-at <when>", SEND_AT_HELP)
+     .option("--origin-kind <kind>", "Thread origin: fork")
+-    .option("--source-thread <id>", "Source thread for a fork")
++    .option(
++      "--source-thread <id>",
++      "Source thread: a fork copies it; without --origin-kind the new thread continues it",
++    )
+     .option(
+       "--source-seq-end <seq>",
+       "Fork after the source turn containing this event sequence",
+diff --git a/apps/server/src/services/threads/thread-create.ts b/apps/server/src/services/threads/thread-create.ts
+index 6208083..43faa47 100644
+--- a/apps/server/src/services/threads/thread-create.ts
++++ b/apps/server/src/services/threads/thread-create.ts
+@@ -608,13 +608,6 @@ export async function createThreadFromRequest(
+         parentThreadId: hierarchyParentThreadId,
+       })
+     : null;
+-  if (originKind === null && sourceThreadId !== undefined) {
+-    throw new ApiError(
+-      400,
+-      "invalid_request",
+-      "sourceThreadId requires an originKind",
+-    );
+-  }
+   if (originKind === null && requestInput.sourceSeqEnd !== undefined) {
+     throw new ApiError(
+       400,
+@@ -699,7 +692,9 @@ export async function createThreadFromRequest(
+     parentThread:
+       forkSourceEnvironmentId !== undefined
+         ? null
+-        : (sourceThread ?? parentThread),
++        : originKind === null
++          ? parentThread
++          : (sourceThread ?? parentThread),
+     projectId: requestInput.projectId,
+     requestedEnvironment: requestInput.environment,
+   });
+diff --git a/apps/server/test/public/public-thread-parenting.test.ts b/apps/server/test/public/public-thread-parenting.test.ts
+index 835da47..9592364 100644
+--- a/apps/server/test/public/public-thread-parenting.test.ts
++++ b/apps/server/test/public/public-thread-parenting.test.ts
+@@ -571,6 +571,45 @@ describe("public thread parenting routes", () => {
+     });
+   });
+ 
++  it("keeps a hidden continuation when its source is archived", async () => {
++    await withTestHarness(async (harness) => {
++      const { host } = seedHostSession(harness.deps);
++      const { project } = seedProjectWithSource(harness.deps, {
++        hostId: host.id,
++      });
++      const environment = seedEnvironment(harness.deps, {
++        hostId: host.id,
++        projectId: project.id,
++      });
++      const sourceThread = seedThread(harness.deps, {
++        environmentId: environment.id,
++        projectId: project.id,
++      });
++      const continuation = seedThread(harness.deps, {
++        environmentId: environment.id,
++        visibility: "hidden",
++        projectId: project.id,
++        sourceThreadId: sourceThread.id,
++      });
++
++      const response = await harness.app.request(
++        `/api/v1/threads/${sourceThread.id}/archive-all`,
++        { method: "POST" },
++      );
++
++      expect(response.status).toBe(200);
++      expect(
++        threadArchiveAllResponseSchema.parse(await readJson(response))
++          .archivedThreadIds,
++      ).toEqual([sourceThread.id]);
++      expect(getThread(harness.db, continuation.id)).toMatchObject({
++        archivedAt: null,
++        originKind: null,
++        sourceThreadId: sourceThread.id,
++      });
++    });
++  });
++
+   it.each([false, true])(
+     "archives all descendants once and preserves their parents (archived intermediary: %s)",
+     async (archivedIntermediary) => {
+diff --git a/apps/server/test/threads/thread-create-seed-without-run.test.ts b/apps/server/test/threads/thread-create-seed-without-run.test.ts
+index 7b59c11..c76dcd9 100644
+--- a/apps/server/test/threads/thread-create-seed-without-run.test.ts
++++ b/apps/server/test/threads/thread-create-seed-without-run.test.ts
+@@ -541,6 +541,61 @@ describe("thread creation child-thread boundary validation", () => {
+     );
+   });
+ 
++  it("records the source of a continued thread without forking it", async () => {
++    await withChildBoundaryHarness(
++      "continued-thread-source",
++      async ({ harness, hostId, path, projectId, sourceThreadId }) => {
++        seedThreadRuntimeState(harness.deps, {
++          environmentId:
++            getThread(harness.db, sourceThreadId)?.environmentId ?? null,
++          permissionMode: "auto",
++          inputText: "Source question",
++          model: "gpt-5",
++          reasoningLevel: "medium",
++          serviceTier: "default",
++          threadId: sourceThreadId,
++          providerThreadId: "provider-source-session",
++        });
++
++        const continued = await createThreadFromRequest(harness.deps, {
++          environment: {
++            type: "host",
++            hostId,
++            workspace: { type: "unmanaged", path },
++          },
++          input: textInput("Rewritten follow-up"),
++          origin: "app",
++          projectId,
++          providerId: "codex",
++          sourceThreadId,
++          startedOnBehalfOf: null,
++        });
++
++        expect(getThread(harness.db, continued.id)).toMatchObject({
++          sourceThreadId,
++          originKind: null,
++          parentThreadId: null,
++          visibility: "visible",
++        });
++        const queuedStart = await waitForQueuedCommand(
++          harness,
++          ({ command }) =>
++            command.type === "thread.start" &&
++            command.threadId === continued.id,
++        );
++        if (queuedStart.command.type !== "thread.start") {
++          throw new Error("Expected a thread.start command");
++        }
++        expect(queuedStart.command).not.toHaveProperty("fork");
++        expect(
++          listEvents(harness.db, { threadId: continued.id }).filter(
++            (event) => event.type === "client/turn/requested",
++          ),
++        ).toHaveLength(1);
++      },
++    );
++  });
++
+   it("rejects startedOnBehalfOf without an originKind", async () => {
+     await withChildBoundaryHarness(
+       "started-on-behalf-no-origin",
+diff --git a/packages/client-core/src/prompt/thread-handoff-request.ts b/packages/client-core/src/prompt/thread-handoff-request.ts
+index 079b4f6..929b78f 100644
+--- a/packages/client-core/src/prompt/thread-handoff-request.ts
++++ b/packages/client-core/src/prompt/thread-handoff-request.ts
+@@ -160,6 +160,7 @@ export function buildThreadHandoffCreateRequest({
+       ? { serviceTier: execution.serviceTier }
+       : {}),
+     ...(sendAt === undefined ? {} : { sendAt }),
++    sourceThreadId: seed.sourceThreadId,
+     startedOnBehalfOf: null,
+   };
+ }
+diff --git a/packages/client-core/test/thread-handoff-request.test.ts b/packages/client-core/test/thread-handoff-request.test.ts
+index f335354..cc5bd9b 100644
+--- a/packages/client-core/test/thread-handoff-request.test.ts
++++ b/packages/client-core/test/thread-handoff-request.test.ts
+@@ -188,10 +188,22 @@ describe("buildThreadHandoffCreateRequest", () => {
+       providerId: "claude-code",
+       reasoningLevel: "high",
+       serviceTier: "fast",
++      sourceThreadId: "thr_source",
+       startedOnBehalfOf: null,
+     });
+   });
+ 
++  it("names the source thread even when the draft no longer mentions it", () => {
++    const request = buildThreadHandoffCreateRequest({
++      draft: { text: "Rewritten from scratch", mentions: [], attachments: [] },
++      execution: EXECUTION,
++      seed: SEED,
++    });
++
++    expect(request?.sourceThreadId).toBe("thr_source");
++    expect(request).not.toHaveProperty("originKind");
++  });
++
+   it("falls back to the project default environment and drops unsupported service tiers", () => {
+     const request = buildThreadHandoffCreateRequest({
+       draft: { text: "Keep going", mentions: [], attachments: [] },
+diff --git a/packages/db/src/data/threads.ts b/packages/db/src/data/threads.ts
+index ad589bd..dc118e9 100644
+--- a/packages/db/src/data/threads.ts
++++ b/packages/db/src/data/threads.ts
+@@ -1550,6 +1550,7 @@ export function listNonDeletedHiddenSourceThreads(
+     nonDeletedThreads(
+       eq(threads.sourceThreadId, args.sourceThreadId),
+       eq(threads.visibility, "hidden"),
++      eq(threads.originKind, "fork"),
+     ),
+   );
+ }
+diff --git a/packages/plugin-sdk/src/app-contract.ts b/packages/plugin-sdk/src/app-contract.ts
+index 543f65f..895221f 100644
+--- a/packages/plugin-sdk/src/app-contract.ts
++++ b/packages/plugin-sdk/src/app-contract.ts
+@@ -1399,7 +1399,10 @@ export interface PluginSidebarThread {
+    * "stuck" (failures, interruptions, and blockers), or "off".
+    */
+   parentNotifications: ThreadParentNotifications;
+-  /** The thread this one was forked from; null unless `originKind` is "fork". */
++  /**
++   * The thread this one was forked from ("fork") or, with a null `originKind`,
++   * continued from without copying its history; null when it has no source.
++   */
+   sourceThreadId: string | null;
+   sectionId: string | null;
+   /** How this thread came to exist under its parent; null for root threads. */
+diff --git a/packages/templates/src/templates/bb-guide-threads.md b/packages/templates/src/templates/bb-guide-threads.md
+index d7b21ff..2faf0df 100644
+--- a/packages/templates/src/templates/bb-guide-threads.md
++++ b/packages/templates/src/templates/bb-guide-threads.md
+@@ -75,7 +75,7 @@ Spawning:
+     --file <path>                  CLI-local absolute path, file: URL, or uploaded file path
+     --image <path>                 CLI-local absolute path, file: URL, or uploaded image path
+     --origin-kind <kind>           Create a fork thread
+-    --source-thread <id>           Source thread for a fork
++    --source-thread <id>           Source thread: a fork copies it; without --origin-kind the new thread continues it
+     --source-seq-end <seq>         Fork after the source turn containing this event sequence
+ 
+   Execution defaults resolve from explicit flags, live parent execution, and
+diff --git a/plugins/storage-retention/src/policy.ts b/plugins/storage-retention/src/policy.ts
+index fc29969..5c8e0f4 100644
+--- a/plugins/storage-retention/src/policy.ts
++++ b/plugins/storage-retention/src/policy.ts
+@@ -9,6 +9,7 @@ export type RetentionThread = Pick<
+   | "id"
+   | "parentThreadId"
+   | "sourceThreadId"
++  | "originKind"
+   | "lifecycleOwnerThreadId"
+   | "visibility"
+   | "archivedAt"
+@@ -47,7 +48,7 @@ export function selectCandidates(
+     link(deleteEdges, thread.lifecycleOwnerThreadId, thread);
+     link(archiveEdges, thread.lifecycleOwnerThreadId, thread);
+     link(archiveEdges, thread.parentThreadId, thread);
+-    if (thread.visibility === "hidden")
++    if (thread.visibility === "hidden" && thread.originKind === "fork")
+       link(archiveEdges, thread.sourceThreadId, thread);
+   }
+   function members(
+@@ -76,7 +77,11 @@ export function selectCandidates(
+       policy.archiveAfterDays !== null &&
+       root.archivedAt === null &&
+       !active(root.parentThreadId) &&
+-      !(root.visibility === "hidden" && active(root.sourceThreadId))
++      !(
++        root.visibility === "hidden" &&
++        root.originKind === "fork" &&
++        active(root.sourceThreadId)
++      )
+     ) {
+       const group = members(root, archiveEdges).filter(
+         (thread) => thread.archivedAt === null,
+diff --git a/plugins/storage-retention/src/retention.test.ts b/plugins/storage-retention/src/retention.test.ts
+index 2e7232b..c72e628 100644
+--- a/plugins/storage-retention/src/retention.test.ts
++++ b/plugins/storage-retention/src/retention.test.ts
+@@ -21,6 +21,7 @@ function thread(
+     parentThreadId: null,
+     lifecycleOwnerThreadId: null,
+     sourceThreadId: null,
++    originKind: null,
+     visibility: "visible",
+     environmentId: "env_test",
+     status: "idle",
+@@ -42,6 +43,7 @@ describe("retention eligibility", () => {
+             thread("child", {
+               [relationship]: "root",
+               visibility: "hidden",
++              originKind: "fork",
+               ...exemption,
+             }),
+             thread("independent"),
+@@ -55,6 +57,28 @@ describe("retention eligibility", () => {
+       }
+     }
+   });
++  it("archives a hidden continuation and its source independently", () => {
++    for (const [sourceAt, continuationAt, archived] of [
++      [DAY, NOW, "source"],
++      [NOW, DAY, "continuation"],
++    ] as const) {
++      const result = selectCandidates(
++        [
++          thread("source", { updatedAt: sourceAt }),
++          thread("continuation", {
++            sourceThreadId: "source",
++            visibility: "hidden",
++            updatedAt: continuationAt,
++          }),
++        ],
++        { archiveAfterDays: 30, deleteAfterDays: null },
++        NOW,
++      );
++      expect(result.archive.map((group) => group.memberIds)).toEqual([
++        [archived],
++      ]);
++    }
++  });
+   it("deletes only fully old archived lifecycle groups, while ordinary children have independent deletion lifetimes", () => {
+     const result = selectCandidates(
+       [
