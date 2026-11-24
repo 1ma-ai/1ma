@@ -525,7 +525,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
     );
   });
 
-  it("runs an action exactly once when the control server restarts between the answer and the send", async () => {
+  it("runs an action exactly once when the control server stops gracefully (SIGTERM) while its create request is in flight", async () => {
     await clearCards();
     proxy.setMode({ kind: "delay", once: true, delayMs: 60_000 });
     const actionId = await proposeAndConfirm("[stub:reply restart task]", "restart task");
@@ -570,7 +570,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
     assert.deepEqual(postsTitled("excluded task"), []);
   });
 
-  it("keeps a decision recorded before its card closed through a crash, and starts the chat once", async () => {
+  it("keeps a decision taken through decide when the control server is killed before the request is sent, and starts the chat once", async () => {
     await clearCards();
     control.bb(["plugin", "config", PLUGIN, "set", "passEnabled", "false"]);
     const known = await knownActions();
@@ -578,7 +578,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
     await sayToBot(startCall(prompt, "crash task"));
     const created = await newestAction(known);
     const card = await waitCard("start card", (data) => data.quote === prompt);
-    const { questionId, token } = card.payload.data;
+    const { questionId, token, waiting } = card.payload.data;
     const decided = await control.rpc(PLUGIN, "questions.v1.decide", {
       questionId,
       token,
@@ -586,6 +586,15 @@ describe("1ma-superagent bot actions with a model turn", () => {
     });
     assert.equal(decided.outcome, "applied");
     assert.equal((await action(created.id)).state, "confirmed");
+    const recorded = { open: false, decided: "start", outdated: null, waiting };
+    assert.deepEqual(
+      await control.rpc(PLUGIN, "questions.v1.state", { questionId, token }),
+      recorded,
+    );
+    assert.deepEqual(
+      (await pendingCards()).map((pending) => pending.id),
+      [card.id],
+    );
     const postsBefore = proxy.spawnPosts().length;
     await control.crash();
     control.start();
@@ -595,17 +604,20 @@ describe("1ma-superagent bot actions with a model turn", () => {
     );
     assert.equal(afterCrash.state, "confirmed");
     assert.equal(proxy.spawnPosts().length, postsBefore);
-    const survivor = (await pendingCards()).find(
+    const closed = await control.api("GET", `/threads/${ids.bot}/interactions/${card.id}`);
+    assert.deepEqual(
+      { status: closed.status, statusReason: closed.statusReason },
+      { status: "interrupted", statusReason: "server-restarted" },
+    );
+    assert.deepEqual(
+      await control.rpc(PLUGIN, "questions.v1.state", { questionId, token }),
+      recorded,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    const shownAgain = (await pendingCards()).filter(
       (pending) => pending.payload.data.questionId === questionId,
     );
-    if (survivor !== undefined) {
-      const state = await control.rpc(PLUGIN, "questions.v1.state", { questionId, token });
-      assert.deepEqual(state, { open: false, decided: "start" });
-      await respond(survivor, state.decided);
-    }
-    console.log(
-      `card after the crash: ${survivor === undefined ? "gone" : "closed with the stored decision"}`,
-    );
+    assert.deepEqual(shownAgain, []);
     control.bb(["plugin", "config", PLUGIN, "set", "passEnabled", "true"]);
     const bound = await waitFor("crash action bound", PASS * 2, async () => {
       const current = await action(created.id);
