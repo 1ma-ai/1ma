@@ -119,7 +119,10 @@ interface HarnessProps {
 function renderSectionThreadDnd(
   initialRootItems = ROOT_ITEMS,
   pinnedThreads: readonly SidebarThread[] = [],
-  grouping: { groups?: boolean; containerProjectId?: string } = {},
+  grouping: Pick<
+    Parameters<typeof useSectionThreadDnd>[0],
+    "groups" | "containerProjectId" | "onBotReorder"
+  > = {},
 ) {
   const result: { current: SectionThreadDndState | null } = { current: null };
   const pinnedState = buildPinnedSidebarState({
@@ -358,6 +361,67 @@ function notePointerMove() {
 afterEach(() => {
   cleanup();
   updateThreadDeferred = null;
+});
+
+describe("bot conversation drops", () => {
+  const pinned = createThread({ id: "dragged", pinnedAt: 42, sectionId: "a" });
+  const target = createThread({ id: "peer", sectionId: "b" });
+  const roots = buildSectionThreadList([pinned, target]);
+  const rowId = getSidebarThreadRowDroppableId(target.id);
+
+  it("keeps the lower edge available for touch reordering while the finger rests", async () => {
+    const onBotReorder = vi.fn();
+    const { result, inspection } = renderSectionThreadDnd(roots, [], {
+      groups: true,
+      onBotReorder,
+    });
+    const props = () => result.current!.dndContextProps;
+    const rect = { top: 100, left: 0, right: 200, width: 200, height: 28, bottom: 128 };
+    const collision = () =>
+      props().collisionDetection!({
+        active: { id: pinned.id },
+        collisionRect: rect,
+        droppableRects: new Map([[rowId, rect], [target.id, rect]]),
+        droppableContainers: [{ id: rowId }, { id: target.id }],
+        pointerCoordinates: { x: 20, y: 126 },
+      } as unknown as Parameters<CollisionDetection>[0])[0]?.id;
+    act(() => props().onDragStart?.({
+      ...dragStart(pinned.id),
+      activatorEvent: new TouchEvent("touchstart"),
+    }));
+    vi.useFakeTimers();
+    try {
+      collision();
+      act(() => vi.advanceTimersByTime(NEST_HOVER_DELAY_MS));
+      expect(collision()).toBe(target.id);
+    } finally {
+      vi.useRealTimers();
+    }
+    act(() => props().onDragEnd?.(dragEnd(pinned.id, target.id)));
+    await flushTasks();
+    expect(onBotReorder).toHaveBeenCalledExactlyOnceWith([pinned.id], {
+      threadId: target.id,
+      placement: "after",
+    });
+    expect(inspection.sdkCalls).toEqual([]);
+  });
+
+  it("sets the real parent while keeping the pin and project section", async () => {
+    const { result, inspection } = renderSectionThreadDnd(roots, [], {
+      groups: true,
+      onBotReorder: vi.fn(),
+    });
+    const props = () => result.current!.dndContextProps;
+    act(() => props().onDragStart?.(dragStart(pinned.id)));
+    act(() => props().onDragOver?.(dragOver(pinned.id, rowId)));
+    act(() => props().onDragEnd?.(dragEnd(pinned.id, rowId)));
+    await flushTasks();
+    resolveUpdateThread(pinned);
+    await flushTasks();
+    expect(inspection.sdkCalls).toEqual([
+      { method: "threads.update", args: [{ threadId: pinned.id, parentThreadId: target.id }] },
+    ]);
+  });
 });
 
 describe("useSectionThreadDnd project drop targets", () => {

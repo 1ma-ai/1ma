@@ -44,7 +44,8 @@ import {
 import { cn } from "@/lib/utils";
 import { usePluginThreadRowStatusForThreads } from "../app/list/groupRollups.js";
 import { useThreadsHaveDraft } from "../app/list/sidebarDraftPresence.js";
-import { ProjectThreadTree, ThreadTreeGroupLine } from "../app/list/ProjectRow.js";
+import { BotThreadTree } from "./BotThreadTree.js";
+import { ThreadTreeGroupLine } from "../app/list/ProjectRow.js";
 import { TopLevelSidebarSection } from "../app/list/TopLevelSidebarSection.js";
 import type { ThreadComparator } from "../app/model/project-thread-groups.js";
 import { sidebarThreadLifecyclesAtom } from "../app/preferences/atoms.js";
@@ -673,12 +674,7 @@ function BotRow({
       {hasChildren && !isCollapsed ? (
         <div className="relative space-y-px">
           <ThreadTreeGroupLine parentRowDepth={0} />
-          {open.length > 0 ? (
-            <ProjectThreadTree
-              threadListState={{ status: "ready", threads: open }}
-              {...treeProps}
-            />
-          ) : null}
+          {open.length > 0 ? <BotThreadTree bot={bot} threads={open} {...treeProps} /> : null}
           {doneCount > 0 ? (
             <button
               type="button"
@@ -701,10 +697,7 @@ function BotRow({
             </button>
           ) : null}
           {showDone && doneCount > 0 ? (
-            <ProjectThreadTree
-              threadListState={{ status: "ready", threads: done }}
-              {...treeProps}
-            />
+            <BotThreadTree bot={bot} threads={done} {...treeProps} />
           ) : null}
         </div>
       ) : null}

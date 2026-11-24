@@ -48,6 +48,10 @@ export const botsRpc = {
     input: z.object({ botId: z.string(), hidden: z.boolean() }),
     output: ok,
   },
+  "bots.v1.reorderThreads": {
+    input: z.object({ botId: z.string(), threadIds: z.array(z.string()) }),
+    output: ok,
+  },
   "bots.v1.setCompleted": {
     input: z.object({ threadId: z.string(), completed: z.boolean() }),
     output: ok,

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { BotDetail, BotSummary } from "./src/contract.js";
 import { avatarDataUrl } from "./src/avatar.js";
@@ -176,5 +176,46 @@ describe("Assign to bot in a thread's menu", () => {
       } as never),
     ).toBeNull();
     expect(assignToBotAction.item({ thread, data: { ...data, bots: [] } } as never)).toBeNull();
+  });
+});
+
+describe("bot conversation menu", () => {
+  const thread = { id: "thr_b", parentThreadId: null, archivedAt: null };
+  const bots = [
+    bot(
+      "bot_a",
+      "Editor",
+      ["thr_a", "thr_b", "thr_c"].map((threadId) => ({
+        threadId,
+        completed: threadId === "thr_b",
+        startedFromBot: true,
+      })),
+    ),
+  ];
+  it("moves the selected conversation ahead of the others without changing completion", async () => {
+    const app = await loadPluginApp(() => import("./app.js"));
+    const move = app.threadActions.find((action) => action.id === "move-to-top")!;
+    const mutate = vi.fn();
+    const action = move.item({ thread, data: { bots, reorder: { mutate } } } as never)!;
+    await action.run({} as never);
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({
+      botId: "bot_a",
+      threadIds: ["thr_b", "thr_a", "thr_c"],
+    });
+    expect(
+      move.item({ thread: { ...thread, id: "thr_project" }, data: { bots } } as never),
+    ).toBeNull();
+  });
+  it("reopens a completed conversation from the same menu", async () => {
+    const app = await loadPluginApp(() => import("./app.js"));
+    const toggle = app.threadActions.find((action) => action.id === "toggle-done")!;
+    const mutate = vi.fn();
+    const action = toggle.item({ thread, data: { bots, setCompleted: { mutate } } } as never)!;
+    expect(action.label).toBe(strings.threadBot.markNotDone);
+    await action.run({} as never);
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({ threadId: thread.id, completed: false });
+    expect(
+      toggle.item({ thread: { ...thread, id: "thr_project" }, data: { bots } } as never),
+    ).toBeNull();
   });
 });

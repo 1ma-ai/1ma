@@ -439,6 +439,89 @@ describe("1ma-sidebar with the bots block", () => {
     }
   });
 
+  it("orders, completes and nests conversations in the bot tree", async () => {
+    const { context, page } = await openApp(browser, "light");
+    try {
+      await expandBot(page, "Visual Bot");
+      const group = page.locator(`[data-bot-id="${fixture.visible.id}"]`);
+      const row = threadLink(group, fixture.v2);
+      await row.click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Move to top", exact: true }).click();
+      const order = () =>
+        group
+          .locator("a[data-sidebar-thread-id]")
+          .evaluateAll((rows) => rows.map((link) => link.dataset.sidebarThreadId));
+      await waitFor(
+        "the menu moves the second conversation to the top",
+        30 * SECOND,
+        async () => (await order())[0] === fixture.v2,
+      );
+      await row.click({ button: "right" });
+      const markDone = page.getByRole("menuitem", { name: "Mark as done", exact: true });
+      await markDone.waitFor();
+      await screenshot(page, "bot-conversation-menu");
+      await markDone.click();
+      await row.waitFor({ state: "detached" });
+      await group.getByRole("button", { name: "Done: 1", exact: true }).click();
+      await row.waitFor();
+      assert.equal(await completedOf(fixture.visible.id, fixture.v2), true);
+      await screenshot(page, "bot-conversation-done");
+      await row.click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Mark as not done", exact: true }).click();
+      await group
+        .getByRole("button", { name: "Done: 1", exact: true })
+        .waitFor({ state: "detached" });
+      await row.waitFor();
+      assert.equal(await completedOf(fixture.visible.id, fixture.v2), false);
+      const drag = async (placement) => {
+        const from = await row.boundingBox();
+        const parent = threadLink(group, fixture.v1);
+        const to = await parent.boundingBox();
+        assert.ok(from && to);
+        const x = to.x + 36;
+        const y = placement === "inside" ? to.y + to.height / 2 : to.y + to.height - 2;
+        await page.mouse.move(from.x + 36, from.y + from.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(from.x + 46, from.y + from.height / 2 + 3, { steps: 4 });
+        await page.mouse.move(x, y, { steps: 18 });
+        const hint =
+          placement === "inside"
+            ? '[data-sidebar-nest-target="valid"]'
+            : '[data-sidebar-reorder-placement="after"]';
+        await group
+          .locator(hint)
+          .filter({ has: threadLink(page, fixture.v1) })
+          .waitFor({ timeout: 10 * SECOND });
+        if (placement === "after") await screenshot(page, "bot-conversation-reorder");
+        await page.mouse.up();
+      };
+      await drag("after");
+      await waitFor(
+        "the drag changes the saved bot order",
+        30 * SECOND,
+        async () =>
+          (await rpc("bots.v1.get", { botId: fixture.visible.id })).threads[0].threadId ===
+            fixture.v1 && (await order())[0] === fixture.v1,
+      );
+      await drag("inside");
+      await waitFor(
+        "the dragged conversation has a real parent",
+        30 * SECOND,
+        async () => (await thread(fixture.v2)).parentThreadId === fixture.v1,
+      );
+      await page.reload();
+      await expandBot(page, "Visual Bot");
+      await group
+        .getByRole("button", { name: "Collapse Bot conversation one threads", exact: true })
+        .waitFor();
+      assert.deepEqual(await order(), [fixture.v1, fixture.v2]);
+      await screenshot(page, "bot-conversation-subchat");
+    } finally {
+      await context.close();
+      await server.api("PATCH", `/threads/${fixture.v2}`, { parentThreadId: null });
+    }
+  });
+
   it("moves a conversation dragged from a project onto a bot's face to the top of that bot", async () => {
     const { context, page, problems } = await openApp(browser, "light");
     try {

@@ -1737,7 +1737,7 @@ function useWindowedThreadItems({
   return { itemKeys, estimateRows, getNavigationEntries, alwaysMountedKeys };
 }
 
-function SectionThreadTreeItems({
+export function SectionThreadTreeItems({
   items,
   sectionDnd,
   projectId,

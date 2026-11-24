@@ -27,6 +27,7 @@ export const strings = {
     `Moved ${moved} of ${total} conversations to ${name}`,
   unconfirmedAssigned: (name: string, moved: number, total: number) =>
     `Moved ${moved} of ${total} conversations to ${name}; could not check the rest. Reload the list to see where they are.`,
+  reorderFailed: "Could not reorder the conversations",
   open: "Open",
   done: (count: number) => `Done: ${count}`,
   settings: {

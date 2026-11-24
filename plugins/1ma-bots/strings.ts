@@ -63,6 +63,9 @@ export const strings = {
     preview: "View bot instructions",
     instructionsFrom: (name: string) => `Instructions from ${name}`,
     choose: "Assign to bot",
+    moveToTop: "Move to top",
+    markDone: "Mark as done",
+    markNotDone: "Mark as not done",
     notStartedFromBot:
       "This conversation was not started from the bot. Tools other plugins give this bot (for example the main bot's actions) are not available here.",
     continueInBot: "Continue in a bot conversation",

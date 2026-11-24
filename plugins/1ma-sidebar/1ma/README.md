@@ -29,8 +29,13 @@
   - При наведении штатные «+» (новый разговор в композере bb через
     `bots.v1.startThread`) и «…»: новый разговор, настройки бота, скрыть
     или вернуть бота (`bots.v1.setHidden`).
-  - Разговоры бота — дерево bb (`ProjectThreadTree`, `depthOffset: 1`)
+  - Разговоры бота — дерево bb (`SectionThreadTreeItems`, `depthOffset: 1`)
     под штатной линией (`ThreadTreeGroupLine`), под ними «Done: N».
+    Внутри дерева перетащите разговор к верхнему или нижнему краю другой
+    строки, чтобы поставить его перед ней или после неё. Чтобы сделать
+    разговор подчатом, задержите его над серединой строки до подсветки
+    и отпустите. `BotThreadTree.tsx` сохраняет порядок через
+    `bots.v1.reorderThreads`; связь с родителем сохраняет сам bb.
   - Внизу блока строка «N hidden»: она показывает скрытых ботов
     приглушёнными и без разговоров, их разговоры остаются в проектах.
     Когда разговор начинает работать, ждёт ответа или получает письмо,
@@ -76,9 +81,9 @@
 | `server.ts`                                                  | `register1maSidebar(bb, createPreferenceStore(bb))` даёт `store`, который помнит выбор владельца; `chooseDefaultThreadList()` и `copyBuiltInPreferences()` при загрузке (после успеха старые `sidebar.*` не переносятся) и в `listPreferences` |
 | `app/model/use-sidebar-data.ts`                              | `useWithoutBotThreads(...)` вокруг `experimental_useSidebarThreads`                                                                                                                                                                            |
 | `app/list/ProjectList.tsx`                                   | `<BotsBlock … />` после `<SidebarDraftPresenceSync />`, ему передаются штатные `collapsedThreadIds`, `collapsedEnvironmentIds` и их переключатели                                                                                              |
-| `app/list/ProjectRow.tsx`                                    | `ProjectThreadTree` принимает `depthOffset` (вложенное дерево получает отступ и шаг строк подчатов), `ThreadTreeGroupLine` экспортирована                                                                                                      |
+| `app/list/ProjectRow.tsx`                                    | `ProjectThreadTree` принимает `depthOffset` (вложенное дерево получает отступ и шаг строк подчатов), блок ботов использует `SectionThreadTreeItems` и `ThreadTreeGroupLine`                                                                    |
 | `shared/preferences.ts`                                      | ключ `collapsedBots`: свёрнутые боты и весь блок (`bots`)                                                                                                                                                                                      |
-| `app/dnd/useSectionThreadDnd.ts`                             | перетаскивание bb сообщает `botDrop` (`1ma/thread-drop.ts`), какие чаты несёт и где указатель; над ботом у списка нет своих мест для сброса                                                                                                    |
+| `app/dnd/useSectionThreadDnd.ts`                             | перетаскивание bb сообщает `botDrop` (`1ma/thread-drop.ts`), какие чаты несёт и где указатель; в дереве бота край строки задаёт позицию, середина — родителя                                                                                   |
 | `shared/preferences.ts`, `app/rows/ThreadRow.tsx` и их тесты | ключи `1ma-sidebar/move`, `1ma-sidebar/customizeRowActions`                                                                                                                                                                                    |
 | `skills/1ma-sidebar/SKILL.md`                                | имя навыка `1ma-sidebar`, команда `bb 1ma-sidebar`                                                                                                                                                                                             |
 | `vitest.config.ts`                                           | `maxWorkers: 2`, имя проекта                                                                                                                                                                                                                   |
