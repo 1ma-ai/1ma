@@ -80,27 +80,10 @@ jobs:
           commit=$(git ls-remote "$repository" "refs/tags/$TAG^{}" | cut -f1)
           [[ -n "$commit" ]] || commit=$(git ls-remote "$repository" "refs/tags/$TAG" | cut -f1)
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve $TAG in $repository"; exit 1; }
-          branch="bb-trial/$TAG"
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          if gh api "repos/$GITHUB_REPOSITORY/branches/$branch" --silent 2>/dev/null; then
-            echo "$branch already exists; its runs hold the result"
-            echo "started=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/heads/$branch" -f "sha=$GITHUB_SHA" --silent
-          current=$(gh api "repos/$GITHUB_REPOSITORY/contents/desktop/upstream.json?ref=$branch" --jq .sha)
-          content=$(jq --arg tag "$TAG" --arg commit "$commit" '.seriesBase = .commit | .tag = $tag | .commit = $commit' desktop/upstream.json | base64 -w0)
-          gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/desktop/upstream.json" \
-            -f "message=Trial: the 1ma patches on bb $TAG (not for main)" \
-            -f "content=$content" -f "sha=$current" -f "branch=$branch" --silent
-          # Pushes made with this token start no workflows; dispatches do. The tests
-          # run without the rebrand, so new bb strings cannot stop them; the Desktop
-          # workflow checks the patches and the rebrand inventory and builds.
-          gh workflow run desktop.yml --ref "$branch"
-          gh workflow run desktop-tests.yml --ref "$branch" -f rebrand=false
-          echo "started=true" >> "$GITHUB_OUTPUT"
-          echo "trial of $TAG ($commit) started on $branch"
+          # One trial is this bb tag with this exact patch series; a rerun starts
+          # only the runs the trial branch's head does not have yet (desktop/scripts/bb-trial.mjs).
+          node desktop/scripts/bb-trial.mjs "$TAG" "$commit" | tee "$RUNNER_TEMP/trial.out"
+          grep -E '^(branch|started)=' "$RUNNER_TEMP/trial.out" >> "$GITHUB_OUTPUT"
       - name: Open or update the tracking issue
         if: steps.versions.outputs.pinned != steps.versions.outputs.latest || steps.versions.outputs.desktop_pinned != steps.versions.outputs.desktop_latest || steps.trial.outputs.started == 'true'
         env:

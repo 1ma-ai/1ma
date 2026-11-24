@@ -7,14 +7,22 @@ on:
       - "desktop/**"
       - "!desktop/**/*.md"
       - "brand/**"
-      - "plugins/1ma-brand/assets/**"
+      - "plugins/1ma-brand/**"
+      - "plugins/1ma-theme/**"
+      - "plugins/1ma-server-switcher/**"
+      - "plugins/1ma-auto-updates/**"
+      - "pnpm-lock.yaml"
       - ".github/workflows/desktop.yml"
   pull_request:
     paths:
       - "desktop/**"
       - "!desktop/**/*.md"
       - "brand/**"
-      - "plugins/1ma-brand/assets/**"
+      - "plugins/1ma-brand/**"
+      - "plugins/1ma-theme/**"
+      - "plugins/1ma-server-switcher/**"
+      - "plugins/1ma-auto-updates/**"
+      - "pnpm-lock.yaml"
       - ".github/workflows/desktop.yml"
   workflow_dispatch:
 
@@ -106,6 +114,10 @@ jobs:
           restore-keys: pnpm-store-${{ runner.os }}-${{ runner.arch }}-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
+      - name: Put the 1ma plugins in as built-in plugins (patch 0014)
+        run: node "$GITHUB_WORKSPACE/desktop/scripts/embed-plugins.mjs" "$PWD"
+      - name: Typecheck the server and the plugins the 1ma patches touch, as bb's CI does
+        run: pnpm exec turbo run typecheck --filter=@bb/server --filter=./plugins/* --continue --output-logs=errors-only
       - name: Build the server package and smoke-test its tarball, as bb does before publishing
         run: pnpm exec turbo run smoke:tarball --filter=bb-app --force --output-logs=new-only
       - name: Pack the server package
@@ -117,6 +129,28 @@ jobs:
           version="$(jq -r .version packages/bb-app/package.json)"
           mv "$RUNNER_TEMP/server/$packed" "$RUNNER_TEMP/server/1ma-server-${version}.tgz"
           cp 1ma-provenance.json "$RUNNER_TEMP/server/"
+      - name: Start the packed server from an empty folder and check the built-in 1ma plugins over HTTP
+        run: node "$GITHUB_WORKSPACE/desktop/scripts/smoke-builtin-plugins.mjs" "$RUNNER_TEMP"/server/1ma-server-*.tgz
+      - name: Going back to the last release without built-in plugins keeps the 1ma plugins
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(jq -r .tag "$GITHUB_WORKSPACE/desktop/rollback-baseline.json")"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '1ma-server-*.tgz' --pattern SHA256SUMS --dir "$RUNNER_TEMP/older"
+          (cd "$RUNNER_TEMP/older" && grep -E '  1ma-server-[^ ]+\.tgz$' SHA256SUMS | sha256sum --check --strict -)
+          node "$GITHUB_WORKSPACE/desktop/scripts/check-rollback.mjs" "$RUNNER_TEMP"/older/1ma-server-*.tgz "$RUNNER_TEMP"/server/1ma-server-*.tgz
+      - name: A change to an embedded 1ma plugin alone reaches the server package without --force
+        run: |
+          set -euo pipefail
+          overview="$GITHUB_WORKSPACE/plugins/1ma-brand/PLUGIN_OVERVIEW.md"
+          cp "$overview" "$RUNNER_TEMP/overview.md"
+          marker="turbo-inputs-check-$GITHUB_RUN_ID"
+          printf '\n<!-- %s -->\n' "$marker" >> "$overview"
+          node "$GITHUB_WORKSPACE/desktop/scripts/embed-plugins.mjs" "$PWD"
+          pnpm exec turbo run build --filter=bb-app --output-logs=errors-only
+          cp "$RUNNER_TEMP/overview.md" "$overview"
+          grep -q "$marker" packages/bb-app/server/dist/builtin-plugins/1ma-brand/PLUGIN_OVERVIEW.md
       - uses: actions/upload-artifact@v4
         with:
           name: 1ma-server-linux
@@ -173,10 +207,12 @@ jobs:
           restore-keys: pnpm-store-${{ runner.os }}-${{ runner.arch }}-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
+      - name: Put the 1ma plugins in as built-in plugins (patch 0014)
+        run: node "$GITHUB_WORKSPACE/desktop/scripts/embed-plugins.mjs" "$PWD"
       - name: Typecheck desktop, launcher and config
         run: pnpm exec turbo run typecheck --filter=@bb/desktop --filter=bb-app --filter=@bb/config --output-logs=new-only
       - name: Build desktop
-        run: pnpm exec turbo run build --filter=@bb/desktop --output-logs=new-only
+        run: pnpm exec turbo run build --filter=@bb/desktop --force --output-logs=new-only
       - name: Install Electron before parallel tests
         run: ELECTRON_RUN_AS_NODE=1 pnpm --filter @bb/desktop exec electron --version
       - name: Test desktop, launcher and config

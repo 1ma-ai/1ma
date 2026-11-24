@@ -7,6 +7,11 @@
     "legacy/**",
     "refs/**",
     "pnpm-lock.yaml",
-    "desktop/rebrand/inventory.json"
+    "desktop/rebrand/inventory.json",
+    "plugins/1ma-bots/components/ui/**",
+    "plugins/1ma-bots/lib/**",
+    "plugins/1ma-bots/hooks/**",
+    "plugins/1ma-sidebar/*",
+    "!plugins/1ma-sidebar/1ma/"
   ]
 }

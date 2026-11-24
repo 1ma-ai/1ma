@@ -18,13 +18,13 @@ to it once. Picking a machine or a source works as before.
  plugins/provider-usage/README.md            |   6 +-
  plugins/provider-usage/app.test.tsx         |   2 +-
  plugins/provider-usage/app.tsx              |  11 +-
- plugins/provider-usage/server.test.ts       | 108 ++++++++++++++++++++
- plugins/provider-usage/server.ts            |  40 +++++++-
+ plugins/provider-usage/server.test.ts       | 109 ++++++++++++++++++++
+ plugins/provider-usage/server.ts            |  40 ++++++-
  plugins/provider-usage/settings.tsx         |  20 +++-
  plugins/provider-usage/usage-feedback.tsx   |   8 +-
  plugins/provider-usage/usage-schema.test.ts |  30 ++++++
  plugins/provider-usage/usage-schema.ts      |   3 +
- 9 files changed, 213 insertions(+), 15 deletions(-)
+ 9 files changed, 214 insertions(+), 15 deletions(-)
 
 diff --git a/plugins/provider-usage/README.md b/plugins/provider-usage/README.md
 index 27d0806..dfd00d2 100644
@@ -93,10 +93,18 @@ index b685753..f43386c 100644
    );
  }
 diff --git a/plugins/provider-usage/server.test.ts b/plugins/provider-usage/server.test.ts
-index 9323ef8..fd8d469 100644
+index 9323ef8..0c7dc3e 100644
 --- a/plugins/provider-usage/server.test.ts
 +++ b/plugins/provider-usage/server.test.ts
-@@ -124,6 +124,7 @@ it("lists cheaply, fetches only the selected source/provider, preserves failed m
+@@ -4,6 +4,7 @@ import {
+   makeHostResponse,
+ } from "@get-bb/plugin-sdk/testing";
+ import plugin from "./server.js";
++import { usageSnapshotSchema } from "./usage-schema.js";
+ import { usageListMethod, usageFetchMethod } from "./usage-source-contract.js";
+ 
+ it("lists cheaply, fetches only the selected source/provider, preserves failed measurements, and evicts removed resources", async () => {
+@@ -124,6 +125,7 @@ it("lists cheaply, fetches only the selected source/provider, preserves failed m
      const listed = await host.harness.behavior.callRpc("getUsage", request);
      expect(listed).toMatchObject({
        machines: [
@@ -104,7 +112,7 @@ index 9323ef8..fd8d469 100644
          { id: "host" },
          {
            id: "source:pool",
-@@ -168,6 +169,7 @@ it("lists cheaply, fetches only the selected source/provider, preserves failed m
+@@ -168,6 +170,7 @@ it("lists cheaply, fetches only the selected source/provider, preserves failed m
        }),
      ).toMatchObject({
        machines: [
@@ -112,7 +120,7 @@ index 9323ef8..fd8d469 100644
          { id: "host" },
          {
            id: "source:pool",
-@@ -189,6 +191,7 @@ it("lists cheaply, fetches only the selected source/provider, preserves failed m
+@@ -189,6 +192,7 @@ it("lists cheaply, fetches only the selected source/provider, preserves failed m
        }),
      ).toMatchObject({
        machines: [
@@ -120,7 +128,7 @@ index 9323ef8..fd8d469 100644
          { id: "host" },
          {
            id: "source:pool",
-@@ -355,3 +358,108 @@ it("collapses known account observations per machine, preserves unknown identiti
+@@ -355,3 +359,108 @@ it("collapses known account observations per machine, preserves unknown identiti
      await harness.lifecycle.dispose();
    }
  });
@@ -196,19 +204,19 @@ index 9323ef8..fd8d469 100644
 +  });
 +  plugin(host.bb);
 +  try {
-+    const snapshot = await host.harness.behavior.callRpc("getUsage", {
-+      force: false,
-+      machineIds: ["all"],
-+      providerIds: ["codex", "opencode"],
-+      maxAgeMs: 0,
-+    });
++    const snapshot = usageSnapshotSchema.parse(
++      await host.harness.behavior.callRpc("getUsage", {
++        force: false,
++        machineIds: ["all"],
++        providerIds: ["codex", "opencode"],
++        maxAgeMs: 0,
++      }),
++    );
 +    expect(
-+      snapshot.machines.map(
-+        (machine: { id: string; providers: { id: string }[] }) => [
-+          machine.id,
-+          machine.providers.map((provider) => provider.id),
-+        ],
-+      ),
++      snapshot.machines.map((machine) => [
++        machine.id,
++        machine.providers.map((provider) => provider.id),
++      ]),
 +    ).toEqual([
 +      ["all", ["pool:plus", "pool:prolite", "acp:go"]],
 +      ["mac", ["local:login", "acp:go"]],

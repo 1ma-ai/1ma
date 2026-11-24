@@ -139,16 +139,23 @@ jobs:
           # The feeds only move forward: an older run never replaces a newer one.
           # Every feed this run replaces is checked, since a release that failed
           # halfway can leave one feed ahead of another.
+          # A feed can be lost by a failed upload (--clobber removes the old file
+          # first); a published release cannot, so the newest release tag is the
+          # floor as well.
           patterns=()
           for file in feeds/*; do patterns+=(--pattern "$(basename "$file")"); done
-          if gh release download desktop-latest "${patterns[@]}" --dir announced 2>feed.err; then
-            node 1ma/desktop/scripts/version.mjs forward "$version" announced ||
-              fail "the feeds in desktop-latest only move forward"
-          elif grep -q "release not found" feed.err; then
-            fail "the desktop-latest release is missing; a maintainer creates it once (desktop/README.md)"
-          elif ! grep -qE "no assets (match|to download)" feed.err; then
-            fail "cannot read desktop-latest: $(cat feed.err)"
+          mkdir -p announced
+          if ! gh release download desktop-latest "${patterns[@]}" --dir announced 2>feed.err; then
+            if grep -q "release not found" feed.err; then
+              fail "the desktop-latest release is missing; a maintainer creates it once (desktop/README.md)"
+            elif ! grep -qE "no assets (match|to download)" feed.err; then
+              fail "cannot read desktop-latest: $(cat feed.err)"
+            fi
           fi
+          gh release list --limit 1000 --json tagName --jq '.[].tagName' > published-tags ||
+            fail "cannot list the published releases"
+          node 1ma/desktop/scripts/version.mjs forward "$version" announced published-tags ||
+            fail "the feeds in desktop-latest only move forward"
           if [[ "$DRY_RUN" == "true" ]]; then
             echo "dry run: would publish $tag at $COMMIT with:"
             cat upload/SHA256SUMS

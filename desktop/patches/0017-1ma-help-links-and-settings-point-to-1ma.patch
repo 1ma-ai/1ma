@@ -1,0 +1,1304 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Mon, 16 Nov 2026 21:04:15 +0100
+Subject: [PATCH] 1ma: help links and settings point to 1ma
+
+Links and sections that led to bb's site, community and mobile app now go to
+1ma or are hidden.
+
+- Help > How to Uninstall opens 1ma's uninstall page on GitHub.
+- The Changelog button in Updates opens the 1ma GitHub release of the app
+  version (tag desktop/v<version>), including 1ma builds
+  (<bb release>-1ma.<build>.<revision>). The inline preview, which fetched bb's
+  CHANGELOG.md and showed bb's notes as the app's, is no longer shown.
+- The Mobile and Community settings sections are hidden: left out of the
+  settings nav, search and command palette, and a direct /settings/mobile or
+  /settings/community goes back to General. The ids stay in the section type
+  so upstream code keeps compiling.
+- The sidebar footer no longer has the built-in Mobile apps button.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../plugin/PluginSidebarFooterItems.test.tsx  |  29 +-
+ .../components/settings/ReleaseNotesPanel.tsx |   4 +-
+ .../UpdatesSettingsSection.stories.tsx        |  29 +-
+ .../settings/UpdatesSettingsSection.test.tsx  | 375 +++++++-----------
+ .../settings/UpdatesSettingsSection.tsx       |  71 +---
+ .../settings/release-notes-model.test.ts      | 110 +++++
+ .../settings/release-notes-model.ts           |  42 +-
+ .../src/components/settings/release-notes.ts  |  12 +-
+ .../components/settings/settings-nav.test.ts  |  21 +
+ .../src/components/settings/settings-nav.tsx  |  10 +-
+ .../settings/settings-search-anchors.test.tsx |   5 +-
+ .../settings/settings-search.test.ts          |   9 +
+ .../components/settings/settings-search.ts    |   2 +
+ .../components/settings/settings-sections.ts  |  18 +-
+ .../app/src/components/sidebar/AppSidebar.tsx |   8 -
+ .../sidebar/sidebarFooterPreferences.ts       |   9 +-
+ apps/desktop/src/menu.ts                      |   3 +-
+ apps/desktop/test/menu.test.ts                |  19 +-
+ 18 files changed, 411 insertions(+), 365 deletions(-)
+
+diff --git a/apps/app/src/components/plugin/PluginSidebarFooterItems.test.tsx b/apps/app/src/components/plugin/PluginSidebarFooterItems.test.tsx
+index 37080be..fe9cdc0 100644
+--- a/apps/app/src/components/plugin/PluginSidebarFooterItems.test.tsx
++++ b/apps/app/src/components/plugin/PluginSidebarFooterItems.test.tsx
+@@ -136,7 +136,7 @@ describe("PluginSidebarFooterItems", () => {
+     );
+     const store = createStore();
+     store.set(sidebarFooterHiddenAtom, ["plugin:unloaded/action"]);
+-    store.set(sidebarFooterCapacityAtom, 5);
++    store.set(sidebarFooterCapacityAtom, 4);
+     renderWithProviders(<SidebarFooterCustomize onDone={() => {}} />, store);
+     const footerIcons = () =>
+       Array.from(
+@@ -144,14 +144,14 @@ describe("PluginSidebarFooterItems", () => {
+         (element) => element.dataset.footerIcon,
+       );
+     expect(footerIcons()).toEqual([
+-      "builtin:mobile",
+       "plugin:example/one",
+       "plugin:example/two",
+       "plugin:example/three",
+       "plugin:example/four",
+     ]);
++    expect(screen.queryByText("Mobile apps")).toBeNull();
+     expect(document.activeElement).toBe(
+-      screen.getByRole("button", { name: "Remove Mobile apps from footer" }),
++      screen.getByRole("button", { name: "Remove Action one from footer" }),
+     );
+     expect(
+       screen.getByRole("button", { name: "Add Report a bug to footer" }),
+@@ -166,7 +166,6 @@ describe("PluginSidebarFooterItems", () => {
+       "plugin:example/two",
+     ]);
+     expect(footerIcons()).toEqual([
+-      "builtin:mobile",
+       "plugin:example/one",
+       "plugin:example/three",
+       "plugin:example/four",
+@@ -176,7 +175,6 @@ describe("PluginSidebarFooterItems", () => {
+       screen.getByRole("button", { name: "Add Action two to footer" }),
+     );
+     expect(footerIcons()).toEqual([
+-      "builtin:mobile",
+       "plugin:example/one",
+       "plugin:example/three",
+       "plugin:example/four",
+@@ -186,13 +184,12 @@ describe("PluginSidebarFooterItems", () => {
+       screen.getByRole("button", { name: "Add Report a bug to footer" }),
+     ).toHaveProperty("disabled", true);
+ 
+-    act(() => store.set(sidebarFooterCapacityAtom, 6));
+-    expect(footerIcons()).toHaveLength(5);
++    act(() => store.set(sidebarFooterCapacityAtom, 5));
++    expect(footerIcons()).toHaveLength(4);
+     fireEvent.click(
+       screen.getByRole("button", { name: "Add Report a bug to footer" }),
+     );
+     expect(footerIcons()).toEqual([
+-      "builtin:mobile",
+       "plugin:example/one",
+       "plugin:example/three",
+       "plugin:example/four",
+@@ -236,7 +233,6 @@ describe("PluginSidebarFooterItems", () => {
+     );
+     expect(store.get(sidebarFooterHiddenAtom)).toEqual([
+       "plugin:unloaded/action",
+-      "builtin:mobile",
+       "plugin:example/action",
+       "builtin:report-bug",
+     ]);
+@@ -684,10 +680,7 @@ describe("PluginSidebarFooterItems", () => {
+           onCustomize={vi.fn()}
+           activeDisclosureKey={null}
+           onDisclosureCommand={vi.fn()}
+-          builtInActions={[
+-            { id: "mobile", href: "/settings/mobile", onActivate: run },
+-            { id: "report-bug", onActivate: run },
+-          ]}
++          builtInActions={[{ id: "report-bug", onActivate: run }]}
+         />
+       </SidebarMenu>,
+       store,
+@@ -696,14 +689,8 @@ describe("PluginSidebarFooterItems", () => {
+       [...view.container.querySelectorAll("[data-footer-item]")].map((item) =>
+         item.getAttribute("data-footer-item"),
+       ),
+-    ).toEqual([
+-      "builtin:report-bug",
+-      "plugin:example/action",
+-      "builtin:mobile",
+-    ]);
+-    expect(
+-      screen.getByRole("link", { name: "Mobile apps" }).getAttribute("href"),
+-    ).toBe("/settings/mobile");
++    ).toEqual(["builtin:report-bug", "plugin:example/action"]);
++    expect(screen.queryByRole("link", { name: "Mobile apps" })).toBeNull();
+     act(() =>
+       store.set(sidebarFooterHiddenAtom, [
+         "builtin:settings",
+diff --git a/apps/app/src/components/settings/ReleaseNotesPanel.tsx b/apps/app/src/components/settings/ReleaseNotesPanel.tsx
+index e0f8f82..d5745bb 100644
+--- a/apps/app/src/components/settings/ReleaseNotesPanel.tsx
++++ b/apps/app/src/components/settings/ReleaseNotesPanel.tsx
+@@ -277,9 +277,9 @@ export function ReleaseNotesPanel({
+         ) : null}
+         {sourceUpdate === null ? (
+           <ExternalLink
+-            href={getReleaseNotesUrl(notesVersion)}
++            href={getReleaseNotesUrl(version)}
+             className={FOOTER_LINK_CLASS_NAME}
+-            onOpen={() => openReleaseNotesOnWeb(version, notesVersion)}
++            onOpen={() => openReleaseNotesOnWeb(version)}
+           >
+             Full changelog
+             <Icon aria-hidden name="ExternalLink" className="size-3" />
+diff --git a/apps/app/src/components/settings/UpdatesSettingsSection.stories.tsx b/apps/app/src/components/settings/UpdatesSettingsSection.stories.tsx
+index e84bbe9..0f9dee9 100644
+--- a/apps/app/src/components/settings/UpdatesSettingsSection.stories.tsx
++++ b/apps/app/src/components/settings/UpdatesSettingsSection.stories.tsx
+@@ -16,7 +16,6 @@ import {
+   makeProviderCliStatus,
+ } from "../../../.ladle/story-fixtures";
+ import { StoryCard, StoryRow } from "../../../.ladle/story-card";
+-import { ReleaseNotesPanel } from "./ReleaseNotesPanel";
+ import {
+   AutoAppUpdateSetting,
+   BbAppUpdateRows,
+@@ -32,13 +31,8 @@ export default {
+ 
+ const noop = () => {};
+ 
+-function storyReleaseNotes(version: string, expanded = false) {
+-  return {
+-    version,
+-    panelId: `story-release-notes-${version}`,
+-    expanded,
+-    onToggle: noop,
+-  };
++function storyReleaseNotes(version: string) {
++  return { version, onOpen: noop };
+ }
+ const SOURCE_FROM_COMMIT = "916d684a1b2c3d4e5f60718293a4b5c6d7e8f901";
+ const SOURCE_INCOMING_SUBJECTS = [
+@@ -393,12 +387,7 @@ export function RowVariations() {
+                 isDesktop={false}
+                 onRelaunchDesktop={null}
+                 onRetryDesktop={null}
+-                releaseNotes={storyReleaseNotes("0.48.0", true)}
+-              />
+-              <ReleaseNotesPanel
+-                id="story-release-notes-0.48.0"
+-                version="0.48.0"
+-                sourceUpdate={null}
++                releaseNotes={storyReleaseNotes("0.48.0")}
+               />
+             </BbUpdatesCard>
+           </div>
+@@ -832,17 +821,7 @@ export function RowVariations() {
+                 onRelaunchDesktop={null}
+                 onRetryDesktop={null}
+                 onShowAppUpdateResult={noop}
+-                releaseNotes={storyReleaseNotes("0.48.0", true)}
+-              />
+-              <ReleaseNotesPanel
+-                id="story-release-notes-source"
+-                version="0.48.0"
+-                sourceUpdate={{
+-                  from: SOURCE_FROM_COMMIT,
+-                  to: SOURCE_TO_COMMIT,
+-                  commitCount: 41,
+-                  subjects: SOURCE_INCOMING_SUBJECTS,
+-                }}
++                releaseNotes={storyReleaseNotes("0.48.0")}
+               />
+             </BbUpdatesCard>
+           </div>
+diff --git a/apps/app/src/components/settings/UpdatesSettingsSection.test.tsx b/apps/app/src/components/settings/UpdatesSettingsSection.test.tsx
+index ea4f093..233c6f7 100644
+--- a/apps/app/src/components/settings/UpdatesSettingsSection.test.tsx
++++ b/apps/app/src/components/settings/UpdatesSettingsSection.test.tsx
+@@ -525,18 +525,11 @@ describe("UpdatesSettingsSection", () => {
+       });
+     }
+ 
+-    function releaseNotesPanel(version: string): HTMLElement | null {
+-      return screen.queryByRole("region", {
+-        name: `bb ${version} changelog`,
+-      });
+-    }
+-
+     it("offers the target release's notes when an update is available", () => {
+       renderSection();
+ 
+-      const button = releaseNotesButton("0.47.0");
+-      expect(button.getAttribute("aria-expanded")).toBe("false");
+-      expect(releaseNotesPanel("0.47.0")).toBeNull();
++      releaseNotesButton("0.47.0");
++      expect(openUrlInExternalBrowserMock).not.toHaveBeenCalled();
+       expect(recordTelemetryEvent).not.toHaveBeenCalled();
+     });
+ 
+@@ -566,197 +559,64 @@ describe("UpdatesSettingsSection", () => {
+       renderSection();
+       fireEvent.click(releaseNotesButton(nightly));
+ 
+-      const panel = releaseNotesPanel(nightly)!;
+-      expect(
+-        within(panel).getByText("bb 0.48.0 · October 28, 2026"),
+-      ).toBeDefined();
+-      expect(
+-        within(panel).getByText("This build includes changes since 0.48.0"),
+-      ).toBeDefined();
++      expect(openUrlInExternalBrowserMock).toHaveBeenCalledExactlyOnceWith(
++        "https://github.com/1ma-ai/1ma/releases/tag/desktop%2Fv0.48.2-nightly.40981326765.1",
++      );
+       expect(recordTelemetryEvent).toHaveBeenCalledExactlyOnceWith({
+         name: "release_notes_opened",
+-        properties: { release_version: "0.48.2", view: "inline" },
++        properties: { release_version: "0.48.2", view: "web" },
+       });
+     });
+ 
+-    it("opens the release's notes under the bb row and closes them again", () => {
+-      renderSection();
+-
+-      fireEvent.click(releaseNotesButton("0.47.0"));
+-
+-      const button = releaseNotesButton("0.47.0");
+-      const panel = releaseNotesPanel("0.47.0");
+-      expect(button.getAttribute("aria-expanded")).toBe("true");
+-      expect(button.getAttribute("aria-controls")).toBe(panel?.id);
+-      expect(
+-        within(panel!).getByRole("heading", {
+-          name: "Customizable navigation, new and improved ACP support, and diff review",
++    it("opens the 1ma release page of the installed 1ma build", () => {
++      const installed = "0.49.1-1ma.44995733961.1";
++      useUpdateInventoryMock.mockReturnValue(
++        makeInventory({
++          systemVersion: {
++            currentVersion: installed,
++            latestVersion: installed,
++            currentCommit: null,
++            installKind: "npm",
++            source: "npm",
++            updateAvailable: false,
++            isDevelopment: false,
++            upgradeCommand: "npx bb-app@latest",
++          },
+         }),
+-      ).toBeDefined();
+-      expect(
+-        within(panel!).getByText("bb 0.47.0 · October 23, 2026"),
+-      ).toBeDefined();
+-      expect(
+-        within(panel!).getByRole("heading", { name: "Highlights" }),
+-      ).toBeDefined();
+-      expect(
+-        within(panel!).getByText(/Customizable sidebar navigation, new and/),
+-      ).toBeDefined();
+-      expect(within(panel!).queryByRole("img")).toBeNull();
+-      expect(screen.getByRole("region", { name: "bb" }).contains(panel)).toBe(
+-        true,
+       );
+-      expect(recordTelemetryEvent).toHaveBeenCalledExactlyOnceWith({
+-        name: "release_notes_opened",
+-        properties: { release_version: "0.47.0", view: "inline" },
+-      });
++      renderSection();
++      fireEvent.click(releaseNotesButton(installed));
+ 
+-      fireEvent.click(button);
+-      expect(releaseNotesPanel("0.47.0")).toBeNull();
+-      expect(recordTelemetryEvent).toHaveBeenCalledTimes(1);
++      expect(openUrlInExternalBrowserMock).toHaveBeenCalledExactlyOnceWith(
++        "https://github.com/1ma-ai/1ma/releases/tag/desktop%2Fv0.49.1-1ma.44995733961.1",
++      );
+     });
+ 
+-    it("opens the full changelog in the external browser", () => {
++    it("opens the 1ma release page for the app version and shows no inline preview", () => {
+       renderSection();
+-      fireEvent.click(releaseNotesButton("0.47.0"));
+-      vi.mocked(recordTelemetryEvent).mockClear();
+ 
+-      const link = within(releaseNotesPanel("0.47.0")!).getByRole("link", {
+-        name: /Full changelog/,
+-      });
+-      expect(link.getAttribute("href")).toBe(
+-        "https://getbb.app/changelog#0-47-0",
+-      );
+-      fireEvent.click(link);
++      fireEvent.click(releaseNotesButton("0.47.0"));
+ 
+       expect(openUrlInExternalBrowserMock).toHaveBeenCalledExactlyOnceWith(
+-        "https://getbb.app/changelog#0-47-0",
++        "https://github.com/1ma-ai/1ma/releases/tag/desktop%2Fv0.47.0",
+       );
+       expect(recordTelemetryEvent).toHaveBeenCalledExactlyOnceWith({
+         name: "release_notes_opened",
+         properties: { release_version: "0.47.0", view: "web" },
+       });
+-    });
+-
+-    it("prefers the published changelog over the bundled one", async () => {
+-      vi.stubGlobal(
+-        "fetch",
+-        vi.fn().mockResolvedValue(
+-          new Response(`# Changelog
+-
+-## 0.47.0
+-
+-The published lede.
+-`),
+-        ),
+-      );
+-      renderSection();
+-      fireEvent.click(releaseNotesButton("0.47.0"));
+-
+-      expect(await screen.findByText("The published lede.")).toBeDefined();
+-      expect(screen.queryByRole("heading", { name: "Highlights" })).toBeNull();
+-    });
+-
+-    it("fades the top edge once the changelog is scrolled", () => {
+-      renderSection();
+-      fireEvent.click(releaseNotesButton("0.47.0"));
+-
+-      const panel = releaseNotesPanel("0.47.0")!;
+-      const scroller = panel.querySelector<HTMLElement>(
+-        "[data-release-notes-scroll]",
+-      )!;
+-      expect(panel.querySelector('[data-overflow-fade="above"]')).toBeNull();
+-
+-      scroller.scrollTop = 40;
+-      fireEvent.scroll(scroller);
+-
++      expect(screen.queryByRole("region", { name: / changelog$/ })).toBeNull();
++      expect(screen.queryByRole("link", { name: /Full changelog/ })).toBeNull();
+       expect(
+-        panel.querySelector('[data-overflow-fade="above"]'),
+-      ).not.toBeNull();
+-    });
+-
+-    function stubPublishedSources(changelog: string, metadata: string): void {
+-      vi.stubGlobal(
+-        "fetch",
+-        vi.fn((url: string) =>
+-          Promise.resolve(
+-            new Response(
+-              url.endsWith("changelog-metadata.ts") ? metadata : changelog,
+-            ),
++        vi
++          .mocked(fetch)
++          .mock.calls.some(([url]) =>
++            String(url).includes("raw.githubusercontent.com/get-bb/bb"),
+           ),
+-        ),
+-      );
+-    }
+-
+-    it("says so when the changelog has no entry for the release", async () => {
+-      stubPublishedSources("## 0.47.0\n\nAnother release.\n", "");
+-      useUpdateInventoryMock.mockReturnValue(makeInventory({}));
+-      renderSection();
+-      fireEvent.click(releaseNotesButton("0.0.5"));
+-
+-      const panel = releaseNotesPanel("0.0.5")!;
+-      expect(
+-        await within(panel).findByText("bb 0.0.5 has no changelog in the app."),
+-      ).toBeDefined();
+-      expect(
+-        within(panel).getByRole("heading", { name: "What's new in bb 0.0.5" }),
+-      ).toBeDefined();
+-    });
+-
+-    it("shows loading, not a missing changelog, while the notes load", () => {
+-      vi.stubGlobal(
+-        "fetch",
+-        vi.fn(() => new Promise<Response>(() => {})),
+-      );
+-      useUpdateInventoryMock.mockReturnValue(makeInventory({}));
+-      renderSection();
+-      fireEvent.click(releaseNotesButton("0.0.5"));
+-
+-      const panel = releaseNotesPanel("0.0.5")!;
+-      expect(within(panel).getByText("Loading the changelog…")).toBeDefined();
+-      expect(within(panel).queryByText(/has no changelog/)).toBeNull();
+-    });
+-
+-    it("says the changelog couldn't load when the fetch fails", async () => {
+-      useUpdateInventoryMock.mockReturnValue(makeInventory({}));
+-      renderSection();
+-      fireEvent.click(releaseNotesButton("0.0.5"));
+-
+-      const panel = releaseNotesPanel("0.0.5")!;
+-      expect(
+-        await within(panel).findByText("Couldn't load the changelog."),
+-      ).toBeDefined();
+-      expect(within(panel).queryByText(/has no changelog/)).toBeNull();
+-    });
+-
+-    it("takes a newer release's headline from the published metadata", async () => {
+-      stubPublishedSources(
+-        "## 0.0.5\n\nA tiny lede.\n",
+-        `export const RELEASE_META = {
+-  "0.0.5": {
+-    date: "January 2, 2026",
+-    headline: "A tiny release",
+-  },
+-};
+-`,
+-      );
+-      useUpdateInventoryMock.mockReturnValue(makeInventory({}));
+-      renderSection();
+-      fireEvent.click(releaseNotesButton("0.0.5"));
+-
+-      const panel = releaseNotesPanel("0.0.5")!;
+-      expect(
+-        await within(panel).findByRole("heading", { name: "A tiny release" }),
+-      ).toBeDefined();
+-      expect(
+-        within(panel).getByText("bb 0.0.5 · January 2, 2026"),
+-      ).toBeDefined();
+-      expect(within(panel).getByText("A tiny lede.")).toBeDefined();
++      ).toBe(false);
+     });
+ 
+     describe("on a source checkout", () => {
+       const FROM = "a".repeat(40);
+-      const TO = "b".repeat(40);
+ 
+       function useSourceCheckout(
+         current: string,
+@@ -785,47 +645,6 @@ The published lede.
+         );
+       }
+ 
+-      it("lists the incoming commits instead of the installed release's notes", async () => {
+-        useSourceCheckout("0.48.0", {
+-          behindSince: "2026-11-02T12:00:00.000Z",
+-          channel: "main",
+-          commit: TO,
+-          commitCount: 41,
+-          subjects: ["Fix the sidebar (#6757)", "Add @someone to allow list"],
+-          version: "0.48.0",
+-        });
+-        renderSection();
+-        expect(await screen.findByText("bbbbbbb (+41 commits)")).toBeDefined();
+-        fireEvent.click(releaseNotesButton("0.48.0"));
+-
+-        const panel = releaseNotesPanel("0.48.0")!;
+-        expect(
+-          within(panel).getByRole("heading", {
+-            name: "41 new commits on main",
+-          }),
+-        ).toBeDefined();
+-        expect(within(panel).getByText("aaaaaaa → bbbbbbb")).toBeDefined();
+-        expect(
+-          within(panel).getByText("Add @someone to allow list"),
+-        ).toBeDefined();
+-        expect(
+-          within(panel)
+-            .getByRole("link", { name: "#6757" })
+-            .getAttribute("href"),
+-        ).toBe("https://github.com/get-bb/bb/pull/6757");
+-        expect(within(panel).getByText("and 39 more")).toBeDefined();
+-        expect(
+-          within(panel).queryByRole("heading", { name: "Reliability" }),
+-        ).toBeNull();
+-
+-        fireEvent.click(
+-          within(panel).getByRole("link", { name: /Compare on GitHub/ }),
+-        );
+-        expect(openUrlInExternalBrowserMock).toHaveBeenCalledExactlyOnceWith(
+-          `https://github.com/get-bb/bb/compare/${FROM}...${TO}`,
+-        );
+-      });
+-
+       it("offers no changelog when nothing is incoming", async () => {
+         useSourceCheckout("0.48.0", null);
+         renderSection();
+@@ -3009,31 +2828,83 @@ The published lede.
+       return bbCard;
+     }
+ 
++    function updateRow(bbCard: HTMLElement, name: string): HTMLElement {
++      let row = within(bbCard).getByText(name).parentElement;
++      while (
++        row !== null &&
++        row.querySelector('[data-bb-update-role="app"]') === null
++      ) {
++        row = row.parentElement;
++      }
++      if (row === null) throw new Error(`expected the ${name} row`);
++      return row;
++    }
++
+     function notesButton(bbCard: HTMLElement, version: string): HTMLElement {
+       return within(bbCard).getByRole("button", {
+         name: `Changelog for bb ${version}`,
+       });
+     }
+ 
+-    it("opens the pending desktop release's notes under the Desktop row", async () => {
++    it("opens each row's own 1ma release when the server runs on another machine", async () => {
++      useSeparateDesktop({
++        latestVersion: "0.49.1-1ma.45000000000.1",
++        version: "0.49.1-1ma.44995733961.1",
++      });
++      vi.mocked(sdk.system.appUpdate).mockResolvedValue(
++        makeAppUpdateStatus({
++          available: {
++            behindSince: null,
++            channel: "latest",
++            commit: null,
++            commitCount: null,
++            subjects: [],
++            version: "0.49.1-1ma.44995733961.1",
++          },
++          current: { commit: null, version: "0.49.1-1ma.43861071768.1" },
++        }),
++      );
++      const bbCard = await renderBbCard();
++      const serverRow = updateRow(bbCard, "Server");
++      const desktopRow = updateRow(bbCard, "Desktop");
++
++      fireEvent.click(
++        await within(serverRow).findByRole("button", {
++          name: "Changelog for bb 0.49.1-1ma.44995733961.1",
++        }),
++      );
++      fireEvent.click(
++        within(desktopRow).getByRole("button", {
++          name: "Changelog for bb 0.49.1-1ma.45000000000.1",
++        }),
++      );
++
++      expect(openUrlInExternalBrowserMock.mock.calls).toEqual([
++        [
++          "https://github.com/1ma-ai/1ma/releases/tag/desktop%2Fv0.49.1-1ma.44995733961.1",
++        ],
++        [
++          "https://github.com/1ma-ai/1ma/releases/tag/desktop%2Fv0.49.1-1ma.45000000000.1",
++        ],
++      ]);
++    });
++
++    it("opens the pending desktop release page from the Desktop row", async () => {
+       useSeparateDesktop({ latestVersion: "0.47.1", pendingVersion: "0.47.0" });
+       const bbCard = await renderBbCard();
+ 
+       expect(notesButton(bbCard, "0.0.6")).toBeDefined();
+       fireEvent.click(notesButton(bbCard, "0.47.0"));
+ 
+-      const panel = within(bbCard).getByRole("region", {
+-        name: "bb 0.47.0 changelog",
+-      });
+-      expect(notesButton(bbCard, "0.47.0").getAttribute("aria-controls")).toBe(
+-        panel.id,
+-      );
+-      expect(notesButton(bbCard, "0.0.6").getAttribute("aria-expanded")).toBe(
+-        "false",
++      expect(openUrlInExternalBrowserMock).toHaveBeenCalledExactlyOnceWith(
++        "https://github.com/1ma-ai/1ma/releases/tag/desktop%2Fv0.47.0",
+       );
++      expect(
++        within(bbCard).queryByRole("region", { name: / changelog$/ }),
++      ).toBeNull();
+       expect(recordTelemetryEvent).toHaveBeenCalledExactlyOnceWith({
+         name: "release_notes_opened",
+-        properties: { release_version: "0.47.0", view: "inline" },
++        properties: { release_version: "0.47.0", view: "web" },
+       });
+     });
+ 
+@@ -3074,6 +2945,58 @@ The published lede.
+     ).toBeNull();
+   });
+ 
++  it("opens the installed 1ma build's release when the desktop runs the server itself", async () => {
++    const installed = "0.49.1-1ma.44995733961.1";
++    const desktopInfo: BbDesktopInfo = {
++      downloadState: "idle",
++      lastCheckedAt: "2026-11-22T00:00:00.000Z",
++      latestVersion: "0.49.0",
++      pendingVersion: null,
++      platform: "macos",
++      updateAvailable: false,
++      updateDownloaded: false,
++      version: installed,
++    };
++    useDesktopUpdateInfoMock.mockReturnValue({
++      desktopApi: {
++        checkForUpdates: vi.fn().mockResolvedValue(desktopInfo),
++        installUpdate: vi.fn(),
++      } as unknown as BbDesktopApi,
++      desktopInfo,
++      isDesktop: true,
++    });
++    hostDaemon.localDaemonHostId = "host_primary";
++    useUpdateInventoryMock.mockReturnValue(desktopFleet());
++    vi.mocked(sdk.system.appUpdate).mockResolvedValue(
++      makeAppUpdateStatus({
++        available: null,
++        current: { commit: null, version: "0.0.4" },
++        support: { kind: "unsupported", reason: "desktop" },
++      }),
++    );
++
++    renderSection();
++
++    await waitFor(() => expect(sdk.system.appUpdate).toHaveBeenCalled());
++    const bbCard = screen.getByRole("region", { name: "bb" });
++    await waitFor(() =>
++      expect(
++        bbCard.querySelectorAll('[data-bb-update-role="app"]'),
++      ).toHaveLength(1),
++    );
++    expect(within(bbCard).getByText("Server")).toBeDefined();
++    expect(within(bbCard).queryByText("Desktop")).toBeNull();
++    fireEvent.click(
++      await within(bbCard).findByRole("button", {
++        name: `Changelog for bb ${installed}`,
++      }),
++    );
++
++    expect(openUrlInExternalBrowserMock).toHaveBeenCalledExactlyOnceWith(
++      "https://github.com/1ma-ai/1ma/releases/tag/desktop%2Fv0.49.1-1ma.44995733961.1",
++    );
++  });
++
+   it.each(["host_laptop", null])(
+     "shows a desktop-hosted server's own version when the viewing host is %s",
+     async (localHostId) => {
+diff --git a/apps/app/src/components/settings/UpdatesSettingsSection.tsx b/apps/app/src/components/settings/UpdatesSettingsSection.tsx
+index 13ee422..37182cd 100644
+--- a/apps/app/src/components/settings/UpdatesSettingsSection.tsx
++++ b/apps/app/src/components/settings/UpdatesSettingsSection.tsx
+@@ -118,14 +118,14 @@ import {
+ } from "@/hooks/queries/system-queries";
+ import { sdk } from "@/lib/sdk";
+ import {
++  isOneMaVersion,
+   isReleaseVersion,
+   nightlyBaseVersion,
+   resolveReleaseUpdateVersion,
+   resolveSourceUpdateNotes,
+   type ReleaseVersionInput,
+ } from "./release-notes-model";
+-import { recordReleaseNotesOpened } from "./release-notes";
+-import { ReleaseNotesPanel } from "./ReleaseNotesPanel";
++import { openReleaseNotesOnWeb } from "./release-notes";
+ 
+ const BULK_RETRY_THRESHOLD = 1;
+ 
+@@ -481,32 +481,19 @@ interface BbAppUpdateRowsProps {
+ 
+ export interface ReleaseNotesToggle {
+   version: string;
+-  panelId: string;
+-  expanded: boolean;
+-  onToggle: () => void;
++  onOpen: () => void;
+ }
+ 
+-function ReleaseNotesToggleButton({
+-  version,
+-  panelId,
+-  expanded,
+-  onToggle,
+-}: ReleaseNotesToggle) {
++function ReleaseNotesToggleButton({ version, onOpen }: ReleaseNotesToggle) {
+   return (
+     <button
+       type="button"
+-      aria-expanded={expanded}
+-      aria-controls={expanded ? panelId : undefined}
+       aria-label={`Changelog for bb ${version}`}
+-      className="inline-flex w-fit shrink-0 cursor-pointer items-center gap-0.5 rounded-sm text-2xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none aria-expanded:text-foreground"
+-      onClick={onToggle}
++      className="inline-flex w-fit shrink-0 cursor-pointer items-center gap-0.5 rounded-sm text-2xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
++      onClick={onOpen}
+     >
+       Changelog
+-      <Icon
+-        aria-hidden
+-        name="ChevronRight"
+-        className={cn("size-3 transition-transform", expanded && "rotate-90")}
+-      />
++      <Icon aria-hidden name="ExternalLink" className="size-3" />
+     </button>
+   );
+ }
+@@ -2038,18 +2025,15 @@ function resolveReleaseNotesVersion(input: ReleaseVersionInput): string | null {
+       input.systemVersion?.currentVersion ??
+       null);
+   return installed !== null &&
+-    (isReleaseVersion(installed) || nightlyBaseVersion(installed) !== null)
++    (isReleaseVersion(installed) ||
++      isOneMaVersion(installed) ||
++      nightlyBaseVersion(installed) !== null)
+     ? installed
+     : null;
+ }
+ 
+ type ReleaseNotesRow = "server" | "desktop";
+ 
+-const RELEASE_NOTES_PANEL_IDS: Record<ReleaseNotesRow, string> = {
+-  server: "updates-release-notes-server",
+-  desktop: "updates-release-notes-desktop",
+-};
+-
+ export function UpdatesSettingsSection() {
+   const queryClient = useQueryClient();
+   const inventory = useUpdateInventory();
+@@ -2072,8 +2056,6 @@ export function UpdatesSettingsSection() {
+     number | null
+   >(null);
+   const appUpdate = appUpdateStatus.data;
+-  const [openReleaseNotes, setOpenReleaseNotes] =
+-    useState<ReleaseNotesRow | null>(null);
+   const pluginUpdateCheck = usePluginUpdateCheck(null, {
+     enabled: inventory.plugins !== null,
+   });
+@@ -2242,28 +2224,7 @@ export function UpdatesSettingsSection() {
+     if (version === null) {
+       return null;
+     }
+-    const expanded = openReleaseNotes === row;
+-    return {
+-      version,
+-      panelId: RELEASE_NOTES_PANEL_IDS[row],
+-      expanded,
+-      onToggle: () => {
+-        setOpenReleaseNotes(expanded ? null : row);
+-        if (!expanded) {
+-          recordReleaseNotesOpened(version, "inline");
+-        }
+-      },
+-    };
+-  }
+-  function releaseNotesPanel(row: ReleaseNotesRow): ReactNode {
+-    const version = releaseNotesVersions[row];
+-    return openReleaseNotes === row && version !== null ? (
+-      <ReleaseNotesPanel
+-        id={RELEASE_NOTES_PANEL_IDS[row]}
+-        version={version}
+-        sourceUpdate={row === "server" ? serverSourceUpdate : null}
+-      />
+-    ) : null;
++    return { version, onOpen: () => openReleaseNotesOnWeb(version) };
+   }
+   const serverAppRow = (
+     <BbAppUpdateRows
+@@ -2323,14 +2284,10 @@ export function UpdatesSettingsSection() {
+   return (
+     <div className="space-y-6">
+       <BbUpdatesCard>
+-        {serverRunsSeparately && desktopRowNeedsAttention(desktopInfo) ? (
+-          <>
+-            {desktopClientRow}
+-            {releaseNotesPanel("desktop")}
+-          </>
+-        ) : null}
++        {serverRunsSeparately && desktopRowNeedsAttention(desktopInfo)
++          ? desktopClientRow
++          : null}
+         {serverAppRow}
+-        {releaseNotesPanel("server")}
+         {updateWhenIdleEnabled &&
+         appUpdate !== undefined &&
+         (appUpdate.support.kind === "supported" ||
+diff --git a/apps/app/src/components/settings/release-notes-model.test.ts b/apps/app/src/components/settings/release-notes-model.test.ts
+index 56a945a..338982b 100644
+--- a/apps/app/src/components/settings/release-notes-model.test.ts
++++ b/apps/app/src/components/settings/release-notes-model.test.ts
+@@ -194,6 +194,116 @@ describe("resolveReleaseUpdateVersion", () => {
+   });
+ });
+ 
++describe("resolveReleaseUpdateVersion on 1ma builds", () => {
++  it("targets a newer 1ma build on desktop and on the server", () => {
++    expect(
++      resolveReleaseUpdateVersion({
++        ...none,
++        isDesktop: true,
++        desktopInfo: desktopInfo({
++          version: "0.49.1-1ma.44995733961.1",
++          latestVersion: "0.49.1-1ma.45000000000.1",
++        }),
++      }),
++    ).toBe("0.49.1-1ma.45000000000.1");
++    expect(
++      resolveReleaseUpdateVersion({
++        ...none,
++        appUpdate: appUpdate(
++          available("0.49.1-1ma.44995733961.1"),
++          "0.49.1-1ma.43861071768.1",
++        ),
++      }),
++    ).toBe("0.49.1-1ma.44995733961.1");
++    expect(
++      resolveReleaseUpdateVersion({
++        ...none,
++        appUpdate: appUpdate(available("0.49.1-1ma.9.2"), "0.49.1-1ma.9.1"),
++      }),
++    ).toBe("0.49.1-1ma.9.2");
++  });
++
++  it("never targets the installed 1ma build or an older one", () => {
++    expect(
++      resolveReleaseUpdateVersion({
++        ...none,
++        appUpdate: appUpdate(
++          available("0.49.1-1ma.44995733961.1"),
++          "0.49.1-1ma.44995733961.1",
++        ),
++      }),
++    ).toBeNull();
++    expect(
++      resolveReleaseUpdateVersion({
++        ...none,
++        appUpdate: appUpdate(available("0.49.1-1ma.9.1"), "0.49.1-1ma.10.1"),
++      }),
++    ).toBeNull();
++    expect(
++      resolveReleaseUpdateVersion({
++        ...none,
++        isDesktop: true,
++        desktopInfo: desktopInfo({
++          version: "0.49.1-1ma.10.2",
++          latestVersion: "0.49.1-1ma.10.1",
++        }),
++      }),
++    ).toBeNull();
++  });
++
++  it("orders bb releases and 1ma builds as the desktop updater does", () => {
++    expect(
++      resolveReleaseUpdateVersion({
++        ...none,
++        isDesktop: true,
++        desktopInfo: desktopInfo({
++          version: "0.49.1-1ma.44995733961.1",
++          latestVersion: "0.49.0",
++          updateAvailable: false,
++        }),
++      }),
++    ).toBeNull();
++    expect(
++      resolveReleaseUpdateVersion({
++        ...none,
++        appUpdate: appUpdate(available("0.49.1-1ma.44995733961.1"), "0.49.1"),
++      }),
++    ).toBeNull();
++    expect(
++      resolveReleaseUpdateVersion({
++        ...none,
++        appUpdate: appUpdate(available("0.49.1-1ma.44995733961.1"), "0.49.0"),
++      }),
++    ).toBe("0.49.1-1ma.44995733961.1");
++    expect(
++      resolveReleaseUpdateVersion({
++        ...none,
++        isDesktop: true,
++        desktopInfo: desktopInfo({
++          version: "0.49.1-1ma.44995733961.1",
++          latestVersion: "0.49.1",
++          updateAvailable: true,
++        }),
++      }),
++    ).toBe("0.49.1");
++  });
++
++  it("still skips versions that only look like a 1ma build", () => {
++    expect(
++      resolveReleaseUpdateVersion({
++        ...none,
++        appUpdate: appUpdate(available("0.49.1-1ma.7")),
++      }),
++    ).toBeNull();
++    expect(
++      resolveReleaseUpdateVersion({
++        ...none,
++        appUpdate: appUpdate(available("0.49.1-1ma.x.1")),
++      }),
++    ).toBeNull();
++  });
++});
++
+ const FETCHED = parseChangelog(`## 0.48.0
+ 
+ Fetched lede.
+diff --git a/apps/app/src/components/settings/release-notes-model.ts b/apps/app/src/components/settings/release-notes-model.ts
+index 6c4c240..078562b 100644
+--- a/apps/app/src/components/settings/release-notes-model.ts
++++ b/apps/app/src/components/settings/release-notes-model.ts
+@@ -7,11 +7,17 @@ import type { ChangelogEntry } from "../../../../../changelog-parser";
+ 
+ const RELEASE_VERSION_PATTERN = /^\d+(?:\.\d+){1,3}$/;
+ const NIGHTLY_VERSION_PATTERN = /^(\d+(?:\.\d+){1,3})-nightly\.\d+(?:\.\d+)*$/;
++const ONE_MA_VERSION_PATTERN = /^(\d+(?:\.\d+){1,3})-1ma\.(\d+)\.(\d+)$/;
+ 
+ export function isReleaseVersion(version: string): boolean {
+   return RELEASE_VERSION_PATTERN.test(version);
+ }
+ 
++/** A published 1ma build: `<bb release>-1ma.<build>.<revision>`. */
++export function isOneMaVersion(version: string): boolean {
++  return ONE_MA_VERSION_PATTERN.test(version);
++}
++
+ export function nightlyBaseVersion(version: string): string | null {
+   return NIGHTLY_VERSION_PATTERN.exec(version)?.[1] ?? null;
+ }
+@@ -29,6 +35,36 @@ function compareReleaseVersions(left: string, right: string): number {
+   return 0;
+ }
+ 
++function isPublishedVersion(version: string): boolean {
++  return isReleaseVersion(version) || isOneMaVersion(version);
++}
++
++/**
++ * Orders bb releases and 1ma builds as SemVer does, like the desktop updater:
++ * a 1ma build is a prerelease of its bb release.
++ */
++function comparePublishedVersions(left: string, right: string): number {
++  const leftBuild = ONE_MA_VERSION_PATTERN.exec(left);
++  const rightBuild = ONE_MA_VERSION_PATTERN.exec(right);
++  const release = compareReleaseVersions(
++    leftBuild?.[1] ?? left,
++    rightBuild?.[1] ?? right,
++  );
++  if (release !== 0) {
++    return release;
++  }
++  if (leftBuild === null) {
++    return rightBuild === null ? 0 : 1;
++  }
++  if (rightBuild === null) {
++    return -1;
++  }
++  return compareReleaseVersions(
++    `${leftBuild[2]}.${leftBuild[3]}`,
++    `${rightBuild[2]}.${rightBuild[3]}`,
++  );
++}
++
+ export interface ReleaseVersionInput {
+   isDesktop: boolean;
+   desktopInfo: BbDesktopInfo | null;
+@@ -63,7 +99,7 @@ export function resolveReleaseUpdateVersion({
+     installed =
+       appUpdate?.current.version ?? systemVersion?.currentVersion ?? null;
+   }
+-  if (candidate === null || !isReleaseVersion(candidate)) {
++  if (candidate === null || !isPublishedVersion(candidate)) {
+     return null;
+   }
+   if (installed !== null) {
+@@ -71,8 +107,8 @@ export function resolveReleaseUpdateVersion({
+       return null;
+     }
+     if (
+-      isReleaseVersion(installed) &&
+-      compareReleaseVersions(candidate, installed) <= 0
++      isPublishedVersion(installed) &&
++      comparePublishedVersions(candidate, installed) <= 0
+     ) {
+       return null;
+     }
+diff --git a/apps/app/src/components/settings/release-notes.ts b/apps/app/src/components/settings/release-notes.ts
+index 34b7e35..93b5ecd 100644
+--- a/apps/app/src/components/settings/release-notes.ts
++++ b/apps/app/src/components/settings/release-notes.ts
+@@ -5,13 +5,14 @@ import {
+   type SourceUpdateNotes,
+ } from "./release-notes-model";
+ 
+-const RELEASE_NOTES_BASE_URL = "https://getbb.app/changelog";
++const RELEASE_NOTES_BASE_URL =
++  "https://github.com/1ma-ai/1ma/releases/tag";
+ const SOURCE_REPOSITORY_URL = "https://github.com/get-bb/bb";
+ 
+ export type ReleaseNotesView = "inline" | "web";
+ 
+ export function getReleaseNotesUrl(version: string): string {
+-  return `${RELEASE_NOTES_BASE_URL}#${version.replaceAll(".", "-")}`;
++  return `${RELEASE_NOTES_BASE_URL}/${encodeURIComponent(`desktop/v${version}`)}`;
+ }
+ 
+ export function getSourceCompareUrl(update: SourceUpdateNotes): string {
+@@ -33,11 +34,8 @@ export function recordReleaseNotesOpened(
+   });
+ }
+ 
+-export function openReleaseNotesOnWeb(
+-  version: string,
+-  notesVersion: string,
+-): void {
+-  openUrlInExternalBrowser(getReleaseNotesUrl(notesVersion));
++export function openReleaseNotesOnWeb(version: string): void {
++  openUrlInExternalBrowser(getReleaseNotesUrl(version));
+   recordReleaseNotesOpened(version, "web");
+ }
+ 
+diff --git a/apps/app/src/components/settings/settings-nav.test.ts b/apps/app/src/components/settings/settings-nav.test.ts
+index 2d7dba2..ee1c9c0 100644
+--- a/apps/app/src/components/settings/settings-nav.test.ts
++++ b/apps/app/src/components/settings/settings-nav.test.ts
+@@ -26,6 +26,16 @@ describe("resolveSettingsRoute", () => {
+       expected,
+     );
+   });
++
++  it.each(["/settings/mobile", "/settings/community"])(
++    "treats the hidden section %s as unknown so the view returns to General",
++    (pathname) => {
++      expect(resolveSettingsRoute({ pathname, search: "" })).toMatchObject({
++        activeSection: "general",
++        hasUnknownSection: true,
++      });
++    },
++  );
+ });
+ 
+ describe("filterSettingsNavSections", () => {
+@@ -49,4 +59,15 @@ describe("filterSettingsNavSections", () => {
+     expect(ids.includes("files")).toBe(showsFiles);
+     expect(ids).toContain("archived");
+   });
++
++  it("leaves out the hidden mobile and community sections", () => {
++    const ids = filterSettingsNavSections({
++      hasDaemon: true,
++      accessState: "unavailable",
++      fileOpenerCount: 0,
++    }).map((section) => section.id);
++    expect(ids).not.toContain("mobile");
++    expect(ids).not.toContain("community");
++    expect(ids).toContain("general");
++  });
+ });
+diff --git a/apps/app/src/components/settings/settings-nav.tsx b/apps/app/src/components/settings/settings-nav.tsx
+index 85b0b50..b3c593e 100644
+--- a/apps/app/src/components/settings/settings-nav.tsx
++++ b/apps/app/src/components/settings/settings-nav.tsx
+@@ -11,6 +11,7 @@ import {
+   SETTINGS_SECTION_ROUTE_PATH,
+ } from "@/lib/route-paths";
+ import {
++  isSettingsSectionHidden,
+   isSettingsSectionId,
+   SETTINGS_NAV_SECTIONS,
+   type SettingsNavSection,
+@@ -40,10 +41,11 @@ export function filterSettingsNavSections({
+ }): readonly SettingsNavSection[] {
+   return SETTINGS_NAV_SECTIONS.filter(
+     (section) =>
+-      section.id !== "files" ||
+-      hasDaemon ||
+-      accessState !== "unavailable" ||
+-      fileOpenerCount > 0,
++      !isSettingsSectionHidden(section.id) &&
++      (section.id !== "files" ||
++        hasDaemon ||
++        accessState !== "unavailable" ||
++        fileOpenerCount > 0),
+   );
+ }
+ 
+diff --git a/apps/app/src/components/settings/settings-search-anchors.test.tsx b/apps/app/src/components/settings/settings-search-anchors.test.tsx
+index e8262b5..040f1cb 100644
+--- a/apps/app/src/components/settings/settings-search-anchors.test.tsx
++++ b/apps/app/src/components/settings/settings-search-anchors.test.tsx
+@@ -14,6 +14,7 @@ import { FullPage } from "@/views/SettingsView.stories";
+ import { SETTINGS_SEARCH_INDEX } from "./settings-search";
+ import {
+   getSettingsSectionRoutePath,
++  isSettingsSectionHidden,
+   SETTINGS_NAV_SECTIONS,
+   type SettingsNavSection,
+ } from "./settings-sections";
+@@ -22,7 +23,9 @@ const LOCAL_URL = "http://localhost:3000/";
+ const REMOTE_URL = "http://192.168.1.20:3000/";
+ 
+ const sectionsWithSettings = SETTINGS_NAV_SECTIONS.filter(
+-  (section) => SETTINGS_SEARCH_INDEX[section.id].settings.length > 0,
++  (section) =>
++    !isSettingsSectionHidden(section.id) &&
++    SETTINGS_SEARCH_INDEX[section.id].settings.length > 0,
+ );
+ 
+ function registerReplacementPlugin() {
+diff --git a/apps/app/src/components/settings/settings-search.test.ts b/apps/app/src/components/settings/settings-search.test.ts
+index 5d36af9..1f7c351 100644
+--- a/apps/app/src/components/settings/settings-search.test.ts
++++ b/apps/app/src/components/settings/settings-search.test.ts
+@@ -148,6 +148,15 @@ describe("searchSettings", () => {
+ });
+ 
+ describe("buildSettingsSearchItems", () => {
++  it("never offers the hidden mobile and community sections or their settings", () => {
++    expect(allItems.map((item) => item.id)).not.toContain("section:mobile");
++    expect(allItems.map((item) => item.id)).not.toContain("section:community");
++    expect(allItems.some((item) => item.to.endsWith("/mobile"))).toBe(false);
++    expect(allItems.some((item) => item.to.endsWith("/community"))).toBe(false);
++    expect(searchTitles("discord")).toEqual([]);
++    expect(searchTitles("iphone")).toEqual([]);
++  });
++
+   it("offers a conditional setting only while its row is on the page", () => {
+     const titles = (conditions: ("desktopBrowser" | "diffRenderers")[]) =>
+       searchTitles(
+diff --git a/apps/app/src/components/settings/settings-search.ts b/apps/app/src/components/settings/settings-search.ts
+index 9f08062..4a83983 100644
+--- a/apps/app/src/components/settings/settings-search.ts
++++ b/apps/app/src/components/settings/settings-search.ts
+@@ -3,6 +3,7 @@ import { getPluginConfigurationRoutePath } from "@/lib/route-paths";
+ import type { PluginSettingsEntry } from "./plugin-settings-entries";
+ import {
+   getSettingsSectionRoutePath,
++  isSettingsSectionHidden,
+   type SettingsNavSection,
+   type SettingsSectionId,
+ } from "./settings-sections";
+@@ -316,6 +317,7 @@ export function buildSettingsSearchItems(
+ ): SettingsSearchItem[] {
+   return [
+     ...args.sections.flatMap((section) => {
++      if (isSettingsSectionHidden(section.id)) return [];
+       const indexed = SETTINGS_SEARCH_INDEX[section.id];
+       const icon = { kind: "section" as const, name: section.icon };
+       const to = getSettingsSectionRoutePath(section.id);
+diff --git a/apps/app/src/components/settings/settings-sections.ts b/apps/app/src/components/settings/settings-sections.ts
+index 2b8f333..a290c93 100644
+--- a/apps/app/src/components/settings/settings-sections.ts
++++ b/apps/app/src/components/settings/settings-sections.ts
+@@ -33,8 +33,24 @@ export type SettingsNavSection = (typeof SETTINGS_NAV_SECTIONS)[number];
+ 
+ export type SettingsSectionId = SettingsNavSection["id"];
+ 
++/**
++ * Sections 1ma does not offer: they lead to bb's mobile app and bb's
++ * community. The ids stay in the type so upstream code keeps compiling; the
++ * nav, search, command palette and routes skip them.
++ */
++const HIDDEN_SETTINGS_SECTION_IDS: ReadonlySet<SettingsSectionId> = new Set([
++  "mobile",
++  "community",
++]);
++
++export function isSettingsSectionHidden(id: SettingsSectionId): boolean {
++  return HIDDEN_SETTINGS_SECTION_IDS.has(id);
++}
++
+ export function isSettingsSectionId(value: string): value is SettingsSectionId {
+-  return SETTINGS_NAV_SECTIONS.some((section) => section.id === value);
++  return SETTINGS_NAV_SECTIONS.some(
++    (section) => section.id === value && !isSettingsSectionHidden(section.id),
++  );
+ }
+ 
+ export function getSettingsSectionRoutePath(
+diff --git a/apps/app/src/components/sidebar/AppSidebar.tsx b/apps/app/src/components/sidebar/AppSidebar.tsx
+index 5e1c47d..7a9cf8f 100644
+--- a/apps/app/src/components/sidebar/AppSidebar.tsx
++++ b/apps/app/src/components/sidebar/AppSidebar.tsx
+@@ -296,14 +296,6 @@ export function AppSidebar({
+                   },
+                 ]
+               : []),
+-            {
+-              id: "mobile",
+-              href: "/settings/mobile",
+-              onActivate: () => {
+-                closeOnMobile();
+-                void navigate("/settings/mobile");
+-              },
+-            },
+             {
+               id: "report-bug",
+               onActivate: () => {
+diff --git a/apps/app/src/components/sidebar/sidebarFooterPreferences.ts b/apps/app/src/components/sidebar/sidebarFooterPreferences.ts
+index bdddc73..500cd4a 100644
+--- a/apps/app/src/components/sidebar/sidebarFooterPreferences.ts
++++ b/apps/app/src/components/sidebar/sidebarFooterPreferences.ts
+@@ -44,7 +44,7 @@ export function useMeasureSidebarFooterCapacity(
+   }, [rowRef, moreRef, setCapacity]);
+ }
+ 
+-export type BuiltinFooterId = "settings" | "mobile" | "report-bug";
++export type BuiltinFooterId = "settings" | "report-bug";
+ export type FooterItem = { key: string; label: string; icon: string } & (
+   | { kind: "builtin"; id: BuiltinFooterId }
+   | { kind: "plugin"; slot: PluginSidebarFooterItemSlot }
+@@ -72,13 +72,6 @@ export function useSidebarFooterPreferences() {
+   const hasRail = useSidebarNavigationPlacement() === "rail";
+   const items: FooterItem[] = [
+     ...(hasRail ? [] : [SETTINGS_FOOTER_ITEM]),
+-    {
+-      kind: "builtin",
+-      id: "mobile",
+-      key: "builtin:mobile",
+-      label: "Mobile apps",
+-      icon: "Smartphone",
+-    },
+     ...sidebarFooterItems.map((slot): FooterItem => ({
+       kind: "plugin",
+       key: footerPreferenceKey(slot),
+diff --git a/apps/desktop/src/menu.ts b/apps/desktop/src/menu.ts
+index 7e6924a..358c65b 100644
+--- a/apps/desktop/src/menu.ts
++++ b/apps/desktop/src/menu.ts
+@@ -20,7 +20,8 @@ const OPEN_SETTINGS_MENU_LABEL = "Settings…";
+ const VIEW_LICENSE_MENU_LABEL = "View License";
+ const LICENSE_URL = "https://github.com/get-bb/bb/blob/main/LICENSE";
+ const UNINSTALL_MENU_LABEL = "How to Uninstall bb";
+-const UNINSTALL_URL = "https://getbb.app/uninstall";
++const UNINSTALL_URL =
++  "https://github.com/1ma-ai/1ma/blob/main/docs/uninstall.md";
+ const TOGGLE_DEVELOPER_TOOLS_MENU_LABEL = "Toggle Developer Tools";
+ const TOGGLE_DEVELOPER_TOOLS_ACCELERATOR = "Command+Option+I";
+ const RELOAD_ACCELERATOR = "CommandOrControl+R";
+diff --git a/apps/desktop/test/menu.test.ts b/apps/desktop/test/menu.test.ts
+index 25f1a1a..4f3edb7 100644
+--- a/apps/desktop/test/menu.test.ts
++++ b/apps/desktop/test/menu.test.ts
+@@ -4,9 +4,10 @@ import type { BaseWindow, MenuItemConstructorOptions } from "electron";
+ vi.mock("electron", () => ({
+   app: { name: "bb" },
+   Menu: { sendActionToFirstResponder: vi.fn() },
++  shell: { openExternal: vi.fn(async () => undefined) },
+ }));
+ 
+-import { Menu } from "electron";
++import { Menu, shell } from "electron";
+ 
+ import {
+   buildApplicationMenuTemplate,
+@@ -403,6 +404,22 @@ describe("application menu", () => {
+     },
+   );
+ 
++  it("opens 1ma's uninstall page from the Help menu", () => {
++    vi.mocked(shell.openExternal).mockClear();
++    const template = buildApplicationMenuTemplate(menuArgs(() => {}));
++    const helpMenu = template.find((item) => item.role === "help")
++      ?.submenu as MenuItemConstructorOptions[];
++    const uninstall = helpMenu.find((item) =>
++      item.label?.startsWith("How to Uninstall"),
++    );
++
++    uninstall?.click?.({} as never, undefined, {} as never);
++
++    expect(shell.openExternal).toHaveBeenCalledExactlyOnceWith(
++      "https://github.com/1ma-ai/1ma/blob/main/docs/uninstall.md",
++    );
++  });
++
+   it("builds a native Linux menu with the Linux DevTools accelerator", () => {
+     vi.mocked(Menu.sendActionToFirstResponder).mockClear();
+     const template = buildApplicationMenuTemplate(

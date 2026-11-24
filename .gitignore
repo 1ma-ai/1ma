@@ -22,3 +22,6 @@ __pycache__/
 
 # prepared bb tree for desktop builds
 /bb-src/
+
+# where scripts/release-linux.mjs installed a plugin from
+.1ma-release.json
