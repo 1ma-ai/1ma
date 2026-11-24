@@ -206,16 +206,57 @@ describe("bot conversation menu", () => {
       move.item({ thread: { ...thread, id: "thr_project" }, data: { bots } } as never),
     ).toBeNull();
   });
+  it("offers Move to top for a sub-chat too, and not where it already stands first", async () => {
+    const app = await loadPluginApp(() => import("./app.js"));
+    const move = app.threadActions.find((action) => action.id === "move-to-top")!;
+    const item = (id: string) =>
+      move.item({
+        thread: { ...thread, id, parentThreadId: "thr_a" },
+        data: { bots, reorder: { mutate: vi.fn() } },
+      } as never)!;
+    expect(item("thr_c").disabled).toBe(false);
+    expect(item("thr_a").disabled).toBe(true);
+  });
   it("reopens a completed conversation from the same menu", async () => {
     const app = await loadPluginApp(() => import("./app.js"));
     const toggle = app.threadActions.find((action) => action.id === "toggle-done")!;
     const mutate = vi.fn();
-    const action = toggle.item({ thread, data: { bots, setCompleted: { mutate } } } as never)!;
+    const action = toggle.item({
+      thread,
+      data: { bots, threads: [], setCompleted: { mutate } },
+    } as never)!;
     expect(action.label).toBe(strings.threadBot.markNotDone);
     await action.run({} as never);
     expect(mutate).toHaveBeenCalledExactlyOnceWith({ threadId: thread.id, completed: false });
     expect(
       toggle.item({ thread: { ...thread, id: "thr_project" }, data: { bots } } as never),
     ).toBeNull();
+  });
+  it("says Not done for a sub-chat that is done with the conversation above it", async () => {
+    const app = await loadPluginApp(() => import("./app.js"));
+    const toggle = app.threadActions.find((action) => action.id === "toggle-done")!;
+    const mutate = vi.fn();
+    const guestOwner = bot("bot_g", "Guest", [
+      { threadId: "thr_guest", startedFromBot: true, completed: false },
+    ]);
+    const item = (id: string) =>
+      toggle.item({
+        thread: { id, archivedAt: null },
+        data: {
+          bots: [...bots, guestOwner],
+          threads: [
+            { id: "thr_c", parentThreadId: "thr_spawned" },
+            { id: "thr_spawned", parentThreadId: "thr_b" },
+            { id: "thr_guest", parentThreadId: "thr_b" },
+            { id: "thr_a", parentThreadId: null },
+          ],
+          setCompleted: { mutate },
+        },
+      } as never)!;
+    expect(item("thr_c").label).toBe(strings.threadBot.markNotDone);
+    await item("thr_c").run({} as never);
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({ threadId: "thr_c", completed: false });
+    expect(item("thr_guest").label).toBe(strings.threadBot.markDone);
+    expect(item("thr_a").label).toBe(strings.threadBot.markDone);
   });
 });

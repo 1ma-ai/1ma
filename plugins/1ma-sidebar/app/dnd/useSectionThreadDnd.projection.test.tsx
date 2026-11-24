@@ -121,7 +121,7 @@ function renderSectionThreadDnd(
   pinnedThreads: readonly SidebarThread[] = [],
   grouping: Pick<
     Parameters<typeof useSectionThreadDnd>[0],
-    "groups" | "containerProjectId" | "onBotReorder"
+    "groups" | "containerProjectId" | "botReorder"
   > = {},
 ) {
   const result: { current: SectionThreadDndState | null } = { current: null };
@@ -369,11 +369,55 @@ describe("bot conversation drops", () => {
   const roots = buildSectionThreadList([pinned, target]);
   const rowId = getSidebarThreadRowDroppableId(target.id);
 
+  it.each([
+    ["edge", "the bot's order has no place for it", false, "peer", false],
+    ["edge", "inside the dragged conversation itself", true, "child", false],
+    ["edge", "accepted", true, "peer", true],
+  ])("the %s, %s", async (_place, _reason, accepts, targetId, accepted) => {
+    const drop = vi.fn();
+    const child = createThread({ id: "child", parentThreadId: pinned.id });
+    const { result, inspection } = renderSectionThreadDnd(
+      buildSectionThreadList([pinned, child, target]),
+      [],
+      { groups: true, botReorder: { accepts: () => accepts, drop } },
+    );
+    const props = () => result.current!.dndContextProps;
+    const rect = { top: 100, left: 0, right: 200, width: 200, height: 28, bottom: 128 };
+    const id = getSidebarThreadRowDroppableId(targetId);
+    const move = (over: string | null) =>
+      act(() =>
+        props().onDragMove?.({
+          active: { id: pinned.id },
+          over: over === null ? null : { id: over },
+        } as never),
+      );
+    act(() => props().onDragStart?.(dragStart(pinned.id)));
+    act(() => {
+      props().collisionDetection!({
+        active: { id: pinned.id },
+        collisionRect: rect,
+        droppableRects: new Map([[id, rect], [targetId, rect]]),
+        droppableContainers: [{ id }, { id: targetId }],
+        pointerCoordinates: { x: 20, y: 102 },
+      } as unknown as Parameters<CollisionDetection>[0]);
+    });
+    const place = { threadId: targetId, placement: "before" };
+    move(targetId);
+    expect(result.current!.reorderTarget).toEqual(accepted ? place : null);
+    // Away from the rows, over a bot for example, nothing is promised.
+    move(null);
+    expect(result.current!.reorderTarget).toBeNull();
+    act(() => props().onDragEnd?.(dragEnd(pinned.id, targetId)));
+    await flushTasks();
+    expect(drop.mock.calls).toEqual(accepted ? [[[pinned.id], place]] : []);
+    expect(inspection.sdkCalls).toEqual([]);
+  });
+
   it("keeps the lower edge available for touch reordering while the finger rests", async () => {
-    const onBotReorder = vi.fn();
+    const drop = vi.fn();
     const { result, inspection } = renderSectionThreadDnd(roots, [], {
       groups: true,
-      onBotReorder,
+      botReorder: { accepts: () => true, drop },
     });
     const props = () => result.current!.dndContextProps;
     const rect = { top: 100, left: 0, right: 200, width: 200, height: 28, bottom: 128 };
@@ -399,7 +443,7 @@ describe("bot conversation drops", () => {
     }
     act(() => props().onDragEnd?.(dragEnd(pinned.id, target.id)));
     await flushTasks();
-    expect(onBotReorder).toHaveBeenCalledExactlyOnceWith([pinned.id], {
+    expect(drop).toHaveBeenCalledExactlyOnceWith([pinned.id], {
       threadId: target.id,
       placement: "after",
     });
@@ -409,7 +453,7 @@ describe("bot conversation drops", () => {
   it("sets the real parent while keeping the pin and project section", async () => {
     const { result, inspection } = renderSectionThreadDnd(roots, [], {
       groups: true,
-      onBotReorder: vi.fn(),
+      botReorder: { accepts: () => true, drop: vi.fn() },
     });
     const props = () => result.current!.dndContextProps;
     act(() => props().onDragStart?.(dragStart(pinned.id)));

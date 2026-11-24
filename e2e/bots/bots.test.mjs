@@ -516,8 +516,38 @@ describe("1ma-sidebar with the bots block", () => {
         .waitFor();
       assert.deepEqual(await order(), [fixture.v1, fixture.v2]);
       await screenshot(page, "bot-conversation-subchat");
+
+      await threadLink(group, fixture.v1).click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Mark as done", exact: true }).click();
+      await row.waitFor({ state: "detached" });
+      assert.deepEqual(await order(), [], "the sub-chat leaves with its parent");
+      await group.getByRole("button", { name: "Done: 1", exact: true }).click();
+      await row.waitFor();
+      assert.deepEqual(await order(), [fixture.v1, fixture.v2]);
+      await screenshot(page, "bot-conversation-branch-done");
+      await row.click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Mark as not done", exact: true }).click();
+      await group
+        .getByRole("button", { name: "Done: 1", exact: true })
+        .waitFor({ state: "detached" });
+      await row.waitFor();
+      assert.deepEqual(await order(), [fixture.v1, fixture.v2]);
+      assert.equal(await completedOf(fixture.visible.id, fixture.v1), false);
+
+      await drag("after");
+      await waitFor(
+        "the edge of a top-level conversation takes the sub-chat out",
+        30 * SECOND,
+        async () => (await thread(fixture.v2)).parentThreadId === null,
+      );
+      await group
+        .getByRole("button", { name: "Collapse Bot conversation one threads", exact: true })
+        .waitFor({ state: "detached" });
+      assert.deepEqual(await order(), [fixture.v1, fixture.v2]);
+      await screenshot(page, "bot-conversation-out-of-parent");
     } finally {
       await context.close();
+      await rpc("bots.v1.setCompleted", { threadId: fixture.v1, completed: false });
       await server.api("PATCH", `/threads/${fixture.v2}`, { parentThreadId: null });
     }
   });

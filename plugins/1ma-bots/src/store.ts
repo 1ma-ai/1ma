@@ -87,6 +87,7 @@ export const MIGRATIONS = [
   `ALTER TABLE thread_chains ADD COLUMN owner_turn INTEGER`,
   `CREATE TABLE thread_assignment_decisions (thread_id TEXT PRIMARY KEY);
    INSERT INTO thread_assignment_decisions SELECT thread_id FROM bot_threads;`,
+  `ALTER TABLE pending_starts ADD COLUMN beside TEXT NOT NULL DEFAULT '[]'`,
 ];
 
 interface BotRow {
@@ -111,6 +112,12 @@ interface ThreadRow {
   started_from_bot: number;
   completed_at: number | null;
 }
+
+type ThreadPlace =
+  | "first"
+  | "last"
+  | { before: string | undefined }
+  | { after: string | undefined };
 
 const PENDING_START_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -358,31 +365,23 @@ export class BotStore {
     return row ? toThread(row) : null;
   }
 
-  firstThread(botId: string): string | null {
-    return this.threadsOf(botId)[0]?.threadId ?? null;
-  }
-
   bind(
     threadId: string,
     botId: string,
-    options: { startedFromBot: boolean; place: "first" | "after-first" | "last" },
+    options: { startedFromBot: boolean; place: ThreadPlace },
   ): void {
     this.db.transaction(() => {
       this.requireRow(botId);
       this.db.prepare("DELETE FROM bot_threads WHERE thread_id = ?").run(threadId);
-      const positions = this.db
-        .prepare<[string], { position: number }>(
-          "SELECT position FROM bot_threads WHERE bot_id = ? ORDER BY position, bound_at",
-        )
-        .all(botId)
-        .map((row) => row.position);
-      const position = placeAt(positions, options.place);
+      const order = this.threadsOf(botId).map((thread) => thread.threadId);
+      order.splice(placeIn(order, options.place), 0, threadId);
       this.db
         .prepare(
           `INSERT INTO bot_threads (thread_id, bot_id, position, started_from_bot, completed_at, bound_at)
-           VALUES (?, ?, ?, ?, NULL, ?)`,
+           VALUES (?, ?, 0, ?, NULL, ?)`,
         )
-        .run(threadId, botId, position, Number(options.startedFromBot), this.now());
+        .run(threadId, botId, Number(options.startedFromBot), this.now());
+      this.reorderThreads(botId, order);
     })();
   }
 
@@ -394,7 +393,14 @@ export class BotStore {
     );
   }
 
-  bindContinuation(threadId: string, sourceThreadId: string, startedFromBot: boolean): boolean {
+  // A continuation is top-level: it stands before the branch its source is in,
+  // and that branch comes back from Done.
+  bindContinuation(
+    threadId: string,
+    sourceThreadId: string,
+    sourceBranch: readonly string[],
+    startedFromBot: boolean,
+  ): boolean {
     return this.transaction(() => {
       const decided = this.db
         .prepare("SELECT 1 FROM thread_assignment_decisions WHERE thread_id = ?")
@@ -403,11 +409,8 @@ export class BotStore {
       const botId = this.botOfThread(sourceThreadId);
       if (botId === null) return false;
       this.recordAssignmentDecision(threadId);
-      const order = this.threadsOf(botId).map((thread) => thread.threadId);
-      order.splice(order.indexOf(sourceThreadId), 0, threadId);
-      this.bind(threadId, botId, { startedFromBot, place: "last" });
-      this.reorderThreads(botId, order);
-      this.setCompleted(sourceThreadId, false);
+      this.bind(threadId, botId, { startedFromBot, place: { before: sourceBranch.at(-1) } });
+      for (const id of sourceBranch) this.setCompleted(id, false);
       return true;
     });
   }
@@ -452,20 +455,6 @@ export class BotStore {
       )
       .run(...(completed ? [this.now(), threadId] : [threadId]));
     return result.changes > 0;
-  }
-
-  idleCandidates(): Array<{ threadId: string; botId: string; isFirst: boolean }> {
-    const rows = this.db
-      .prepare<[], ThreadRow>(
-        "SELECT * FROM bot_threads WHERE completed_at IS NULL ORDER BY bot_id, position, bound_at",
-      )
-      .all();
-    const seen = new Set<string>();
-    return rows.map((row) => {
-      const isFirst = !seen.has(row.bot_id) && this.firstThread(row.bot_id) === row.thread_id;
-      seen.add(row.bot_id);
-      return { threadId: row.thread_id, botId: row.bot_id, isFirst };
-    });
   }
 
   canReach(fromBotId: string, toBotId: string): boolean {
@@ -518,15 +507,16 @@ export class BotStore {
       }));
   }
 
-  addPendingStart(botId: string): string {
+  // beside: the bot's main conversation, or the branch a continuation's source is in.
+  addPendingStart(botId: string, beside: readonly string[]): string {
     this.requireRow(botId);
     this.db
       .prepare("DELETE FROM pending_starts WHERE created_at < ?")
       .run(this.now() - PENDING_START_TTL_MS);
     const token = randomUUID();
     this.db
-      .prepare("INSERT INTO pending_starts (token, bot_id, created_at) VALUES (?, ?, ?)")
-      .run(token, botId, this.now());
+      .prepare("INSERT INTO pending_starts (token, bot_id, beside, created_at) VALUES (?, ?, ?, ?)")
+      .run(token, botId, JSON.stringify(beside), this.now());
     return token;
   }
 
@@ -538,15 +528,21 @@ export class BotStore {
   claimPendingStart(threadId: string, token: string, sourceThreadId: string | null): string | null {
     return this.transaction(() => {
       const pending = this.db
-        .prepare<[string], { bot_id: string }>("SELECT bot_id FROM pending_starts WHERE token = ?")
+        .prepare<[string], { bot_id: string; beside: string }>(
+          "SELECT bot_id, beside FROM pending_starts WHERE token = ?",
+        )
         .get(token);
       if (!pending || !this.row(pending.bot_id)) return null;
       this.dropPendingStart(token);
       if (this.botOfThread(threadId) === null) {
+        const beside = JSON.parse(pending.beside) as string[];
         if (sourceThreadId !== null && this.botOfThread(sourceThreadId) === pending.bot_id) {
-          this.bindContinuation(threadId, sourceThreadId, true);
+          this.bindContinuation(threadId, sourceThreadId, beside, true);
         } else if (this.recordAssignmentDecision(threadId)) {
-          this.bind(threadId, pending.bot_id, { startedFromBot: true, place: "after-first" });
+          this.bind(threadId, pending.bot_id, {
+            startedFromBot: true,
+            place: { after: beside[0] },
+          });
         }
       }
       return this.botOfThread(threadId);
@@ -562,14 +558,15 @@ export class BotStore {
   }
 }
 
-function placeAt(positions: readonly number[], place: "first" | "after-first" | "last"): number {
-  if (positions.length === 0) return 0;
-  const first = positions[0]!;
-  const last = positions[positions.length - 1]!;
-  if (place === "first") return first - 1;
-  if (place === "last") return last + 1;
-  const second = positions[1];
-  return second === undefined ? first + 1 : (first + second) / 2;
+// A conversation that left the bot meanwhile holds no place: first then.
+function placeIn(order: readonly string[], place: ThreadPlace): number {
+  if (place === "first") return 0;
+  if (place === "last") return order.length;
+  if ("after" in place) return order.findIndex((id) => id === place.after) + 1;
+  return Math.max(
+    order.findIndex((id) => id === place.before),
+    0,
+  );
 }
 
 function requireSameSet(given: readonly string[], actual: readonly string[]): void {

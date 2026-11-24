@@ -70,6 +70,9 @@ function setup(settings: Record<string, number> = {}) {
   let clock = START;
   let nextThread = 100;
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
+  // Conversations with a question to the owner.
+  const waiting = new Set<string>();
+  const failedQueues = new Set<string>();
   const host = createFakePluginHost({
     pluginId: "1ma-bots",
     agentSkillIds: ["1ma-bots"],
@@ -96,7 +99,32 @@ function setup(settings: Record<string, number> = {}) {
         fork: async () => ({ id: `thr_fork${nextThread++}` }),
         get: async ({ threadId }: { threadId: string }) =>
           threads.get(threadId) ?? makeThreadResponse({ id: threadId }),
-        interactions: { list: async () => [] },
+        list: async (filter = {}) =>
+          [
+            ...(filter.threadIds?.map((id) => threads.get(id) ?? makeThreadResponse({ id })) ??
+              threads.values()),
+          ]
+            .filter(
+              (thread) =>
+                (filter.parentThreadId === undefined ||
+                  thread.parentThreadId === filter.parentThreadId) &&
+                (filter.archived === undefined ||
+                  (thread.archivedAt !== null) === filter.archived) &&
+                thread.deletedAt === null,
+            )
+            .map((thread) => ({
+              ...thread,
+              hasPendingInteraction: waiting.has(thread.id),
+              queuedWork: failedQueues.has(thread.id)
+                ? "failed"
+                : thread.queuedMessageCount > 0
+                  ? "waiting"
+                  : "none",
+            })),
+        interactions: {
+          list: async ({ threadId }: { threadId: string }) =>
+            waiting.has(threadId) ? [{ id: "int_1" }] : [],
+        },
         events: {
           list: async ({
             threadId,
@@ -185,6 +213,8 @@ function setup(settings: Record<string, number> = {}) {
     dispatch,
     list,
     threads,
+    waiting,
+    failedQueues,
     advance: (ms: number) => {
       clock += ms;
     },
@@ -904,11 +934,11 @@ describe("Codex review of stage 1", () => {
     const t = setup();
     const bot = await t.create("Marketer");
     await t.assign("thr_q", bot.id);
-    t.harness.sdk.stub("threads.interactions.list", async () => [{ id: "int_1" }]);
+    t.waiting.add("thr_q");
     await expect(
       t.rpc("bots.v1.setCompleted", { threadId: "thr_q", completed: true }),
     ).rejects.toThrow(/waiting for the owner/);
-    t.harness.sdk.stub("threads.interactions.list", async () => []);
+    t.waiting.clear();
     t.threads.set("thr_q", makeThreadResponse({ id: "thr_q", status: "error" }));
     await expect(
       t.rpc("bots.v1.setCompleted", { threadId: "thr_q", completed: true }),
@@ -1239,5 +1269,233 @@ describe("hiding a bot from the sidebar", () => {
       botId: bot.id,
     });
     expect(events.map((event) => event.kind)).toEqual(["bot.shown", "bot.hidden", "bot.created"]);
+  });
+});
+
+describe("nested conversations", () => {
+  const old = START - 30 * 24 * 60 * 60 * 1000;
+
+  // thr_child and thr_sibling belong to the bot under thr_parent; thr_grand is
+  // a sub-thread of thr_child without its own place in the bot.
+  async function botWithBranch(settings: Record<string, number> = {}) {
+    const t = setup(settings);
+    const bot = await t.create("Marketer");
+    const nest = (id: string, parentThreadId: string | null, extra = {}) => {
+      const thread = makeThreadResponse({
+        id,
+        parentThreadId,
+        status: "idle",
+        updatedAt: old,
+        pinnedAt: null,
+        queuedMessageCount: 0,
+        ...extra,
+      });
+      t.threads.set(id, thread);
+      return thread;
+    };
+    for (const id of ["thr_child", "thr_main", "thr_parent", "thr_sibling", "thr_other"])
+      await t.assign(id, bot.id);
+    nest("thr_main", null);
+    nest("thr_parent", null);
+    nest("thr_child", "thr_parent");
+    nest("thr_sibling", "thr_parent");
+    nest("thr_other", null);
+    const grand = nest("thr_grand", "thr_child");
+    const order = async () => (await t.list()).bots[0]!.threads.map((thread) => thread.threadId);
+    const done = async () =>
+      (await t.list()).bots[0]!.threads.filter((thread) => thread.completed).map(
+        (thread) => thread.threadId,
+      );
+    const mark = (threadId: string, completed = true) =>
+      t.rpc("bots.v1.setCompleted", { threadId, completed });
+    return { ...t, bot, nest, grand, order, done, mark };
+  }
+
+  it("a letter goes to the first top-level open conversation", async () => {
+    const t = await botWithBranch();
+    const sender = await t.create("Sender");
+    await t.assign("thr_sender", sender.id);
+    const target = async () => {
+      await t.letter("thr_sender", t.bot.id);
+      const [args] = t.harness.sdk.callsTo("threads.send").at(-1) as [{ threadId: string }];
+      return args.threadId;
+    };
+    expect(await target()).toBe("thr_main");
+    await t.mark("thr_main");
+    expect(await target()).toBe("thr_parent");
+    t.nest("thr_parent", null, { archivedAt: START });
+    expect(await target()).toBe("thr_other");
+    await t.mark("thr_other");
+    expect(await target()).toBe("thr_main");
+  });
+
+  it("a bot whose conversations are all archived has nowhere to take a letter", async () => {
+    const t = await threeBots();
+    t.threads.set("thr_b", makeThreadResponse({ id: "thr_b", archivedAt: START }));
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/no conversation yet/);
+  });
+
+  it("finds the main conversation behind more than one page of archived ones", async () => {
+    const t = setup();
+    const bot = await t.create("Marketer");
+    const sender = await t.create("Sender");
+    await t.assign("thr_sender", sender.id);
+    for (let i = 0; i < 201; i++) {
+      await t.assign(`thr_${i}`, bot.id);
+      t.threads.set(
+        `thr_${i}`,
+        makeThreadResponse({ id: `thr_${i}`, archivedAt: i < 200 ? START : null }),
+      );
+    }
+    await t.letter("thr_sender", bot.id);
+    for (const [args] of t.harness.sdk.callsTo("threads.list") as Array<[{ threadIds: string[] }]>)
+      expect(args.threadIds.length).toBeLessThanOrEqual(200);
+    expect(t.harness.sdk.callsTo("threads.send")[0]).toMatchObject([{ threadId: "thr_200" }]);
+  });
+
+  it("a new conversation stands right after the main one", async () => {
+    const t = await botWithBranch();
+    const { threadId } = await t.rpc<{ threadId: string }>("bots.v1.startThread", {
+      botId: t.bot.id,
+      request: { projectId: "proj_1", input: [] },
+    });
+    expect(await t.order()).toEqual([
+      "thr_child",
+      "thr_main",
+      threadId,
+      "thr_parent",
+      "thr_sibling",
+      "thr_other",
+    ]);
+  });
+
+  it.each(["native fork", "bot action"])(
+    "%s of a sub-thread stands before its branch and reopens it",
+    async (path) => {
+      const t = await botWithBranch();
+      for (const id of ["thr_child", "thr_parent", "thr_other"]) await t.mark(id);
+      const fork = makeThreadResponse({
+        id: "thr_fork",
+        sourceThreadId: "thr_child",
+        originKind: "fork",
+        originPluginId: path === "bot action" ? "1ma-bots" : null,
+      });
+      if (path === "bot action") {
+        t.harness.sdk.stub("threads.fork", async () => fork);
+        await t.rpc("bots.v1.continueInBot", { threadId: "thr_child" });
+      } else {
+        await t.harness.behavior.emitThreadEvent("thread.created", { thread: fork });
+      }
+      expect(await t.order()).toEqual([
+        "thr_child",
+        "thr_main",
+        "thr_fork",
+        "thr_parent",
+        "thr_sibling",
+        "thr_other",
+      ]);
+      expect(await t.done()).toEqual(["thr_other"]);
+    },
+  );
+
+  it.each(["interaction.pending", "thread.failed", "turn"])(
+    "%s in a sub-thread brings its whole branch back",
+    async (event) => {
+      const t = await botWithBranch();
+      for (const id of ["thr_child", "thr_parent", "thr_sibling", "thr_other"]) await t.mark(id);
+      const before = t.harness.experimental_rpcInvalidations.length;
+      if (event === "turn") {
+        t.recordTurn(t.grand.id, "agent", "thr_child");
+        await t.harness.behavior.emitThreadEvent("thread.idle", {
+          thread: t.grand,
+          lastAssistantText: null,
+        });
+      } else if (event === "thread.failed") {
+        await t.harness.behavior.emitThreadEvent("thread.failed", {
+          thread: t.grand,
+          error: "boom",
+        });
+      } else {
+        await t.harness.behavior.emitThreadEvent("interaction.pending", {
+          thread: t.grand,
+          interaction: {} as never,
+        });
+      }
+      expect(await t.done()).toEqual(["thr_sibling", "thr_other"]);
+      expect(t.harness.experimental_rpcInvalidations).toHaveLength(before + 1);
+    },
+  );
+
+  it("a turn that ran before the branch was marked keeps it done", async () => {
+    const t = await botWithBranch();
+    t.recordTurn(t.grand.id, "agent", "thr_child");
+    await t.mark("thr_parent");
+    await t.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: t.grand,
+      lastAssistantText: null,
+    });
+    expect(await t.done()).toEqual(["thr_parent"]);
+  });
+
+  it.each(["question", "error", "failed queue"])(
+    "refuses to mark a branch done while a sub-thread has a %s",
+    async (problem) => {
+      const t = await botWithBranch();
+      if (problem === "question") t.waiting.add("thr_grand");
+      if (problem === "error") t.nest("thr_grand", "thr_child", { status: "error" });
+      if (problem === "failed queue") t.failedQueues.add("thr_grand");
+      await expect(t.mark("thr_parent")).rejects.toThrow(/waiting for the owner/);
+      await expect(t.mark("thr_child")).rejects.toThrow(/waiting for the owner/);
+      await t.mark("thr_sibling");
+      expect(await t.done()).toEqual(["thr_sibling"]);
+    },
+  );
+
+  it("an archived sub-thread does not keep its branch open", async () => {
+    const t = await botWithBranch();
+    t.nest("thr_grand", "thr_child", { status: "error", archivedAt: START });
+    await t.mark("thr_parent");
+    expect(await t.done()).toEqual(["thr_parent"]);
+  });
+
+  it("bringing back a sub-thread brings back the branch that holds it", async () => {
+    const t = await botWithBranch();
+    for (const id of ["thr_child", "thr_parent", "thr_sibling"]) await t.mark(id);
+    await t.mark("thr_child", false);
+    expect(await t.done()).toEqual(["thr_sibling"]);
+  });
+
+  it("another bot's conversation nested in the branch keeps to its own bot", async () => {
+    const t = await botWithBranch();
+    const other = await t.create("Editor");
+    await t.assign("thr_guest", other.id);
+    const guest = t.nest("thr_guest", "thr_child", { status: "error" });
+    await t.mark("thr_parent");
+    await t.harness.behavior.emitThreadEvent("thread.failed", { thread: guest, error: "boom" });
+    expect(await t.done()).toEqual(["thr_parent"]);
+    const sender = await t.create("Sender");
+    await t.assign("thr_sender", sender.id);
+    await t.letter("thr_sender", other.id);
+    expect(t.harness.sdk.callsTo("threads.send")[0]).toMatchObject([{ threadId: "thr_guest" }]);
+  });
+
+  it("auto-complete protects the main conversation and leaves a branch until all of it is quiet", async () => {
+    const busy = [
+      { status: "active" },
+      { updatedAt: START },
+      { pinnedAt: old },
+      { queuedMessageCount: 1 },
+      { question: true },
+    ];
+    for (const { question, ...state } of busy as Array<Record<string, unknown>>) {
+      const t = await botWithBranch({ autoCompleteHours: 72 });
+      t.nest("thr_grand", "thr_child", state);
+      if (question) t.waiting.add("thr_grand");
+      await t.harness.behavior.runSchedule(AUTO_COMPLETE_SCHEDULE);
+      expect(await t.done()).toEqual(["thr_sibling", "thr_other"]);
+    }
+    const t = await botWithBranch({ autoCompleteHours: 72 });
+    await t.harness.behavior.runSchedule(AUTO_COMPLETE_SCHEDULE);
+    expect(await t.done()).toEqual(["thr_child", "thr_parent", "thr_sibling", "thr_other"]);
   });
 });

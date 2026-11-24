@@ -5,6 +5,7 @@ import {
   experimental_useRpcQuery as useRpcQuery,
   useBbNavigate,
   type ExperimentalThreadInfoProps,
+  type PluginSidebarThread,
 } from "@get-bb/plugin-sdk/app";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -28,6 +29,25 @@ export function findBot(
     if (thread) return { bot, thread };
   }
   return null;
+}
+
+// Done covers the branch, so a sub-thread is done with the conversations above
+// it in its bot's tree.
+export function isDone(
+  bots: readonly BotSummary[],
+  threads: readonly Pick<PluginSidebarThread, "id" | "parentThreadId">[],
+  threadId: string,
+): boolean {
+  const botId = findBot(bots, threadId)?.bot.id;
+  const seen = new Set<string>();
+  for (let id: string | null = threadId; id !== null && !seen.has(id);) {
+    seen.add(id);
+    const member = findBot(bots, id);
+    if (member !== null && member.bot.id !== botId) return false;
+    if (member?.thread.completed) return true;
+    id = threads.find((thread) => thread.id === id)?.parentThreadId ?? null;
+  }
+  return false;
 }
 
 function InstructionPreview({ bot, bots }: { bot: BotSummary; bots: readonly BotSummary[] }) {

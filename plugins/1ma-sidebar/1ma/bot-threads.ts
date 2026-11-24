@@ -3,35 +3,54 @@ import type { SidebarBot } from "./bots-rpc.js";
 
 type ThreadLink = Pick<PluginSidebarThread, "id" | "parentThreadId">;
 
-// Conversations shown under a visible bot leave the project groups together
-// with their child conversations; a hidden bot's conversations stay there.
-export function threadsShownUnderBots(
+export interface BotBranch {
+  botId: string;
+  // The conversation and the ones above it, up to the top of its bot's tree.
+  threadIds: readonly string[];
+}
+
+// A sub-thread without its own place in a bot belongs to the bot of the nearest
+// conversation above it; another bot's conversation ends the branch.
+export function botBranches(
   bots: readonly SidebarBot[],
   threads: readonly ThreadLink[],
-): ReadonlySet<string> {
-  const roots = new Set(
-    bots
-      .filter((bot) => !bot.hidden)
-      .flatMap((bot) => bot.threads.map((thread) => thread.threadId)),
+): ReadonlyMap<string, BotBranch> {
+  const botOf = new Map(
+    bots.flatMap((bot) => bot.threads.map((member) => [member.threadId, bot.id] as const)),
   );
-  if (roots.size === 0) return roots;
   const parentOf = new Map(threads.map((thread) => [thread.id, thread.parentThreadId]));
-  const shown = new Set<string>();
+  const branches = new Map<string, BotBranch>();
   for (const thread of threads) {
     const seen = new Set<string>();
+    let branch: BotBranch | undefined;
     for (
       let id: string | null = thread.id;
       id !== null && !seen.has(id);
       id = parentOf.get(id) ?? null
     ) {
       seen.add(id);
-      if (roots.has(id)) {
-        shown.add(thread.id);
-        break;
-      }
+      const botId = botOf.get(id);
+      if (botId === undefined) continue;
+      if (branch !== undefined && branch.botId !== botId) break;
+      branch = { botId, threadIds: [...seen] };
     }
+    if (branch !== undefined) branches.set(thread.id, branch);
   }
-  return shown;
+  return branches;
+}
+
+// Conversations shown under a visible bot leave the project groups together
+// with their child conversations; a hidden bot's conversations stay there.
+export function threadsShownUnderBots(
+  bots: readonly SidebarBot[],
+  threads: readonly ThreadLink[],
+): ReadonlySet<string> {
+  const visible = new Set(bots.filter((bot) => !bot.hidden).map((bot) => bot.id));
+  return new Set(
+    [...botBranches(bots, threads)].flatMap(([threadId, { botId }]) =>
+      visible.has(botId) ? [threadId] : [],
+    ),
+  );
 }
 
 export function withoutThreads<T extends ThreadLink>(

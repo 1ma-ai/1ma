@@ -112,10 +112,13 @@ interface UseSectionThreadDndArgs {
   onTopLevelSectionOrderChange: (order: SidebarSectionId[]) => void;
   onExpandThread?: (threadId: string) => void;
   groups?: boolean;
-  onBotReorder?: (
-    threadIds: readonly string[],
-    target: SectionThreadReorderTarget,
-  ) => void;
+  botReorder?: {
+    accepts: (threadIds: readonly string[], targetId: string) => boolean;
+    drop: (
+      threadIds: readonly string[],
+      target: SectionThreadReorderTarget,
+    ) => void;
+  };
   pinnedReorderPending: boolean;
   pinnedThreads: readonly SidebarThread[];
   pinnedRootItems?: readonly ProjectThreadItem[];
@@ -963,7 +966,7 @@ export function useSectionThreadDnd({
   onTopLevelSectionOrderChange,
   onExpandThread,
   groups = false,
-  onBotReorder,
+  botReorder,
   pinnedReorderPending,
   pinnedThreads,
   pinnedRootItems,
@@ -1059,11 +1062,22 @@ export function useSectionThreadDnd({
       if (activeId === null || threadId === activeId) return null;
       if (lookup.itemKindById.get(threadId) !== "thread") return null;
       const armed = armedNestThreadIdRef.current === threadId;
-      if (onBotReorder) return NEST_BAND_FRACTION;
+      if (botReorder) return NEST_BAND_FRACTION;
       if (coarsePointerRef.current) return 1;
       return armed ? NEST_BAND_ARMED_FRACTION : NEST_BAND_FRACTION;
     },
-    [lookup, onBotReorder],
+    [botReorder, lookup],
+  );
+  const draggedRootIds = useCallback(
+    (activeId: string) =>
+      (
+        resolveDraggedRootThreads(
+          lookup,
+          activeId,
+          draggedSelectionRef.current ?? undefined,
+        ) ?? []
+      ).map((thread) => thread.id),
+    [lookup],
   );
   const handleRowPointer = useCallback(
     ({ threadId, relativeY, nesting }: ThreadRowPointerInfo) => {
@@ -1071,8 +1085,11 @@ export function useSectionThreadDnd({
       if (
         activeId === null ||
         nesting ||
-        (onBotReorder
-          ? activeId === threadId
+        (botReorder
+          ? !botReorder.accepts(draggedRootIds(activeId), threadId) ||
+            draggedRootIds(activeId).some((id) =>
+              isThreadWithinSubtree(lookup, id, threadId),
+            )
           : isPinnedRoot(activeId) || !isPinnedRoot(threadId))
       ) {
         return;
@@ -1082,7 +1099,7 @@ export function useSectionThreadDnd({
         placement: relativeY < 0.5 ? "before" : "after",
       };
     },
-    [isPinnedRoot, onBotReorder],
+    [botReorder, draggedRootIds, isPinnedRoot, lookup],
   );
   const handleResolvedRow = useCallback(
     ({ threadId, rect, retaining }: ResolvedThreadRowInfo) => {
@@ -1372,8 +1389,8 @@ export function useSectionThreadDnd({
       if (!enabled || !draggingThreadRef.current) return;
       const activeId =
         typeof event.active.id === "string" ? event.active.id : null;
-      if (activeId === null || (!onBotReorder && isPinnedRoot(activeId))) return;
-      const next = pinnedInsertRef.current;
+      if (activeId === null || (!botReorder && isPinnedRoot(activeId))) return;
+      const next = event.over === null ? null : pinnedInsertRef.current;
       setReorderTarget((current) =>
         current?.threadId === next?.threadId &&
         current?.placement === next?.placement
@@ -1381,7 +1398,7 @@ export function useSectionThreadDnd({
           : next,
       );
     },
-    [enabled, isPinnedRoot, onBotReorder],
+    [botReorder, enabled, isPinnedRoot],
   );
 
   const commitDropChanges = useCallback(
@@ -1462,15 +1479,10 @@ export function useSectionThreadDnd({
         projectedNestParentId,
         decisionOptions,
       );
-      if (onBotReorder && (overId === null || decision?.kind !== "nest")) {
+      if (botReorder && (overId === null || decision?.kind !== "nest")) {
         const target = pinnedInsertRef.current;
         if (target && overId !== null && rowDrop === null) {
-          const threads = resolveDraggedRootThreads(
-            lookup,
-            activeId,
-            decisionOptions.selectedThreadIds,
-          );
-          if (threads) onBotReorder(threads.map((thread) => thread.id), target);
+          botReorder.drop(draggedRootIds(activeId), target);
         }
         clearProjectedDrag();
         return;
@@ -1493,7 +1505,7 @@ export function useSectionThreadDnd({
         case "nest":
           settle(
             commitDropChanges(
-              onBotReorder ? { ...decision, unpinThreadIds: [] } : decision,
+              botReorder ? { ...decision, unpinThreadIds: [] } : decision,
               `Failed to move ${describeThreadCount(decision.threadIds)}.`,
             ),
           );
@@ -1525,17 +1537,18 @@ export function useSectionThreadDnd({
       setPendingDropDecision(decision);
     },
     [
+      botReorder,
       clearDropDwell,
       clearNestCandidate,
       clearProjectedDrag,
       commitDropChanges,
       decisionOptions,
+      draggedRootIds,
       dragOverParentKey,
       enabled,
       handlePinnedDragEnd,
       lookup,
       onReorderPinnedThread,
-      onBotReorder,
       onTopLevelSectionOrderChange,
       projectedNestParentId,
       reorderTarget,

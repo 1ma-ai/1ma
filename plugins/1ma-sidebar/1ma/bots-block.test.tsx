@@ -267,6 +267,149 @@ describe("a done conversation that is working again", () => {
   });
 });
 
+describe("nested conversations of a bot", () => {
+  const nested = (
+    id: string,
+    parentThreadId: string | null = null,
+    extra: Parameters<typeof makeSidebarThread>[0] = {},
+  ) => makeSidebarThread({ id, projectId: "proj_app", title: id, parentThreadId, ...extra });
+  // thr_spawned has no place of its own in the bot; it is newer than its siblings.
+  const TREE = [
+    nested("thr_second", "thr_parent", { createdAt: 1 }),
+    nested("thr_spawned", "thr_parent", { createdAt: 9 }),
+    nested("thr_first", "thr_parent", { createdAt: 2 }),
+    nested("thr_parent"),
+    nested("thr_main"),
+  ];
+  const memberOrder = ["thr_second", "thr_main", "thr_parent", "thr_first"];
+  const withDone = (done: string[], order = memberOrder): SidebarBot => ({
+    ...marketer(),
+    threads: order.map((threadId) => ({
+      threadId,
+      startedFromBot: true,
+      completed: done.includes(threadId),
+    })),
+  });
+  const changed = (id: string, extra: Parameters<typeof makeSidebarThread>[0]) =>
+    TREE.map((thread) => (thread.id === id ? { ...thread, ...extra } : thread) as typeof thread);
+  async function rows(done: string[], threads = TREE) {
+    const view = render({ bots: () => ({ bots: [withDone(done)] }), threads });
+    await screen.findByText("Marketer");
+    const open = threadIdsIn(botElement("bot_m"));
+    const count = screen.queryByText(/^Done: /u)?.textContent ?? null;
+    return { view, open, count };
+  }
+
+  it("stand in the bot's order inside their parent, sub-threads without a place after them", async () => {
+    expect((await rows([])).open).toEqual([
+      "thr_main",
+      "thr_parent",
+      "thr_second",
+      "thr_first",
+      "thr_spawned",
+    ]);
+  });
+
+  it("the bot opens its first top-level conversation, not a sub-chat ahead in the order", async () => {
+    const { view } = await rows([]);
+    fireEvent.click(screen.getByRole("button", { name: strings.openBot("Marketer") }));
+    expect(view.inspection.navigateCalls).toContainEqual(
+      expect.objectContaining({ threadId: "thr_main" }),
+    );
+  });
+
+  it("with the first conversation done the bot opens the next top-level one", async () => {
+    const { view } = await rows(["thr_main"]);
+    fireEvent.click(screen.getByRole("button", { name: strings.openBot("Marketer") }));
+    expect(view.inspection.navigateCalls).toContainEqual(
+      expect.objectContaining({ threadId: "thr_parent" }),
+    );
+  });
+
+  it("with the first conversation archived the bot opens the next top-level one", async () => {
+    const { view } = await rows([], changed("thr_main", { archivedAt: 1, isArchived: true }));
+    fireEvent.click(screen.getByRole("button", { name: strings.openBot("Marketer") }));
+    expect(view.inspection.navigateCalls).toContainEqual(
+      expect.objectContaining({ threadId: "thr_parent" }),
+    );
+  });
+
+  it("a parent goes to Done with its whole branch, counted once", async () => {
+    const { open, count } = await rows(["thr_parent", "thr_first"]);
+    expect(open).toEqual(["thr_main"]);
+    expect(count).toBe(strings.done(1));
+    fireEvent.click(screen.getByText(strings.done(1)));
+    expect(threadIdsIn(botElement("bot_m"))).toEqual([
+      "thr_main",
+      "thr_parent",
+      "thr_second",
+      "thr_first",
+      "thr_spawned",
+    ]);
+  });
+
+  it("a done sub-chat leaves its open parent and is counted on its own", async () => {
+    const { open, count } = await rows(["thr_first"]);
+    expect(open).toEqual(["thr_main", "thr_parent", "thr_second", "thr_spawned"]);
+    expect(count).toBe(strings.done(1));
+  });
+
+  it.each([
+    ["runs", { status: "active" as const }],
+    ["has a question", { hasPendingInteraction: true }],
+    ["failed", { status: "error" as const }],
+    ["has a failed queue", { queuedWork: "failed" as const }],
+  ])("a branch whose sub-thread %s stays in sight whole", async (_state, extra) => {
+    const { open, count } = await rows(["thr_parent"], changed("thr_spawned", extra));
+    expect(open).toEqual(["thr_main", "thr_parent", "thr_second", "thr_first", "thr_spawned"]);
+    expect(count).toBeNull();
+  });
+
+  it("a sub-chat marked done on its own stays done while its sibling runs", async () => {
+    const { open, count } = await rows(
+      ["thr_parent", "thr_first"],
+      changed("thr_spawned", { status: "active" }),
+    );
+    expect(open).toEqual(["thr_main", "thr_parent", "thr_second", "thr_spawned"]);
+    expect(count).toBe(strings.done(1));
+  });
+
+  it("a hidden helper thread neither counts nor keeps its branch open", async () => {
+    const { open, count } = await rows(
+      ["thr_parent"],
+      changed("thr_spawned", { isHidden: true, status: "error" }),
+    );
+    expect(open).toEqual(["thr_main"]);
+    expect(count).toBe(strings.done(1));
+  });
+
+  it("a conversation of another bot inside the branch keeps its own place", async () => {
+    render({
+      bots: () => ({
+        bots: [
+          withDone(["thr_parent"], ["thr_main", "thr_parent"]),
+          {
+            ...withDone([], ["thr_first"]),
+            id: "bot_e",
+            name: "Editor",
+          },
+        ],
+      }),
+      threads: changed("thr_first", { status: "error" }),
+    });
+    await screen.findByText("Editor");
+    expect(threadIdsIn(botElement("bot_m"))).toEqual(["thr_main"]);
+    expect(threadIdsIn(botElement("bot_e"))).toEqual(["thr_first"]);
+    fireEvent.click(screen.getByText(strings.done(1)));
+    expect(threadIdsIn(botElement("bot_m"))).toEqual([
+      "thr_main",
+      "thr_parent",
+      "thr_spawned",
+      "thr_second",
+    ]);
+  });
+});
+
 describe("the owner's review of the bots block: a bot is drawn like a parent thread", () => {
   it("the chevron after the name collapses the conversations, and the choice is kept", async () => {
     const writes: unknown[] = [];

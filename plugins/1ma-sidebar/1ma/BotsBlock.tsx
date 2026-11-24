@@ -53,7 +53,7 @@ import { createSyncedPreferenceAtom } from "../app/preferences/synced-preference
 import { SidebarChildToggleChevron } from "../app/rows/SidebarChildToggleChevron.js";
 import { SidebarControlButton, SidebarRowControls } from "../app/rows/SidebarRowControls.js";
 import { BOTS_PLUGIN_ID, botsRpc, type SidebarBot } from "./bots-rpc.js";
-import { threadsShownUnderBots } from "./bot-threads.js";
+import { botBranches } from "./bot-threads.js";
 import { strings } from "./strings.js";
 import { useSidebarBots } from "./use-bots.js";
 import {
@@ -333,12 +333,21 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
   );
 }
 
-const RUNNING: ReadonlySet<string> = new Set(["starting", "active", "stopping"]);
+// 1ma-bots clears the done mark of a conversation that works again or waits
+// for the owner; until then it already shows with the open ones.
+function keepsOpen(thread: PluginSidebarThread): boolean {
+  return (
+    ["starting", "active", "stopping", "error"].includes(thread.status) ||
+    thread.hasPendingInteraction ||
+    thread.queuedWork === "failed"
+  );
+}
 
 interface BotConversations {
-  // The conversation the bot row opens: its first open one.
+  // The conversation the bot row opens: the first open one at the top of its tree.
   first: PluginSidebarThread | null;
-  // Open and done conversations with their sub-threads.
+  // Every conversation with its sub-threads. Done covers the whole branch,
+  // unless something in the branch keeps it open.
   open: PluginSidebarThread[];
   done: PluginSidebarThread[];
   doneCount: number;
@@ -350,45 +359,38 @@ function useBotConversations(bots: readonly SidebarBot[]) {
   const { threads } = useSidebarThreads({ experimental_lifecycles: lifecycles });
   return useMemo(() => {
     const byId = new Map(threads.map((thread) => [thread.id, thread]));
-    const subtree = (bot: SidebarBot, roots: readonly string[]) => {
-      const shown = threadsShownUnderBots(
-        [
-          {
-            ...bot,
-            hidden: false,
-            threads: roots.map((threadId) => ({
-              threadId,
-              startedFromBot: true,
-              completed: false,
-            })),
-          },
-        ],
-        threads,
-      );
-      return threads.filter((thread) => shown.has(thread.id));
-    };
+    const branches = botBranches(bots, threads);
+    const branchOf = (threadId: string) => branches.get(threadId)?.threadIds ?? [];
     const byBot = new Map<string, BotConversations>();
     for (const bot of bots) {
       const order = new Map(bot.threads.map((thread, index) => [thread.threadId, index]));
-      // A done conversation that is working again shows with the open ones;
-      // 1ma-bots clears the done mark once the turn has really run.
-      const isOpen = (item: SidebarBot["threads"][number]) =>
-        !item.completed || RUNNING.has(byId.get(item.threadId)?.status ?? "idle");
-      const open = bot.threads.filter(isOpen).map((thread) => thread.threadId);
-      const done = bot.threads.filter((thread) => !isOpen(thread)).map((thread) => thread.threadId);
-      const present = (ids: readonly string[]) =>
-        ids.flatMap((id) => {
-          const thread = byId.get(id);
-          return thread === undefined ? [] : [thread];
-        });
+      const shown = threads.filter(
+        (thread) => !thread.isHidden && branches.get(thread.id)?.botId === bot.id,
+      );
+      const kept = new Set(shown.filter(keepsOpen).flatMap((thread) => branchOf(thread.id)));
+      const marked = new Set(
+        bot.threads
+          .filter((item) => item.completed && !kept.has(item.threadId))
+          .map((item) => item.threadId),
+      );
+      const done = shown.filter((thread) =>
+        branchOf(thread.id).some((threadId) => marked.has(threadId)),
+      );
+      const doneIds = new Set(done.map((thread) => thread.id));
+      const open = shown.filter((thread) => !doneIds.has(thread.id));
+      const isTop = (thread: PluginSidebarThread) =>
+        !thread.isArchived && branchOf(thread.id).length === 1;
+      const compare: ThreadComparator = (left, right) =>
+        (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+          (order.get(right.id) ?? Number.MAX_SAFE_INTEGER) || right.createdAt - left.createdAt;
       byBot.set(bot.id, {
-        first: present(open)[0] ?? null,
-        open: subtree(bot, open),
-        done: subtree(bot, done),
-        doneCount: present(done).length,
-        compare: (left, right) =>
-          (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
-            (order.get(right.id) ?? Number.MAX_SAFE_INTEGER) || right.createdAt - left.createdAt,
+        first: open.filter(isTop).sort(compare)[0] ?? null,
+        open,
+        done,
+        doneCount: done.filter(
+          ({ parentThreadId }) => parentThreadId === null || !doneIds.has(parentThreadId),
+        ).length,
+        compare,
       });
     }
     const empty: BotConversations = {
