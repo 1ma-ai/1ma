@@ -1354,7 +1354,8 @@ export function useSectionThreadDnd({
       setDragOverParentKey(targetParentKey);
       setUnchangedParentKey(nextUnchangedParentKey);
       setRowDrop(nextRowDrop);
-      if (isPinnedRoot(activeId)) setReorderTarget(nextReorderTarget);
+      if (isPinnedRoot(activeId) || nextRowDrop !== null)
+        setReorderTarget(nextReorderTarget);
       const expand = resolveDwellExpansion({
         containerId,
         onExpandThread,
@@ -1393,7 +1394,7 @@ export function useSectionThreadDnd({
       const activeId =
         typeof event.active.id === "string" ? event.active.id : null;
       if (activeId === null || (!botReorder && isPinnedRoot(activeId))) return;
-      const next = event.over === null ? null : pinnedInsertRef.current;
+      const next = event.collisions?.length ? pinnedInsertRef.current : null;
       setReorderTarget((current) =>
         current?.threadId === next?.threadId &&
         current?.placement === next?.placement

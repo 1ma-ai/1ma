@@ -387,11 +387,13 @@ describe("bot conversation drops", () => {
     const props = () => result.current!.dndContextProps;
     const rect = { top: 100, left: 0, right: 200, width: 200, height: 28, bottom: 128 };
     const id = getSidebarThreadRowDroppableId(targetId);
-    const move = (over: string | null) =>
+    // dnd-kit reports the row of the previous move in `over`.
+    const move = (from: string | null, to: string | null) =>
       act(() =>
         props().onDragMove?.({
           active: { id: pinned.id },
-          over: over === null ? null : { id: over },
+          collisions: to === null ? [] : [{ id: to }],
+          over: from === null ? null : { id: from },
         } as never),
       );
     act(() => props().onDragStart?.(dragStart(pinned.id)));
@@ -405,10 +407,10 @@ describe("bot conversation drops", () => {
       } as unknown as Parameters<CollisionDetection>[0]);
     });
     const place = { threadId: targetId, placement: "before" };
-    move(targetId);
+    move(null, targetId);
     expect(result.current!.reorderTarget).toEqual(accepted ? place : null);
     // Away from the rows, over a bot for example, nothing is promised.
-    move(null);
+    move(targetId, null);
     expect(result.current!.reorderTarget).toBeNull();
     act(() => props().onDragEnd?.(dragEnd(pinned.id, targetId)));
     await flushTasks();
@@ -937,6 +939,7 @@ describe("useSectionThreadDnd nest hover delay", () => {
     function Rows() {
       const dragged = useDraggable({ id: "dragged" });
       const target = useDroppable({ id: rowDroppableId });
+      const item = useDroppable({ id: "in-b" });
       return (
         <>
           <div
@@ -951,6 +954,7 @@ describe("useSectionThreadDnd nest hover delay", () => {
             ref={(element) => {
               at(100)(element);
               target.setNodeRef(element);
+              item.setNodeRef(element);
             }}
           />
         </>
@@ -968,6 +972,8 @@ describe("useSectionThreadDnd nest hover delay", () => {
         pinnedRootItems: [],
         pinnedRootNodes: [],
         onReorderPinnedThread: vi.fn(),
+        groups: true,
+        botReorder: { accepts: () => true, drop: vi.fn() },
       });
       return (
         <DndContext {...result.current!.dndContextProps}>
@@ -983,9 +989,11 @@ describe("useSectionThreadDnd nest hover delay", () => {
     fireEvent.mouseMove(document, { clientX: 20, clientY: 114 });
     await act(() => new Promise((resolve) => setTimeout(resolve, NEST_HOVER_DELAY_MS / 2)));
     expect(result.current!.nestTarget).toBeNull();
+    expect(result.current!.reorderTarget).toEqual({ threadId: "in-b", placement: "after" });
     await waitFor(() =>
       expect(result.current!.nestTarget).toMatchObject({ threadId: "in-b", state: "valid" }),
     );
+    expect(result.current!.reorderTarget).toBeNull();
     fireEvent.mouseUp(document);
   });
 });
