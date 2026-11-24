@@ -473,7 +473,9 @@ describe("1ma-sidebar with the bots block", () => {
         .waitFor({ state: "detached" });
       await row.waitFor();
       assert.equal(await completedOf(fixture.visible.id, fixture.v2), false);
-      const drag = async (placement) => {
+      const overParent = (selector) =>
+        group.locator(selector).filter({ has: threadLink(page, fixture.v1) });
+      const drag = async (placement, hint, shot) => {
         const from = await row.boundingBox();
         const parent = threadLink(group, fixture.v1);
         const to = await parent.boundingBox();
@@ -484,18 +486,15 @@ describe("1ma-sidebar with the bots block", () => {
         await page.mouse.down();
         await page.mouse.move(from.x + 46, from.y + from.height / 2 + 3, { steps: 4 });
         await page.mouse.move(x, y, { steps: 18 });
-        const hint =
-          placement === "inside"
-            ? '[data-sidebar-nest-target="valid"]'
-            : '[data-sidebar-reorder-placement="after"]';
-        await group
-          .locator(hint)
-          .filter({ has: threadLink(page, fixture.v1) })
-          .waitFor({ timeout: 10 * SECOND });
-        if (placement === "after") await screenshot(page, "bot-conversation-reorder");
+        await hint.waitFor({ timeout: 10 * SECOND });
+        await screenshot(page, shot);
         await page.mouse.up();
       };
-      await drag("after");
+      await drag(
+        "after",
+        overParent('[data-sidebar-reorder-placement="after"]'),
+        "bot-conversation-reorder",
+      );
       await waitFor(
         "the drag changes the saved bot order",
         30 * SECOND,
@@ -503,7 +502,11 @@ describe("1ma-sidebar with the bots block", () => {
           (await rpc("bots.v1.get", { botId: fixture.visible.id })).threads[0].threadId ===
             fixture.v1 && (await order())[0] === fixture.v1,
       );
-      await drag("inside");
+      await drag(
+        "inside",
+        overParent('[data-sidebar-nest-target="valid"]'),
+        "bot-conversation-nest",
+      );
       await waitFor(
         "the dragged conversation has a real parent",
         30 * SECOND,
@@ -534,7 +537,12 @@ describe("1ma-sidebar with the bots block", () => {
       assert.deepEqual(await order(), [fixture.v1, fixture.v2]);
       assert.equal(await completedOf(fixture.visible.id, fixture.v1), false);
 
-      await drag("after");
+      // Below an open branch the line is drawn under all of it, not under its first row.
+      await drag(
+        "after",
+        overParent(".after\\:bg-sidebar-ring").filter({ has: threadLink(page, fixture.v2) }),
+        "bot-conversation-below-branch",
+      );
       await waitFor(
         "the edge of a top-level conversation takes the sub-chat out",
         30 * SECOND,
