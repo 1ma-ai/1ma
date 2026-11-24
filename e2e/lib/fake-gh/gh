@@ -3,12 +3,24 @@ import { appendFileSync, readFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
 const fixtures = process.env.E2E_GH_FIXTURES;
-if (args[0] !== "api" || fixtures === undefined) {
+const allowed = new RegExp(process.env.E2E_GH_ALLOW ?? "^/");
+const log = (line) => {
+  if (process.env.E2E_GH_LOG !== undefined) appendFileSync(process.env.E2E_GH_LOG, `${line}\n`);
+};
+const methodAt = args.findIndex((arg) => arg === "--method" || arg === "-X");
+const method = methodAt === -1 ? "GET" : (args[methodAt + 1] ?? "").toUpperCase();
+const writes = args.some((arg) =>
+  ["-f", "-F", "--field", "--raw-field", "--input"].some(
+    (flag) => arg === flag || arg.startsWith(`${flag}=`),
+  ),
+);
+const path = args.at(-1) ?? "";
+if (args[0] !== "api" || fixtures === undefined || method !== "GET" || writes || !allowed.test(path)) {
+  log(`${args[0] === "api" ? "REJECTED" : "NOT-API"} ${JSON.stringify(args)}`);
   process.stderr.write(`fake gh: unsupported call ${args.join(" ")}\n`);
   process.exit(2);
 }
-const path = args.at(-1) ?? "";
-if (process.env.E2E_GH_LOG !== undefined) appendFileSync(process.env.E2E_GH_LOG, `${path}\n`);
+log(path);
 const table = JSON.parse(readFileSync(fixtures, "utf8"));
 const answer = table[path] ?? table[path.split("?")[0]];
 if (answer === undefined) {
