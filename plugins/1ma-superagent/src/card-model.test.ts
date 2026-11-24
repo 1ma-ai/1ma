@@ -123,4 +123,22 @@ describe("question card", () => {
       expect(closeRequest(model)).toBeNull();
     }
   });
+
+  it("counts the questions still waiting from the card and then from each refresh", () => {
+    const { views } = play(initialCard(2), [
+      { type: "state", state: { ...openState, waiting: 0 } },
+      { type: "state", state: { ...openState, waiting: 3 } },
+      { type: "choose", optionId: "yes" },
+      { type: "decided", outcome: "applied" },
+      { type: "state", state: { ...openState, open: false, decided: "yes", waiting: 1 } },
+    ]);
+    expect(views.map((view) => view.waiting)).toEqual([
+      strings.moreWaiting(2),
+      null,
+      strings.moreWaiting(3),
+      strings.moreWaiting(3),
+      strings.moreWaiting(3),
+      strings.moreWaiting(1),
+    ]);
+  });
 });
