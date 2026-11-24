@@ -1,0 +1,38 @@
+{
+  "name": "bb-plugin-1ma-memory-gate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Новый ход чата ждёт в очереди, пока на машине не хватает памяти.",
+  "license": "MIT",
+  "files": [
+    "PLUGIN_OVERVIEW.md"
+  ],
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "bb plugin build"
+  },
+  "dependencies": {
+    "@get-bb/plugin-sdk": "0.6.132",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0"
+  },
+  "engines": {
+    "bb": ">=0.49",
+    "bbPluginSdk": ">=0.6.132"
+  },
+  "bb": {
+    "name": "1ma Memory Gate",
+    "description": "New chat turns wait in the queue while the machine is short of memory.",
+    "branding": {
+      "icon": "MemoryStick"
+    },
+    "server": "./server.ts",
+    "host": "./host.ts"
+  }
+}
