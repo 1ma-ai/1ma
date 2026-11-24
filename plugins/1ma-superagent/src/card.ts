@@ -26,6 +26,7 @@ export const questionPayloadSchema = cardSchema.extend({
   questionId: z.string(),
   token: z.string(),
   waiting: z.number().int().min(0),
+  unrecorded: z.boolean(),
 });
 export type QuestionPayload = z.infer<typeof questionPayloadSchema>;
 

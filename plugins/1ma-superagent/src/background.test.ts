@@ -54,10 +54,8 @@ describe("background work started from a tool call", () => {
       },
       warn: () => {},
       store,
-      kinds: new Map(),
       chat: () => "thr_bot",
       now: () => 1,
-      onAnswered: () => {},
       signal: new AbortController().signal,
       background,
     });

@@ -1,3 +1,4 @@
+import { questionPayloadSchema } from "./card.js";
 import type {
   Executor,
   ObservationResult,
@@ -61,4 +62,26 @@ export function fakeExecutor(
     queuedWaits: async () => [],
     ...overrides,
   };
+}
+
+interface CardHarness {
+  readonly behavior: {
+    callRpc(method: string, input: unknown): Promise<unknown>;
+    submitInteraction(id: string, value: unknown): void;
+  };
+}
+
+export async function answerCard(
+  harness: CardHarness,
+  card: { readonly id: string; readonly payload: unknown },
+  optionId: string,
+): Promise<unknown> {
+  const { questionId, token } = questionPayloadSchema.parse(card.payload);
+  const decided = await harness.behavior.callRpc("questions.v1.decide", {
+    questionId,
+    token,
+    optionId,
+  });
+  harness.behavior.submitInteraction(card.id, { token, optionId });
+  return decided;
 }

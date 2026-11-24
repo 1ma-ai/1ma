@@ -201,7 +201,14 @@ describe("1ma-superagent on two 1ma servers", () => {
     assert.equal(card.origin.pluginId, PLUGIN);
     const option = card.payload.data.options[0];
     assert.equal(option.recommended, true);
-    const answer = { value: { token: card.payload.data.token, optionId: option.id } };
+    const { questionId, token } = card.payload.data;
+    const decided = await control.rpc(PLUGIN, "questions.v1.decide", {
+      questionId,
+      token,
+      optionId: option.id,
+    });
+    assert.equal(decided.outcome, "applied");
+    const answer = { value: { token, optionId: option.id } };
     await control.api("POST", `/threads/${chats.bot}/interactions/${card.id}/respond`, answer);
     await assert.rejects(
       control.api("POST", `/threads/${chats.bot}/interactions/${card.id}/respond`, answer),

@@ -54,6 +54,8 @@ export const strings = {
   cardBroken: "Карточку не удалось показать.",
   cardDismiss: "Закрыть",
   cardNotRecorded: "Решение не записано. Попробуйте ещё раз.",
+  cardAnswerNotTaken:
+    "Прошлый ответ пришёл мимо кнопок карточки и не записан. Выберите вариант кнопкой.",
   cardDecided: (label: string) => `Решение уже записано: ${label}`,
   startChatDescription:
     "Propose to start a chat for the owner's task on the mac or linux 1ma server. Pass the owner's words verbatim as prompt. Nothing starts until the owner answers the card that appears in this chat; this call returns at once.",

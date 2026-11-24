@@ -108,10 +108,22 @@ async function pendingCards() {
   return list.filter((card) => card.status === "pending" && card.origin?.pluginId === PLUGIN);
 }
 
-async function respond(card, optionId) {
+function respondDirectly(card, optionId) {
   return control.api("POST", `/threads/${ids.bot}/interactions/${card.id}/respond`, {
     value: { token: card.payload.data.token, optionId },
   });
+}
+
+async function respond(card, optionId) {
+  const { questionId, token } = card.payload.data;
+  const { outcome } = await control.rpc(PLUGIN, "questions.v1.decide", {
+    questionId,
+    token,
+    optionId,
+  });
+  if (outcome !== "applied" && outcome !== "recorded")
+    throw new Error(`decision not recorded: ${outcome}`);
+  return respondDirectly(card, optionId);
 }
 
 async function waitCard(label, match, timeout = PASS) {
@@ -609,6 +621,36 @@ describe("1ma-superagent bot actions with a model turn", () => {
       (pending) => pending.payload.data.quote === prompt,
     );
     assert.deepEqual(repeated, []);
+  });
+
+  it("takes no decision from an answer that bypassed the card, also through a crash right after it", async () => {
+    await clearCards();
+    const known = await knownActions();
+    const prompt = "[stub:reply direct task]";
+    await sayToBot(startCall(prompt, "direct task"));
+    const created = await newestAction(known);
+    const card = await waitCard("start card", (data) => data.quote === prompt);
+    const { questionId } = card.payload.data;
+    await respondDirectly(card, "start");
+    const again = await waitCard(
+      "the same question asked again with a note",
+      (data) => data.questionId === questionId && data.unrecorded === true,
+    );
+    assert.notEqual(again.id, card.id);
+    assert.equal((await action(created.id)).state, "proposed");
+    await respondDirectly(again, "start");
+    await control.crash();
+    control.start();
+    await control.waitReady();
+    const shown = await waitCard(
+      "the question shown again after the crash",
+      (data) => data.questionId === questionId,
+    );
+    assert.notEqual(shown.id, again.id);
+    await new Promise((resolve) => setTimeout(resolve, 70_000));
+    assert.equal((await action(created.id)).state, "proposed");
+    assert.deepEqual(postsTitled("direct task"), []);
+    await respond(shown, "no");
   });
 
   it("shows the machine as the reason a new chat waits behind the executor's concurrency limit", async () => {

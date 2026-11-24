@@ -158,10 +158,8 @@ export function createPlugin(options: SuperagentOptions = {}) {
       warn: (message) => bb.log.warn(message),
       background,
       store: questions,
-      kinds,
       chat: () => (config.role === "control" ? config.mainBotThreadId : null),
       now: Date.now,
-      onAnswered: () => afterAnswer(),
       signal: lifecycle.signal,
       changed: () => bb.rpc.experimental_invalidate([QUESTIONS_TAG]),
     });

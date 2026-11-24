@@ -1,8 +1,12 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
-import { z } from "zod";
 import { describe, expect, it } from "vitest";
 import type { Executor, ServerId } from "./src/observation.js";
-import { fakeExecutor as makeExecutor, snapshot, threadSummary } from "./src/test-helpers.js";
+import {
+  answerCard,
+  fakeExecutor as makeExecutor,
+  snapshot,
+  threadSummary,
+} from "./src/test-helpers.js";
 import { PASS_SCHEDULE_NAME, STARTUP_SERVICE_NAME, createPlugin } from "./server.js";
 
 function fakeExecutor(serverId: ServerId, threads: string[], calls: ServerId[]): Executor {
@@ -193,8 +197,7 @@ describe("a pass whose train journal read throws", () => {
     );
     const [card] = harness.inspection.pendingInteractions;
     if (card === undefined) throw new Error("no start card");
-    const payload = z.object({ token: z.string() }).passthrough().parse(card.payload);
-    harness.behavior.submitInteraction(card.id, { token: payload.token, optionId: "start" });
+    await answerCard(harness, card, "start");
     const deadline = Date.now() + 5_000;
     const ambiguous = () =>
       harness.inspection.pendingInteractions.find(

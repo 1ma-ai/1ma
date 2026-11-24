@@ -24,6 +24,7 @@ export interface QuestionRow {
   remindAt: number | null;
   createdAt: number;
   expiresAt: number;
+  unrecordedAnswer: boolean;
 }
 
 interface RawQuestion {
@@ -41,6 +42,7 @@ interface RawQuestion {
   remind_at: number | null;
   created_at: number;
   expires_at: number | null;
+  unrecorded_answer: number;
 }
 
 const STATES: readonly QuestionState[] = [
@@ -70,6 +72,7 @@ function toRow(raw: RawQuestion): QuestionRow {
     remindAt: raw.remind_at,
     createdAt: raw.created_at,
     expiresAt: raw.expires_at ?? raw.created_at + QUESTION_TIMEOUT_MS,
+    unrecordedAnswer: raw.unrecorded_answer === 1,
   };
 }
 
@@ -188,6 +191,15 @@ export class QuestionStore {
         `UPDATE questions SET state = 'queued', token = NULL, remind_at = ? WHERE id = ? AND token = ? AND state = 'open'`,
       )
       .run(remindAt, id, token);
+  }
+
+  requeueUnrecorded(id: string, token: string): void {
+    this.#db
+      .prepare(
+        `UPDATE questions SET state = 'queued', token = NULL, remind_at = NULL, unrecorded_answer = 1
+         WHERE id = ? AND token = ? AND state = 'open'`,
+      )
+      .run(id, token);
   }
 
   closeAs(id: string, token: string, state: "canceled" | "expired"): void {

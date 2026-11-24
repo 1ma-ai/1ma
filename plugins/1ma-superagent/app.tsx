@@ -76,6 +76,9 @@ function QuestionCard({ interaction, submit, cancel }: PluginPendingInteractionP
   return (
     <div className="space-y-3 text-sm">
       <p className="font-medium">{card.title}</p>
+      {card.unrecorded ? (
+        <p className="text-xs text-destructive">{strings.cardAnswerNotTaken}</p>
+      ) : null}
       <dl className="space-y-2">
         <div>
           <dt className="text-xs text-muted-foreground">{strings.cardObserved}</dt>

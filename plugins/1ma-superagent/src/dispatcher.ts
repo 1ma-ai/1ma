@@ -1,10 +1,8 @@
 import type { PluginUi } from "@get-bb/plugin-sdk";
 import type { Background } from "./background.js";
 import {
-  type AnswerOutcome,
   QUESTION_RENDERER,
   QUESTION_TIMEOUT_MS,
-  type QuestionKind,
   type QuestionPayload,
   type QuestionStore,
   answerSchema,
@@ -18,10 +16,8 @@ export interface DispatcherDeps {
   readonly warn: (message: string) => void;
   readonly background: Background;
   readonly store: QuestionStore;
-  readonly kinds: ReadonlyMap<string, QuestionKind>;
   readonly chat: () => string | null;
   readonly now: () => number;
-  readonly onAnswered: (outcome: AnswerOutcome) => void;
   readonly signal: AbortSignal;
   readonly changed?: () => void;
 }
@@ -51,7 +47,13 @@ export class QuestionDispatcher {
     if (!this.#deps.store.markOpen(question.id, chat, token, now)) return;
     this.#live = { questionId: question.id, token };
     const waiting = Math.max(0, this.#deps.store.waiting().length - 1);
-    const payload: QuestionPayload = { ...question.card, questionId: question.id, token, waiting };
+    const payload: QuestionPayload = {
+      ...question.card,
+      questionId: question.id,
+      token,
+      waiting,
+      unrecorded: question.unrecordedAnswer,
+    };
     void this.#deps.background
       .run(() =>
         this.#deps.requestInput(
@@ -82,20 +84,9 @@ export class QuestionDispatcher {
           this.#live = null;
           if (this.#deps.signal.aborted) return;
           if (result.outcome === "submitted") {
-            const parsed = answerSchema.safeParse(result.value);
-            const outcome: AnswerOutcome =
-              parsed.success && parsed.data.token === token
-                ? this.#deps.store.answer(
-                    question.id,
-                    token,
-                    parsed.data.optionId,
-                    this.#deps.kinds,
-                    this.#deps.now(),
-                  )
-                : "rejected";
-            if (outcome === "rejected" || outcome === "unknown")
-              this.#deps.store.requeue(question.id, token, null);
-            this.#deps.onAnswered(outcome);
+            const recorded = this.#deps.store.get(question.id);
+            if (recorded?.state === "open" && recorded.token === token)
+              this.#deps.store.requeueUnrecorded(question.id, token);
           } else if (result.reason === "user") {
             this.#deps.store.closeAs(question.id, token, "canceled");
           } else if (result.reason === "timeout") {

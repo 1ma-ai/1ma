@@ -4,7 +4,7 @@ import { PASS_SCHEDULE_NAME, createPlugin } from "../server.js";
 import type { SpawnRequest } from "./observation.js";
 import { questionPayloadSchema } from "./questions.js";
 import { START_TOOL } from "./start-tool.js";
-import { fakeExecutor, snapshot } from "./test-helpers.js";
+import { answerCard, fakeExecutor, snapshot } from "./test-helpers.js";
 
 const BOT = "thr_bot";
 const PROMPT = "Rename the setting, nothing else. Do not touch the release scripts.";
@@ -64,7 +64,7 @@ describe("sa_start_chat", () => {
     expect(card.payload.options[0]).toMatchObject({ id: "start", recommended: true });
     await harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
     expect(spawned).toEqual([]);
-    harness.behavior.submitInteraction(card.id, { token: card.payload.token, optionId: "start" });
+    await answerCard(harness, card, "start");
     await new Promise((resolve) => setTimeout(resolve, 0));
     await harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
     await harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
@@ -81,7 +81,7 @@ describe("sa_start_chat", () => {
     const { harness, spawned, propose } = await setup();
     await propose();
     const card = openCard(harness);
-    harness.behavior.submitInteraction(card.id, { token: card.payload.token, optionId: "no" });
+    await answerCard(harness, card, "no");
     await new Promise((resolve) => setTimeout(resolve, 0));
     await harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
     expect(spawned).toEqual([]);

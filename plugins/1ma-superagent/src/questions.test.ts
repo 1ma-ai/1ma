@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import { inPlace } from "./background.js";
 import { QuestionDispatcher } from "./dispatcher.js";
 import {
-  type AnswerOutcome,
   type Card,
   type QuestionKind,
   QUESTION_TIMEOUT_MS,
@@ -46,20 +45,20 @@ function setup() {
   };
   const kinds = new Map([["test", kind]]);
   const { bb, harness } = createFakePluginHost({ pluginId: "1ma-superagent" });
-  const outcomes: AnswerOutcome[] = [];
-  const lifecycle = new AbortController();
-  const makeDispatcher = () =>
+  const makeDispatcher = (signal = new AbortController().signal) =>
     new QuestionDispatcher({
       requestInput: (request, requestOptions) => bb.ui.requestInput(request, requestOptions),
       warn: () => {},
       background: inPlace,
       store,
-      kinds,
       chat: () => CHAT,
       now: () => 1_000,
-      onAnswered: (outcome) => outcomes.push(outcome),
-      signal: lifecycle.signal,
+      signal,
     });
+  const decide = (request: { payload: unknown }, optionId: string) => {
+    const { questionId, token } = payloadOf(request);
+    return store.answer(questionId, token, optionId, kinds, 1_500);
+  };
   const ask = (key: string, subject = key) => {
     versions.set(subject, "v1");
     return store.ask(
@@ -72,7 +71,7 @@ function setup() {
     store,
     versions,
     answers,
-    outcomes,
+    decide,
     makeDispatcher,
     ask,
     pending,
@@ -118,39 +117,92 @@ describe("question dispatcher", () => {
     expect(store.waiting()).toHaveLength(1);
   });
 
-  it("applies an answer once and opens the next card", async () => {
-    const { makeDispatcher, ask, pending, harness, answers, outcomes, settle } = setup();
+  it("applies a decision once and opens the next card when the card closes", async () => {
+    const { makeDispatcher, ask, pending, harness, answers, decide, settle } = setup();
     ask("first");
     ask("second");
     makeDispatcher().dispatch();
     const first = pending()[0];
     if (first === undefined) throw new Error("no card");
+    expect(decide(first, "yes")).toBe("applied");
     harness.behavior.submitInteraction(first.id, {
       token: payloadOf(first).token,
       optionId: "yes",
     });
     await settle();
     expect(answers).toEqual([{ subject: "first", optionId: "yes" }]);
-    expect(outcomes).toEqual(["applied"]);
     expect(pending().map((request) => payloadOf(request).title)).toEqual(["second"]);
   });
 
-  it("does not apply an answer to a card whose work changed meanwhile", async () => {
-    const { makeDispatcher, ask, pending, harness, answers, outcomes, versions, store, settle } =
-      setup();
+  it("does not apply a decision to a card whose work changed meanwhile", () => {
+    const { makeDispatcher, ask, pending, answers, versions, store, decide } = setup();
     ask("first");
     makeDispatcher().dispatch();
     versions.set("first", "v2");
     const first = pending()[0];
     if (first === undefined) throw new Error("no card");
+    expect(decide(first, "yes")).toBe("stale");
+    expect(answers).toEqual([]);
+    expect(store.latest("first")?.state).toBe("stale");
+  });
+
+  it("does not take an answer that closed the card without a recorded decision, and asks again with a note", async () => {
+    const { makeDispatcher, ask, pending, harness, answers, store, settle } = setup();
+    const id = ask("first");
+    if (id === null) throw new Error("not asked");
+    makeDispatcher().dispatch();
+    const first = pending()[0];
+    if (first === undefined) throw new Error("no card");
+    expect(payloadOf(first).unrecorded).toBe(false);
     harness.behavior.submitInteraction(first.id, {
       token: payloadOf(first).token,
       optionId: "yes",
     });
     await settle();
     expect(answers).toEqual([]);
-    expect(outcomes).toEqual(["stale"]);
-    expect(store.latest("first")?.state).toBe("stale");
+    expect(store.get(id)?.state).toBe("open");
+    const again = pending().at(-1);
+    if (again === undefined || again.id === first.id) throw new Error("not asked again");
+    expect(payloadOf(again)).toMatchObject({ questionId: id, unrecorded: true });
+  });
+
+  it("keeps the recorded decision when the closing answer carries another option", async () => {
+    const { makeDispatcher, ask, pending, harness, answers, store, decide, settle } = setup();
+    const id = ask("first");
+    if (id === null) throw new Error("not asked");
+    makeDispatcher().dispatch();
+    const first = pending()[0];
+    if (first === undefined) throw new Error("no card");
+    expect(decide(first, "yes")).toBe("applied");
+    harness.behavior.submitInteraction(first.id, {
+      token: payloadOf(first).token,
+      optionId: "no",
+    });
+    await settle();
+    expect(answers).toEqual([{ subject: "first", optionId: "yes" }]);
+    expect(store.get(id)).toMatchObject({ state: "answered", answer: "yes" });
+    expect(pending()).toHaveLength(0);
+  });
+
+  it("keeps the question open with nothing done when the plugin stops right after an answer that bypassed the card", async () => {
+    const { makeDispatcher, ask, pending, harness, answers, store, settle } = setup();
+    const id = ask("first");
+    if (id === null) throw new Error("not asked");
+    const lifecycle = new AbortController();
+    makeDispatcher(lifecycle.signal).dispatch();
+    const first = pending()[0];
+    if (first === undefined) throw new Error("no card");
+    harness.behavior.submitInteraction(first.id, {
+      token: payloadOf(first).token,
+      optionId: "yes",
+    });
+    lifecycle.abort();
+    await settle();
+    expect(store.get(id)?.state).toBe("open");
+    makeDispatcher().dispatch();
+    expect(store.get(id)?.state).toBe("open");
+    expect(pending().filter((request) => payloadOf(request).questionId === id)).toHaveLength(1);
+    expect(answers).toEqual([]);
   });
 
   it("reopens a card after a reload and refuses an answer meant for the old card", async () => {
@@ -166,17 +218,13 @@ describe("question dispatcher", () => {
     expect(answers).toEqual([]);
   });
 
-  it("refuses an answer with a forged option and keeps the question waiting", async () => {
-    const { makeDispatcher, ask, pending, harness, answers, store, settle } = setup();
+  it("refuses a decision with a forged option and keeps the question waiting", () => {
+    const { makeDispatcher, ask, pending, answers, store, decide } = setup();
     ask("first");
     makeDispatcher().dispatch();
     const first = pending()[0];
     if (first === undefined) throw new Error("no card");
-    harness.behavior.submitInteraction(first.id, {
-      token: payloadOf(first).token,
-      optionId: "launch-everything",
-    });
-    await settle();
+    expect(decide(first, "launch-everything")).toBe("rejected");
     expect(answers).toEqual([]);
     expect(store.waiting()).toHaveLength(1);
   });
@@ -193,7 +241,7 @@ describe("question dispatcher", () => {
   });
 
   it("records a decision before the card closes and does not apply it again when the card's answer arrives", async () => {
-    const { makeDispatcher, ask, pending, harness, answers, outcomes, store, settle } = setup();
+    const { makeDispatcher, ask, pending, harness, answers, store, settle } = setup();
     const id = ask("first");
     ask("second");
     if (id === null) throw new Error("not asked");
@@ -207,7 +255,6 @@ describe("question dispatcher", () => {
     harness.behavior.submitInteraction(first.id, { token, optionId: "yes" });
     await settle();
     expect(answers).toEqual([{ subject: "first", optionId: "yes" }]);
-    expect(outcomes).toEqual(["recorded"]);
     expect(store.latest("first")?.state).toBe("answered");
     expect(pending().map((request) => payloadOf(request).title)).toEqual(["second"]);
   });
@@ -253,10 +300,8 @@ describe("question dispatcher", () => {
       warn: () => {},
       background: inPlace,
       store,
-      kinds: new Map(),
       chat: () => CHAT,
       now: () => 1_000,
-      onAnswered: () => {},
       signal: new AbortController().signal,
     });
     dispatcher.dispatch();
@@ -279,10 +324,8 @@ describe("question dispatcher", () => {
       warn: () => {},
       background: inPlace,
       store,
-      kinds: new Map(),
       chat: () => CHAT,
       now: () => 1_000,
-      onAnswered: () => {},
       signal: lifecycle.signal,
     });
     dispatcher.dispatch();
