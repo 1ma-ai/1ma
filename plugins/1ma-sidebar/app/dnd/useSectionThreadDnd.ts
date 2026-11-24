@@ -1019,8 +1019,10 @@ export function useSectionThreadDnd({
   const nestCandidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  const [readyNestCandidate, setReadyNestCandidate] =
-    useState<NestHoverCandidate | null>(null);
+  // 1ma: the render that the timer asks for already reads the ref, while the
+  // collision handler it calls is still the one of the render before.
+  const readyNestCandidateRef = useRef<NestHoverCandidate | null>(null);
+  const [, setReadyNestCandidate] = useState<NestHoverCandidate | null>(null);
   const clearNestCandidate = useCallback(() => {
     if (nestCandidateTimerRef.current !== null) {
       clearTimeout(nestCandidateTimerRef.current);
@@ -1032,7 +1034,7 @@ export function useSectionThreadDnd({
     (threadId: string | null): boolean => {
       const current = nestCandidateRef.current;
       if (current !== null && current.threadId === threadId) {
-        return current === readyNestCandidate;
+        return current === readyNestCandidateRef.current;
       }
       clearNestCandidate();
       if (threadId === null) return false;
@@ -1040,11 +1042,12 @@ export function useSectionThreadDnd({
       nestCandidateRef.current = candidate;
       nestCandidateTimerRef.current = setTimeout(() => {
         nestCandidateTimerRef.current = null;
+        readyNestCandidateRef.current = candidate;
         setReadyNestCandidate(candidate);
       }, NEST_HOVER_DELAY_MS);
       return false;
     },
-    [clearNestCandidate, readyNestCandidate],
+    [clearNestCandidate],
   );
   const isPinnedItem = useCallback(
     (itemId: string) =>

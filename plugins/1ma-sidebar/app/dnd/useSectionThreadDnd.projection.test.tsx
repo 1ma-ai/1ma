@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
 
-import { act, cleanup } from "@testing-library/react";
-import type {
-  CollisionDetection,
-  DragCancelEvent,
-  DragEndEvent,
-  DragOverEvent,
-  DragStartEvent,
+import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import {
+  DndContext,
+  useDraggable,
+  useDroppable,
+  type CollisionDetection,
+  type DragCancelEvent,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
 } from "@dnd-kit/core";
 import {
   makeSidebarEnvironment,
@@ -923,5 +926,66 @@ describe("useSectionThreadDnd nest hover delay", () => {
     );
     act(() => props().onDragStart?.(dragStart("dragged")));
     expect(collide(114)).toEqual([]);
+  });
+
+  it("marks the row while the pointer rests on it without moving", async () => {
+    const result: { current: SectionThreadDndState | null } = { current: null };
+    const at = (top: number) => (element: HTMLElement | null) => {
+      if (element)
+        element.getBoundingClientRect = () => new DOMRect(0, top, 200, 28);
+    };
+    function Rows() {
+      const dragged = useDraggable({ id: "dragged" });
+      const target = useDroppable({ id: rowDroppableId });
+      return (
+        <>
+          <div
+            ref={(element) => {
+              at(200)(element);
+              dragged.setNodeRef(element);
+            }}
+            data-testid="dragged"
+            {...dragged.listeners}
+          />
+          <div
+            ref={(element) => {
+              at(100)(element);
+              target.setNodeRef(element);
+            }}
+          />
+        </>
+      );
+    }
+    function Harness() {
+      result.current = useSectionThreadDnd({
+        containerId: CHRONOLOGICAL_CONTAINER_ID,
+        enabled: true,
+        rootItems: ROOT_ITEMS,
+        topLevelSectionOrder: ["pinned", "section:a", "section:b", "threads"],
+        onTopLevelSectionOrderChange: vi.fn(),
+        pinnedReorderPending: false,
+        pinnedThreads: [],
+        pinnedRootItems: [],
+        pinnedRootNodes: [],
+        onReorderPinnedThread: vi.fn(),
+      });
+      return (
+        <DndContext {...result.current!.dndContextProps}>
+          <Rows />
+        </DndContext>
+      );
+    }
+    const { getByTestId } = renderSlot({ component: Harness }, {});
+
+    fireEvent.mouseDown(getByTestId("dragged"), { button: 0, clientX: 20, clientY: 214 });
+    fireEvent.mouseMove(document, { clientX: 30, clientY: 214 });
+    await waitFor(() => expect(result.current!.activeThread?.id).toBe("dragged"));
+    fireEvent.mouseMove(document, { clientX: 20, clientY: 114 });
+    await act(() => new Promise((resolve) => setTimeout(resolve, NEST_HOVER_DELAY_MS / 2)));
+    expect(result.current!.nestTarget).toBeNull();
+    await waitFor(() =>
+      expect(result.current!.nestTarget).toMatchObject({ threadId: "in-b", state: "valid" }),
+    );
+    fireEvent.mouseUp(document);
   });
 });
