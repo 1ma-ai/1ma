@@ -5,7 +5,9 @@ import type { Completeness, Executor, ServerId, ThreadMetadataRow } from "./obse
 import { runPrPass } from "./pr-pass.js";
 import { PrStore } from "./pr-store.js";
 import { toPullRequestDto } from "./work-rpc.js";
-import { repoPolicy } from "./repos.js";
+import { askAboutConflicts, conflictKind } from "./kinds/pr-conflict.js";
+import { QuestionStore } from "./questions.js";
+import { type RepoPolicy, repoPolicy } from "./repos.js";
 import { MIGRATIONS } from "./schema.js";
 import { Store } from "./store.js";
 import { fakeExecutor, threadSummary } from "./test-helpers.js";
@@ -40,6 +42,7 @@ function setup(options: {
   metadata?: Record<string, unknown>;
   pulls: PullRequest[];
   models?: Record<string, string>;
+  policy?: RepoPolicy;
 }) {
   const db = new Database(":memory:");
   for (const statement of MIGRATIONS) db.exec(statement);
@@ -99,7 +102,7 @@ function setup(options: {
       store,
       prStore,
       github,
-      policy,
+      policy: options.policy ?? policy,
       executors: new Map([
         ["mac", executor("mac")],
         ["linux", executor("linux")],
@@ -213,6 +216,110 @@ describe("runPrPass", () => {
       t.failing.add("linux");
       await t.run(20_000);
       expectKept(t.prStore);
+    });
+
+    describe("from a second chat's claim, and records the conflict", () => {
+      const contested = () => {
+        const t = setup({
+          threads: {
+            mac: [],
+            linux: [
+              { id: "thr_linux", branch: "feature/7" },
+              { id: "thr_other", branch: "feature/7" },
+            ],
+          },
+          metadata: { thr_linux: claimsOf(7) },
+          pulls: [pull(7)],
+        });
+        return t;
+      };
+      const expectContested = (prStore: PrStore) =>
+        expect(prStore.get("example/app", 7)).toMatchObject({
+          linkKind: "claim",
+          deliveryThreadId: "thr_linux",
+          linkConfirmedAt: 10_000,
+          conflictChat: "linux:thr_other",
+        });
+
+      it("when its chat was archived", async () => {
+        const t = contested();
+        await t.run(10_000);
+        if (t.metadata !== undefined) t.metadata.thr_other = claimsOf(7);
+        t.store.applySnapshot(
+          "linux",
+          {
+            threads: [threadSummary({ threadId: "thr_other", environmentId: "env_thr_other" })],
+            environments: [
+              { environmentId: "env_thr_other", projectId: "proj_app", branch: "feature/7" },
+            ],
+            projects: [{ projectId: "proj_app", gitRemoteUrl: REMOTE }],
+          },
+          { observedAt: 2, completeness: "complete" },
+          null,
+        );
+        await t.run(20_000);
+        expectContested(t.prStore);
+        const questions = new QuestionStore(t.db);
+        askAboutConflicts(t.prStore, questions, 20_000);
+        askAboutConflicts(t.prStore, questions, 21_000);
+        const [question] = questions.waiting();
+        expect(question?.kind).toBe("pr_conflict");
+        expect(questions.waiting()).toHaveLength(1);
+        if (question === undefined) throw new Error("no question");
+        expect(conflictKind(t.prStore, t.store).onAnswer(question, "move", 20_500)).toBeUndefined();
+        expect(t.prStore.get("example/app", 7)).toMatchObject({
+          linkKind: "manual",
+          deliveryThreadId: "thr_other",
+          conflictChat: null,
+        });
+      });
+
+      it("when its server did not answer", async () => {
+        const t = setup({
+          threads: {
+            mac: [{ id: "thr_mac", branch: "feature/7" }],
+            linux: [{ id: "thr_other", branch: "feature/7" }],
+          },
+          metadata: { thr_mac: claimsOf(7) },
+          pulls: [pull(7, { author: "shared-bot" })],
+          policy: repoPolicy(
+            [
+              {
+                repo: "example/app",
+                accounts: { mac: ["shared-bot"], linux: ["shared-bot"] },
+              },
+            ],
+            [],
+          ),
+        });
+        await t.run(10_000);
+        expect(t.prStore.get("example/app", 7)?.deliveryThreadId).toBe("thr_mac");
+        if (t.metadata !== undefined) t.metadata.thr_other = claimsOf(7);
+        await t.run(20_000, { mac: "failed" });
+        expect(t.prStore.get("example/app", 7)).toMatchObject({
+          linkKind: "claim",
+          deliveryServerId: "mac",
+          deliveryThreadId: "thr_mac",
+          linkConfirmedAt: 10_000,
+          conflictChat: "linux:thr_other",
+        });
+      });
+
+      it("but moves it once the linked chat was read without its claim", async () => {
+        const t = contested();
+        await t.run(10_000);
+        if (t.metadata !== undefined) {
+          t.metadata.thr_linux = { claims: [] };
+          t.metadata.thr_other = claimsOf(7);
+        }
+        await t.run(20_000);
+        expect(t.prStore.get("example/app", 7)).toMatchObject({
+          linkKind: "claim",
+          deliveryThreadId: "thr_other",
+          linkConfirmedAt: 20_000,
+          conflictChat: null,
+        });
+      });
     });
 
     it("and drops it once its chat was read without the claim", async () => {

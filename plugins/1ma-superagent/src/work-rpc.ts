@@ -33,6 +33,7 @@ const pullRequestSchema = z.object({
     branchHint: z.array(z.string()),
     basis: z.enum(["claimed by the chat", "set by the owner"]).nullable(),
     confirmedAt: z.number().nullable(),
+    conflictChat: z.string().nullable(),
   }),
   provenance: z.literal("unknown"),
   chatModels: z.object({
@@ -176,6 +177,7 @@ export function toPullRequestDto(link: PrLinkRow, prStore: PrStore): PullRequest
             ? "set by the owner"
             : null,
       confirmedAt: link.linkConfirmedAt,
+      conflictChat: link.conflictChat,
     },
     provenance: "unknown",
     chatModels: {

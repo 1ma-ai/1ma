@@ -182,8 +182,11 @@ export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] 
       current?.linkKind === "claim" &&
       current.deliveryThreadId !== null &&
       !read.has(`${current.deliveryServerId}:${current.deliveryThreadId}`);
-    const decision: LinkDecision =
-      decided.kind === "none" && unobserved ? { kind: "kept" } : decided;
+    const decision: LinkDecision = !unobserved
+      ? decided
+      : decided.kind === "claim"
+        ? { kind: "kept", conflict: `${decided.serverId}:${decided.threadId}` }
+        : { kind: "kept", conflict: null };
     deps.prStore.record(pull, decision, branchHint(threads, pull), deps.now);
     const link = deps.prStore.get(pull.repo, pull.number);
     if (link?.linkKind !== "claim" || pull.state !== "open" || link.deliveryServerId === null)

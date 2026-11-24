@@ -39,6 +39,7 @@ import { runSteps } from "./src/pass-steps.js";
 import { RESULT_KIND, runReports } from "./src/reports.js";
 import { START_TOOL, registerStartTool } from "./src/start-tool.js";
 import { UNLINKED_KIND, askAboutUnlinked, unlinkedKind } from "./src/kinds/unlinked-pr.js";
+import { CONFLICT_KIND, askAboutConflicts, conflictKind } from "./src/kinds/pr-conflict.js";
 import { PrStore } from "./src/pr-store.js";
 import { type QuestionKind, QuestionStore } from "./src/questions.js";
 import { repoPolicy } from "./src/repos.js";
@@ -133,6 +134,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
     const claimant = `gen_${randomUUID()}`;
     const kinds = new Map<string, QuestionKind>([
       [UNLINKED_KIND, unlinkedKind(prStore, store)],
+      [CONFLICT_KIND, conflictKind(prStore, store)],
       [START_KIND, startKind(actions)],
       [UNKNOWN_KIND, unknownKind(actions)],
       [AMBIGUOUS_KIND, ambiguousKind()],
@@ -195,6 +197,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
                     "unlinked PR questions",
                     () => askAboutUnlinked(prStore, questions, policy(), now),
                   ],
+                  ["PR claim conflicts", () => askAboutConflicts(prStore, questions, now)],
                   [
                     "bot actions",
                     () =>
