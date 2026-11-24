@@ -50,7 +50,17 @@ function claim(number, branch) {
 writeFileSync(ghFixtures, JSON.stringify({}));
 writeFileSync(
   journal,
-  `${JSON.stringify({ author: "release-train", repo: "example/app", attempt: "t1", event: "merged", base_sha: HEAD_A, final_sha: HEAD_B })}\n`,
+  [{ outcome: "push-intent", base: HEAD_A }, { outcome: "merged" }]
+    .map((entry) =>
+      JSON.stringify({
+        author: "release-train",
+        repo: "example/app",
+        token: "t1",
+        final_sha: HEAD_B,
+        ...entry,
+      }),
+    )
+    .join("\n") + "\n",
 );
 
 const control = new Server({
