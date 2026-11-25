@@ -62,6 +62,8 @@ export const strings = {
   cardRecommendation: "Рекомендация",
   cardBroken: "Карточку не удалось показать.",
   cardDismiss: "Закрыть",
+  superagentInactive:
+    "The superagent on this server is not the control one or its pass is switched off; nothing was proposed.",
   settingsChanged:
     "The superagent's settings changed while this was checked; nothing was proposed. Call the tool again.",
   cardNotRecorded: "Решение не записано. Попробуйте ещё раз.",

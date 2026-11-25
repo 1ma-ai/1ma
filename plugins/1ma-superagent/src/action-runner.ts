@@ -1,17 +1,17 @@
 import { strings } from "../strings.js";
 import { type ActionRow, type ActionStore, labelOf, labelSchema } from "./actions.js";
+import { type Guard, type PluginSettings, guardOf } from "./admission.js";
 import { describeError } from "./executors/paging.js";
 import { repoFromRemoteUrl } from "./github/names.js";
 import {
   type Completeness,
   DefiniteSpawnFailure,
-  type Executor,
   type ServerId,
   type SpawnedThread,
   isLive,
 } from "./observation.js";
 import type { Card, QuestionKind, QuestionStore } from "./questions.js";
-import { type RepoPolicy, isExcludedRepo } from "./repos.js";
+import { isExcludedRepo } from "./repos.js";
 
 export const UNKNOWN_AFTER_MS = 10 * 60 * 1000;
 export const WAIT_MS = 30 * 60 * 1000;
@@ -24,16 +24,11 @@ export const NOTICE_KIND = "notice";
 export const STOPPING_LATE = "stopping late";
 export const STOPPED_LATE = "stopped late";
 
-export interface ActionSettings {
-  readonly generation: number;
-  readonly policy: RepoPolicy;
-  readonly executors: ReadonlyMap<ServerId, Executor>;
-}
-
 export interface ActionDeps {
   readonly actions: ActionStore;
   readonly questions: QuestionStore;
-  readonly settings: () => ActionSettings;
+  readonly read: PluginSettings;
+  readonly settings: () => PluginSettings;
   readonly observed: ReadonlyMap<ServerId, Completeness>;
   readonly claimant: string;
   readonly now: () => number;
@@ -146,9 +141,9 @@ function cancelForTarget(deps: ActionDeps, action: ActionRow, reason: string): v
   );
 }
 
-async function send(deps: ActionDeps, action: ActionRow): Promise<void> {
-  const before = deps.settings();
-  const executor = before.executors.get(action.serverId);
+async function send(deps: ActionDeps, action: ActionRow, admit: Guard): Promise<void> {
+  const { read } = deps;
+  const executor = read.executors.get(action.serverId);
   if (executor === undefined) {
     deps.actions.transition(action.id, ["confirmed"], "failed", deps.now(), {
       result: "server not configured",
@@ -156,7 +151,7 @@ async function send(deps: ActionDeps, action: ActionRow): Promise<void> {
     return;
   }
   const proposed = action.params.repo ?? null;
-  if (isExcludedRepo(before.policy, proposed)) {
+  if (isExcludedRepo(read.policy, proposed)) {
     cancelForTarget(deps, action, strings.targetExcluded);
     return;
   }
@@ -167,18 +162,12 @@ async function send(deps: ActionDeps, action: ActionRow): Promise<void> {
     deps.warn(`checking the target of ${action.id}: ${describeError(error)}`);
     return;
   }
-  if (deps.signal.aborted) return;
-  const after = deps.settings();
-  if (isExcludedRepo(after.policy, proposed)) {
-    cancelForTarget(deps, action, strings.targetExcluded);
-    return;
-  }
-  if (after.generation !== before.generation) return;
+  if (deps.signal.aborted || !admit()) return;
   if (repo !== proposed) {
     cancelForTarget(deps, action, strings.targetMoved);
     return;
   }
-  if (isExcludedRepo(after.policy, repo)) {
+  if (isExcludedRepo(read.policy, repo)) {
     cancelForTarget(deps, action, strings.targetExcluded);
     return;
   }
@@ -215,7 +204,8 @@ function matchingRows(rows: readonly SpawnedThread[], action: ActionRow): Spawne
 }
 
 export async function runActions(deps: ActionDeps): Promise<void> {
-  if (deps.signal.aborted) return;
+  const admit = guardOf(deps.read, deps.settings);
+  if (deps.signal.aborted || !admit()) return;
   for (const stale of deps.actions.inStates(["sending"])) {
     if (stale.claimedBy !== deps.claimant) {
       deps.actions.transition(stale.id, ["sending"], "unknown", deps.now(), {
@@ -223,8 +213,10 @@ export async function runActions(deps: ActionDeps): Promise<void> {
       });
     }
   }
-  await Promise.all(deps.actions.inStates(["confirmed"]).map((action) => send(deps, action)));
-  if (deps.signal.aborted) return;
+  await Promise.all(
+    deps.actions.inStates(["confirmed"]).map((action) => send(deps, action, admit)),
+  );
+  if (deps.signal.aborted || !admit()) return;
 
   const unknown = deps.actions.inStates(["unknown"]);
   const late = deps.actions
@@ -238,10 +230,9 @@ export async function runActions(deps: ActionDeps): Promise<void> {
     );
   const servers = new Set([...unknown, ...late].map((action) => action.serverId));
   const spawned = new Map<ServerId, SpawnedThread[]>();
-  const read = deps.settings();
   await Promise.all(
     [...servers].map(async (serverId) => {
-      const executor = read.executors.get(serverId);
+      const executor = deps.read.executors.get(serverId);
       if (executor === undefined || deps.observed.get(serverId) === "failed") return;
       try {
         spawned.set(serverId, await executor.findSpawned(deps.signal));
@@ -250,6 +241,7 @@ export async function runActions(deps: ActionDeps): Promise<void> {
       }
     }),
   );
+  if (deps.signal.aborted || !admit()) return;
 
   const now = deps.now();
   for (const action of unknown) {
@@ -315,7 +307,7 @@ export async function runActions(deps: ActionDeps): Promise<void> {
   await Promise.all(
     late.map(async (action) => {
       const rows = spawned.get(action.serverId);
-      const executor = read.executors.get(action.serverId);
+      const executor = deps.read.executors.get(action.serverId);
       if (rows === undefined || executor === undefined) return;
       const revived = action.result === STOPPED_LATE;
       const found = matchingRows(rows, action)
@@ -324,10 +316,10 @@ export async function runActions(deps: ActionDeps): Promise<void> {
       if (found.length === 0) return;
       const stopped = await Promise.all(
         found.map(async (threadId) => {
-          if (deps.settings().generation !== read.generation) return null;
           try {
-            await executor.clearQueueAndStop(threadId, deps.signal);
-            return (await executor.queuedWaits(threadId, deps.signal)).length === 0;
+            if (!(await executor.clearQueueAndStop(threadId, admit, deps.signal))) return null;
+            const empty = (await executor.queuedWaits(threadId, deps.signal)).length === 0;
+            return admit() ? empty : null;
           } catch (error) {
             deps.warn(
               `stopping late chat ${chatRef(action.serverId, threadId)}: ${describeError(error)}`,
@@ -336,7 +328,7 @@ export async function runActions(deps: ActionDeps): Promise<void> {
           }
         }),
       );
-      if (stopped.includes(null)) return;
+      if (stopped.includes(null) || !admit()) return;
       const first = found[0] ?? "";
       const chats = found.map((id) => chatRef(action.serverId, id)).join(", ");
       if (!stopped.every(Boolean)) {

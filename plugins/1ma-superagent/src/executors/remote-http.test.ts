@@ -225,7 +225,7 @@ describe("remote-http time limits", () => {
     await expect(executor.taskOutcome("thr_t", signal)).rejects.toBeDefined();
     await expect(executor.queuedWaits("thr_t", signal)).rejects.toBeDefined();
     await expect(executor.projectRemote("proj_x", signal)).rejects.toBeDefined();
-    await expect(executor.clearQueueAndStop("thr_t", signal)).rejects.toBeDefined();
+    await expect(executor.clearQueueAndStop("thr_t", () => true, signal)).rejects.toBeDefined();
   });
 
   it("treats only refusals that prove nothing was written as final, every other answer as unknown", async () => {

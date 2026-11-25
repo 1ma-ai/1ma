@@ -1,4 +1,5 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import type { PluginSettings } from "./src/admission.js";
 import { type BotGate, isBotChat } from "./src/bot.js";
 import { READ_TOOLS, registerBotReadTools } from "./src/bot-tools.js";
 import { claimSelection, registerClaimTool } from "./src/claim-tool.js";
@@ -157,12 +158,13 @@ export function createPlugin(options: SuperagentOptions = {}) {
 
     const lifecycle = new AbortController();
     const background = createBackground();
+    const isActive = () => config.role === "control" && config.passEnabled;
     const dispatcher = new QuestionDispatcher({
       requestInput: (request, requestOptions) => bb.ui.requestInput(request, requestOptions),
       warn: (message) => bb.log.warn(message),
       background,
       store: questions,
-      chat: () => (config.role === "control" ? config.mainBotThreadId : null),
+      chat: () => (isActive() ? config.mainBotThreadId : null),
       now: Date.now,
       signal: lifecycle.signal,
       changed: () => bb.rpc.experimental_invalidate([QUESTIONS_TAG]),
@@ -174,28 +176,28 @@ export function createPlugin(options: SuperagentOptions = {}) {
         built = { generation, executors: executorsFor(config, bb) };
       return built.executors;
     };
-    const actionSettings = () => ({
+    const currentSettings = (): PluginSettings => ({
       generation,
+      active: isActive(),
       policy: policy(),
       executors: new Map(currentExecutors().map((executor) => [executor.serverId, executor])),
     });
-    const runner = new PassRunner(
-      (scope) =>
-        runPass(
+    const runner: PassRunner = new PassRunner(
+      async (scope) => {
+        const outcome = await runPass(
           {
             store,
             prStore,
-            executors: currentExecutors,
+            settings: currentSettings,
             github: () => github,
-            policy,
             mainBotThreadId: () => config.mainBotThreadId,
             recordGitHub: (state) => bb.storage.kv.set(GITHUB_STATE_KEY, state),
-            afterFullPass: (now, executors, observed) =>
+            afterFullPass: (now, read, observed, admit) =>
               runSteps(
                 [
                   [
                     "unlinked PR questions",
-                    () => askAboutUnlinked(prStore, questions, policy(), now),
+                    () => askAboutUnlinked(prStore, questions, read.policy, now),
                   ],
                   ["PR claim conflicts", () => askAboutConflicts(prStore, questions, now)],
                   [
@@ -204,7 +206,8 @@ export function createPlugin(options: SuperagentOptions = {}) {
                       runActions({
                         actions,
                         questions,
-                        settings: actionSettings,
+                        read,
+                        settings: currentSettings,
                         observed,
                         claimant,
                         now: Date.now,
@@ -219,7 +222,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
                         db,
                         github,
                         readJournal,
-                        enabled: () => config.mainCheckEnabled,
+                        enabled: () => config.mainCheckEnabled && admit(),
                         policy,
                         questions,
                         now,
@@ -238,22 +241,26 @@ export function createPlugin(options: SuperagentOptions = {}) {
                         store,
                         actions,
                         questions,
-                        executors,
+                        executors: read.executors,
                         observed,
                         now: Date.now(),
                         signal: lifecycle.signal,
                         warn: (message) => bb.log.warn(message),
+                        admitted: admit,
                       }),
                   ],
                   ["questions", () => dispatcher.dispatch()],
                 ],
                 (message) => bb.log.warn(message),
+                admit,
               ),
             now: Date.now,
             signal: lifecycle.signal,
           },
           scope,
-        ),
+        );
+        if (outcome === "superseded" && isActive()) void runner.request(scope);
+      },
       (error) =>
         bb.log.error(`pass failed: ${error instanceof Error ? error.message : String(error)}`),
       background,
@@ -265,7 +272,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
 
     const isControl = () => config.role === "control";
     const afterAnswer = () => {
-      if (isControl() && config.passEnabled) void runner.request(FULL_SCOPE);
+      if (isActive()) void runner.request(FULL_SCOPE);
     };
     bb.rpc.register(questionRpcContract, {
       "questions.v1.decide": ({ questionId, token, optionId }) => {
@@ -278,13 +285,13 @@ export function createPlugin(options: SuperagentOptions = {}) {
     });
 
     bb.background.schedule(PASS_SCHEDULE_NAME, PASS_SCHEDULE_CRON, async () => {
-      if (!isControl() || !config.passEnabled) return;
+      if (!isActive()) return;
       await runner.request(FULL_SCOPE);
     });
 
     bb.background.service(STARTUP_SERVICE_NAME, {
       async start(signal) {
-        if (isControl() && config.passEnabled) await runner.request(FULL_SCOPE);
+        if (isActive()) await runner.request(FULL_SCOPE);
         await new Promise<void>((resolve) => {
           if (signal.aborted) resolve();
           else signal.addEventListener("abort", () => resolve(), { once: true });
@@ -293,7 +300,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
     });
 
     const onLocalThread = ({ thread }: { thread: { id: string } }) => {
-      if (!isControl()) return;
+      if (!isActive()) return;
       void runner.request(threadScope("mac", thread.id));
     };
     bb.events.on("thread.created", onLocalThread);
@@ -305,7 +312,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
     bb.events.on("interaction.pending", onLocalThread);
 
     registerClaimTool(bb, policy, (threadId) => {
-      if (isControl()) void runner.request(threadScope("mac", threadId));
+      if (isActive()) void runner.request(threadScope("mac", threadId));
     });
     const botAllowed: BotGate = async ({ threadId, projectId, signal }) => {
       if (!isControl() || threadId !== config.mainBotThreadId) return false;
@@ -344,7 +351,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
       executor: (serverId) =>
         currentExecutors().find((candidate) => candidate.serverId === serverId) ?? null,
       policy,
-      generation: () => generation,
+      settings: currentSettings,
       allowed: botAllowed,
       afterProposal: () => dispatcher.dispatch(),
       now: Date.now,

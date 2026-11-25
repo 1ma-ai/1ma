@@ -20,6 +20,7 @@ export interface PrPassDeps {
   readonly observed: ReadonlyMap<ServerId, Completeness>;
   readonly now: number;
   readonly signal: AbortSignal;
+  readonly admitted: () => boolean;
 }
 
 interface Candidate {
@@ -126,7 +127,7 @@ async function pullsOfRepo(
   try {
     const recent = await github.recentPulls(repo, since, deps.signal);
     for (const pull of recent.pulls) found.set(pull.number, pull);
-    if (recent.complete) {
+    if (recent.complete && deps.admitted()) {
       const newest = Math.max(since, ...recent.pulls.map((pull) => pull.updatedAt));
       deps.prStore.setCursor(repo, newest);
     }
@@ -170,6 +171,7 @@ export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] 
       return pullsOfRepo(deps, github, repo, claimed, problems);
     }),
   );
+  if (!deps.admitted()) return { problems };
   const modelReads: Array<Promise<void>> = [];
   for (const pull of pullsByRepo.flat()) {
     const decided = decideLink(
@@ -209,6 +211,7 @@ export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] 
     modelReads.push(
       executor.threadModel(threadId, deps.signal).then(
         (model) => {
+          if (!deps.admitted()) return;
           if (model === null) deps.prStore.markChatModelGap(pull.repo, pull.number);
           else
             deps.prStore.observeChatModel(
@@ -220,6 +223,7 @@ export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] 
             );
         },
         (error: unknown) => {
+          if (!deps.admitted()) return;
           deps.prStore.markChatModelGap(pull.repo, pull.number);
           problems.push(`${serverId}:${threadId} model: ${describeError(error)}`);
         },

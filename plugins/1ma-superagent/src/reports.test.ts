@@ -46,6 +46,7 @@ function setup(status = "idle") {
       now: 2_000,
       signal: new AbortController().signal,
       warn: () => {},
+      admitted: () => true,
     });
   return {
     questions,

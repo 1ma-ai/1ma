@@ -113,6 +113,7 @@ function setup(options: {
       ]),
       now,
       signal: new AbortController().signal,
+      admitted: () => true,
     });
   const archive = (serverId: ServerId) =>
     store.applySnapshot(

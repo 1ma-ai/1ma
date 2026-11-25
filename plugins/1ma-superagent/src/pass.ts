@@ -1,3 +1,4 @@
+import { type Guard, type PluginSettings, guardOf } from "./admission.js";
 import type { GitHubReader } from "./github/reader.js";
 import {
   type Completeness,
@@ -10,7 +11,6 @@ import {
 import type { PassScope } from "./pass-runner.js";
 import { runPrPass } from "./pr-pass.js";
 import type { PrStore } from "./pr-store.js";
-import type { RepoPolicy } from "./repos.js";
 import { type Store, isOwnerChat } from "./store.js";
 
 export interface GitHubPassState {
@@ -21,22 +21,25 @@ export interface GitHubPassState {
 export interface PassDeps {
   readonly store: Store;
   readonly prStore: PrStore;
-  readonly executors: () => readonly Executor[];
+  readonly settings: () => PluginSettings;
   readonly github: () => GitHubReader | null;
-  readonly policy: () => RepoPolicy;
   readonly mainBotThreadId: () => string | null;
   readonly recordGitHub: (state: GitHubPassState) => Promise<void>;
   readonly afterFullPass: (
     now: number,
-    executors: ReadonlyMap<ServerId, Executor>,
+    read: PluginSettings,
     observed: ReadonlyMap<ServerId, Completeness>,
+    admit: Guard,
   ) => Promise<void>;
   readonly now: () => number;
   readonly signal: AbortSignal;
 }
 
+export type PassOutcome = "done" | "inactive" | "superseded";
+
 async function recordWaitingReasons(
   deps: PassDeps,
+  admit: Guard,
   executor: Executor,
   threads: readonly ThreadSummary[],
   now: number,
@@ -54,6 +57,7 @@ async function recordWaitingReasons(
             return;
           }
         }
+        if (!admit()) return;
         deps.store.setWaitingReason(
           executor.serverId,
           thread.threadId,
@@ -64,9 +68,11 @@ async function recordWaitingReasons(
   );
 }
 
-export async function runPass(deps: PassDeps, scope: PassScope): Promise<void> {
-  const all = deps.executors();
-  const executors = all.filter(
+export async function runPass(deps: PassDeps, scope: PassScope): Promise<PassOutcome> {
+  const read = deps.settings();
+  if (!read.active) return "inactive";
+  const admit = guardOf(read, deps.settings);
+  const executors = [...read.executors.values()].filter(
     (executor) =>
       scope.full || [...scope.threadKeys].some((key) => key.startsWith(`${executor.serverId}:`)),
   );
@@ -76,6 +82,7 @@ export async function runPass(deps: PassDeps, scope: PassScope): Promise<void> {
       result: await executor.snapshot(deps.signal),
     })),
   );
+  if (!admit()) return "superseded";
   const observed = new Map<ServerId, Completeness>();
   for (const { executor, result } of results) {
     observed.set(executor.serverId, result.completeness);
@@ -87,22 +94,26 @@ export async function runPass(deps: PassDeps, scope: PassScope): Promise<void> {
     results
       .filter(({ result }) => result.completeness !== "failed")
       .map(({ executor, result }) =>
-        recordWaitingReasons(deps, executor, result.items.threads, result.observedAt),
+        recordWaitingReasons(deps, admit, executor, result.items.threads, result.observedAt),
       ),
   );
-  if (!scope.full) return;
+  if (!admit()) return "superseded";
+  if (!scope.full) return "done";
   const now = deps.now();
-  const byServer = new Map(all.map((executor) => [executor.serverId, executor]));
   const { problems } = await runPrPass({
     store: deps.store,
     prStore: deps.prStore,
     github: deps.github(),
-    policy: deps.policy(),
-    executors: byServer,
+    policy: read.policy,
+    executors: read.executors,
     observed,
     now,
     signal: deps.signal,
+    admitted: admit,
   });
+  if (!admit()) return "superseded";
   await deps.recordGitHub({ at: now, problems: problems.slice(0, 20) });
-  await deps.afterFullPass(now, byServer, observed);
+  if (!admit()) return "superseded";
+  await deps.afterFullPass(now, read, observed, admit);
+  return admit() ? "done" : "superseded";
 }

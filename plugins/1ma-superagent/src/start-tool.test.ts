@@ -27,7 +27,10 @@ function gate(): Gate & { reached: Promise<void>; open: () => void } {
   return { armed: false, entered, release, reached, open };
 }
 
-async function setup(remote = "https://github.com/example/app.git") {
+async function setup(
+  remote = "https://github.com/example/app.git",
+  beforeSnapshot: () => Promise<void> = async () => {},
+) {
   const spawned: SpawnRequest[] = [];
   const spawnedElsewhere: SpawnRequest[] = [];
   const wait = gate();
@@ -37,7 +40,10 @@ async function setup(remote = "https://github.com/example/app.git") {
     sdk: { projects: { get: async () => ({ id: "proj_bot", gitRemoteUrl: null }) } },
   });
   const linux = fakeExecutor("linux", {
-    snapshot: async () => snapshot([]),
+    snapshot: async () => {
+      await beforeSnapshot();
+      return snapshot([]);
+    },
     projectRemote: async () => {
       if (wait.armed) {
         wait.entered();
@@ -170,14 +176,14 @@ describe("settings changed while a confirmed start checks its target", () => {
     await t.harness.lifecycle.dispose();
   });
 
-  it("does not send through the old server when its address changes during the check", async () => {
+  it("does not send through the old server when its address changes during the check, and the next pass sends through the new one", async () => {
     const t = await setup();
     await confirmedWhileTargetIsChecked(t);
     await t.harness.behavior.setSettings({ linuxServerUrl: "http://linux-new:7000" });
     t.wait.open();
     await passSettled();
     expect(t.spawned).toEqual([]);
-    expect(await actionState(t)).toBe("confirmed");
+    expect(t.spawnedElsewhere).toHaveLength(1);
     await t.harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
     expect(t.spawned).toEqual([]);
     expect(t.spawnedElsewhere).toHaveLength(1);
@@ -207,6 +213,41 @@ describe("settings changed while a confirmed start checks its target", () => {
     expect(t.spawned).toEqual([]);
     expect(t.spawnedElsewhere).toEqual([]);
     expect(await actionState(t)).toBe("confirmed");
+    await t.harness.lifecycle.dispose();
+  });
+});
+
+describe("settings that end the control role or the pass earlier in the pass", () => {
+  it.each<Record<string, string | boolean>>([{ role: "executor" }, { passEnabled: false }])(
+    "sends nothing and keeps the start confirmed after %j while the servers are read",
+    async (change) => {
+      const held = gate();
+      held.armed = true;
+      const t = await setup(undefined, async () => {
+        if (!held.armed) return;
+        held.entered();
+        await held.release;
+      });
+      await t.propose();
+      await answerCard(t.harness, openCard(t.harness), "start");
+      await held.reached;
+      held.armed = false;
+      await t.harness.behavior.setSettings(change);
+      held.open();
+      await passSettled();
+      expect(t.spawned).toEqual([]);
+      expect(t.spawnedElsewhere).toEqual([]);
+      expect(await actionState(t)).toBe("confirmed");
+      await t.harness.lifecycle.dispose();
+    },
+  );
+
+  it("proposes nothing while the pass is switched off", async () => {
+    const t = await setup();
+    await t.harness.behavior.setSettings({ passEnabled: false });
+    expect(await t.propose()).toMatchObject({ isError: true });
+    expect(t.harness.inspection.pendingInteractions).toEqual([]);
+    expect(await t.harness.behavior.callRpc("work.v1.actions", {})).toEqual({ actions: [] });
     await t.harness.lifecycle.dispose();
   });
 });

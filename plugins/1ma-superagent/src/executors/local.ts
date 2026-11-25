@@ -120,14 +120,17 @@ export function createLocalExecutor(
             ];
       });
     },
-    async clearQueueAndStop(threadId, signal) {
+    async clearQueueAndStop(threadId, admitted, signal) {
       const queued = await sdk.threads.queuedMessages.list({ threadId, signal });
-      await Promise.all(
-        queued.map((message) =>
-          sdk.threads.queuedMessages.delete({ threadId, queuedMessageId: message.id }),
-        ),
-      );
+      const deletes: Array<Promise<unknown>> = [];
+      for (const message of queued) {
+        if (!admitted()) break;
+        deletes.push(sdk.threads.queuedMessages.delete({ threadId, queuedMessageId: message.id }));
+      }
+      await Promise.all(deletes);
+      if (deletes.length < queued.length || !admitted()) return false;
       await sdk.threads.stop({ threadId });
+      return true;
     },
     async queuedWaits(threadId, signal) {
       const rows = await sdk.threads.queuedMessages.list({ threadId, signal });

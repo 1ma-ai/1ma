@@ -8,6 +8,7 @@ import {
   unknownKind,
 } from "./action-runner.js";
 import { ActionStore, type SpawnParams } from "./actions.js";
+import type { PluginSettings } from "./admission.js";
 import {
   DefiniteSpawnFailure,
   type Executor,
@@ -18,6 +19,7 @@ import {
 import { QuestionStore } from "./questions.js";
 import { repoPolicy } from "./repos.js";
 import { MIGRATIONS } from "./schema.js";
+import { createRemoteHttpExecutor } from "./executors/remote-http.js";
 import { fakeExecutor } from "./test-helpers.js";
 
 const params: SpawnParams = {
@@ -65,21 +67,29 @@ function setup() {
         throw new TypeError("fetch failed");
       }
       stopped.push(threadId);
+      return true;
     },
     queuedWaits: async () => [],
   });
-  const run = (claimant = "gen_a", signal = new AbortController().signal) =>
+  const settingsOf = (active: boolean): PluginSettings => ({
+    generation: 0,
+    active,
+    executors: new Map([["linux", executor]]),
+    policy: repoPolicy(
+      [{ repo: "example/app", accounts: { mac: [], linux: [] } }],
+      target.excluded,
+    ),
+  });
+  const run = (
+    claimant = "gen_a",
+    signal = new AbortController().signal,
+    { active = true }: { active?: boolean } = {},
+  ) =>
     runActions({
       actions,
       questions,
-      settings: () => ({
-        generation: 0,
-        executors: new Map([["linux", executor]]),
-        policy: repoPolicy(
-          [{ repo: "example/app", accounts: { mac: [], linux: [] } }],
-          target.excluded,
-        ),
-      }),
+      read: settingsOf(active),
+      settings: () => settingsOf(active),
       observed: new Map([["linux", "complete"]]),
       claimant,
       now: () => clock,
@@ -411,5 +421,127 @@ describe("ActionStore.claim", () => {
     const t = setup();
     const action = t.actions.propose("linux", params, "thr_bot", t.now());
     expect(t.actions.claim(action.id, "gen_a", t.now())).toBe(false);
+  });
+});
+
+describe("admission of changes made by a pass", () => {
+  const remoteThread = (id: string, status: string) => ({
+    id,
+    projectId: "proj_app",
+    environmentId: null,
+    title: null,
+    titleFallback: null,
+    providerId: "claude-code",
+    status,
+    visibility: "visible",
+    parentThreadId: null,
+    originPluginId: "1ma-superagent",
+    createdAt: 1_000_000,
+    updatedAt: 1_000_000,
+    queuedWork: "waiting",
+    hasPendingInteraction: false,
+  });
+
+  function lateRun(hooks: {
+    readonly onQueueRead?: () => void;
+    readonly onDelete?: () => Promise<void>;
+    readonly onMetadata?: () => void;
+  }) {
+    const db = new Database(":memory:");
+    for (const statement of MIGRATIONS) db.exec(statement);
+    const actions = new ActionStore(db);
+    const questions = new QuestionStore(db);
+    const action = actions.propose("linux", params, "thr_bot", 1_000_000);
+    actions.transition(action.id, ["proposed"], "confirmed", 1_000_000);
+    actions.claim(action.id, "gen_a", 1_000_000);
+    actions.transition(action.id, ["sending"], "unknown", 1_000_000);
+    const settings = { generation: 0, active: true };
+    const requests: string[] = [];
+    const executor = createRemoteHttpExecutor({
+      serverId: "linux",
+      baseUrl: "http://linux.test",
+      fetch: async (url, { method }) => {
+        const path = new URL(url).pathname;
+        requests.push(`${method} ${path}`);
+        if (path === "/api/v1/threads") return Response.json([remoteThread("thr_late", "active")]);
+        if (path.endsWith("/plugin-metadata")) {
+          hooks.onMetadata?.();
+          return Response.json({
+            threads: [{ threadId: "thr_late", metadata: { spawn: { nonce: action.label } } }],
+          });
+        }
+        if (method === "GET" && path.endsWith("/queued-messages")) {
+          hooks.onQueueRead?.();
+          return Response.json([{ id: "queued_1", payload: { kind: "inline" }, waitingOn: null }]);
+        }
+        if (method === "DELETE") await hooks.onDelete?.();
+        return Response.json({});
+      },
+    });
+    const current = (): PluginSettings => ({
+      ...settings,
+      executors: new Map([["linux", executor]]),
+      policy: repoPolicy([{ repo: "example/app", accounts: { mac: [], linux: [] } }], []),
+    });
+    const read = current();
+    const run = () =>
+      runActions({
+        actions,
+        questions,
+        read,
+        settings: current,
+        observed: new Map([["linux", "complete"]]),
+        claimant: "gen_a",
+        now: () => 1_000_000 + UNKNOWN_AFTER_MS,
+        signal: new AbortController().signal,
+        warn: () => {},
+      });
+    const changes = () =>
+      requests.filter(
+        (request) => !request.startsWith("GET") && !request.endsWith("/plugin-metadata"),
+      );
+    return { actions, questions, action, settings, run, changes };
+  }
+
+  it("deletes nothing and stops nothing when the settings change while the late chat's queue is read", async () => {
+    const t = lateRun({
+      onQueueRead: () => {
+        t.settings.generation = 1;
+      },
+    });
+    t.actions.transition(t.action.id, ["unknown"], "canceled", 1_000_000, { result: "replaced" });
+    await t.run();
+    expect(t.changes()).toEqual([]);
+    expect(t.actions.get(t.action.id)).toMatchObject({ threadId: null, result: "replaced" });
+  });
+
+  it("sends no stop when the settings change while a queued message is being deleted", async () => {
+    const t = lateRun({
+      onDelete: async () => {
+        t.settings.generation = 1;
+      },
+    });
+    t.actions.transition(t.action.id, ["unknown"], "canceled", 1_000_000, { result: "replaced" });
+    await t.run();
+    expect(t.changes()).toEqual(["DELETE /api/v1/threads/thr_late/queued-messages/queued_1"]);
+  });
+
+  it("binds no chat found under settings that changed while spawned chats were read", async () => {
+    const t = lateRun({
+      onMetadata: () => {
+        t.settings.generation = 1;
+      },
+    });
+    await t.run();
+    expect(t.actions.get(t.action.id)).toMatchObject({ state: "unknown", threadId: null });
+    expect(t.questions.waiting()).toEqual([]);
+  });
+
+  it("sends nothing while the plugin is switched off or is an executor", async () => {
+    const t = setup();
+    const id = t.confirmed();
+    await t.run("gen_a", new AbortController().signal, { active: false });
+    expect(t.spawned).toEqual([]);
+    expect(t.actions.get(id)?.state).toBe("confirmed");
   });
 });

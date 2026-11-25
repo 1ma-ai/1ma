@@ -35,4 +35,27 @@ describe("local executor", () => {
       expect.objectContaining({ archived: false, includeHidden: true, limit: 2, offset: 2 }),
     ]);
   });
+
+  it("deletes and stops nothing once the guard refuses after the queue was read", async () => {
+    let allowed = true;
+    const { sdk, harness } = createFakeSdk({
+      pluginId: "1ma-superagent",
+      overrides: {
+        threads: {
+          queuedMessages: {
+            list: async () => {
+              allowed = false;
+              return [{ id: "queued_1" }];
+            },
+            delete: async () => {},
+          },
+          stop: async () => {},
+        },
+      },
+    });
+    const executor = createLocalExecutor(sdk);
+    await executor.clearQueueAndStop("thr_late", () => allowed, new AbortController().signal);
+    expect(harness.callsTo("threads.queuedMessages.delete")).toEqual([]);
+    expect(harness.callsTo("threads.stop")).toEqual([]);
+  });
 });

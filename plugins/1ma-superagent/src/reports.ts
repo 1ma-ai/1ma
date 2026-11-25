@@ -19,6 +19,7 @@ export interface ReportDeps {
   readonly now: number;
   readonly signal: AbortSignal;
   readonly warn: (message: string) => void;
+  readonly admitted: () => boolean;
 }
 
 export function reportKey(actionId: string, outcome: TaskOutcome): string {
@@ -80,7 +81,7 @@ export async function runReports(deps: ReportDeps): Promise<void> {
         deps.warn(`result of ${action.serverId}:${threadId}: ${describeError(error)}`);
         return;
       }
-      if (outcome === null) return;
+      if (outcome === null || !deps.admitted()) return;
       record(deps, action.id, `${action.serverId}:${threadId}`, outcome);
     }),
   );

@@ -4,6 +4,7 @@ import { strings } from "../strings.js";
 import { START_KIND, startCard } from "./action-runner.js";
 import type { BotGate } from "./bot.js";
 import type { ActionStore } from "./actions.js";
+import { type Admission, admitted } from "./admission.js";
 import { describeError } from "./executors/paging.js";
 import { repoFromRemoteUrl } from "./github/names.js";
 import type { Executor, ServerId } from "./observation.js";
@@ -22,7 +23,7 @@ export interface StartToolDeps {
   readonly questions: QuestionStore;
   readonly executor: (serverId: ServerId) => Executor | null;
   readonly policy: () => RepoPolicy;
-  readonly generation: () => number;
+  readonly settings: () => Admission;
   readonly allowed: BotGate;
   readonly afterProposal: () => void;
   readonly now: () => number;
@@ -47,7 +48,8 @@ export function registerStartTool(deps: StartToolDeps): void {
       })
       .strict(),
     async execute(input, ctx) {
-      const generation = deps.generation();
+      const read = deps.settings();
+      if (!read.active) return refuse(strings.superagentInactive);
       if (!(await deps.allowed(ctx))) return refuse(strings.notMainBot);
       const executor = deps.executor(input.server);
       if (executor === null) return refuse(strings.serverNotConfigured);
@@ -59,7 +61,7 @@ export function registerStartTool(deps: StartToolDeps): void {
       }
       const repo = repoFromRemoteUrl(remote);
       if (isExcludedRepo(deps.policy(), repo)) return refuse(strings.projectExcluded);
-      if (deps.generation() !== generation) return refuse(strings.settingsChanged);
+      if (!admitted(read, deps.settings())) return refuse(strings.settingsChanged);
       const now = deps.now();
       const action = deps.actions.propose(
         input.server,

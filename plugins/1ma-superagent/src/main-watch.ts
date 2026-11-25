@@ -138,6 +138,7 @@ export async function runMainWatch(deps: MainWatchDeps): Promise<string[]> {
   } catch (error) {
     journal = { status: "error", message: describeError(error) };
   }
+  if (!deps.enabled()) return problems;
   await deps.recordJournal?.({
     at: deps.now,
     status: journal.status,

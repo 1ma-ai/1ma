@@ -67,7 +67,11 @@ export interface Executor {
   projectRemote(projectId: string, signal: AbortSignal): Promise<string | null>;
   spawn(request: SpawnRequest, signal: AbortSignal): Promise<{ threadId: string }>;
   findSpawned(signal: AbortSignal): Promise<SpawnedThread[]>;
-  clearQueueAndStop(threadId: string, signal: AbortSignal): Promise<void>;
+  clearQueueAndStop(
+    threadId: string,
+    admitted: () => boolean,
+    signal: AbortSignal,
+  ): Promise<boolean>;
   taskOutcome(threadId: string, signal: AbortSignal): Promise<TaskOutcome | null>;
   queuedWaits(threadId: string, signal: AbortSignal): Promise<QueuedWait[]>;
 }

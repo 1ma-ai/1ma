@@ -90,6 +90,45 @@ describe("1ma-superagent server", () => {
     await harness.lifecycle.dispose();
   });
 
+  it.each<Record<string, string | boolean>>([{ passEnabled: false }, { role: "executor" }])(
+    "records nothing a pass observed once %j was set while it read the servers",
+    async (change) => {
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered = () => {};
+      const reached = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const { bb, harness } = createFakePluginHost({
+        pluginId: "1ma-superagent",
+        settings: { role: "control" },
+      });
+      await createPlugin({
+        executors: () => [
+          makeExecutor("mac", {
+            async snapshot() {
+              entered();
+              await held;
+              return snapshot([threadSummary({ threadId: "thr_mac" })]);
+            },
+          }),
+        ],
+      })(bb);
+      const pass = harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+      await reached;
+      await harness.behavior.setSettings(change);
+      release();
+      await pass;
+      expect(await harness.behavior.callRpc("work.v1.list", {})).toMatchObject({
+        works: [],
+        servers: [],
+      });
+      await harness.lifecycle.dispose();
+    },
+  );
+
   it("reads only the local server when a local chat finishes a turn", async () => {
     const { harness, calls } = await setup();
     await harness.behavior.emitThreadEvent("thread.idle", {
