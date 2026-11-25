@@ -11,6 +11,7 @@ import {
   rebrandProse,
   rebrandString,
   rebrandTree,
+  requireEveryRuleMatches,
 } from "./rebrand.mjs";
 
 // Rules limited to one file of bb's tree name files these fixtures do not have.
@@ -614,6 +615,47 @@ describe("an override can be limited to one file or one whole literal", () => {
       () => rebrandTree(root, { ...scoped, testReplace: [], testKeep: [] }),
       /a replace rule names a missing file: apps\/server\/scripts\/gen\.ts/,
     );
+  });
+});
+
+describe("prepare stops when a rule for all of bb matches nothing", () => {
+  const live = { text: "Open bb from any browser", to: "Open 1ma anywhere", reason: "test" };
+  const gone = { text: "bb connect is turned off", to: "1ma Connect is not here", reason: "test" };
+  const kept = { text: "the bb registry", reason: "test" };
+  const files = {
+    "apps/app/package.json": manifest("@bb/app"),
+    "apps/app/src/access.tsx": 'export const title = "Open bb from any browser";\n',
+  };
+  const only = (more) => ({
+    ...rules,
+    replace: [],
+    product: [],
+    keep: [],
+    testReplace: [],
+    testKeep: [],
+    ...more,
+  });
+
+  test("a text bb dropped or reworded is named, a text bb still has is not", () => {
+    const root = tree(files);
+    after(() => rmSync(root, { recursive: true, force: true }));
+    const { unmatched } = rebrandTree(root, only({ replace: [live, gone], keep: [kept] }));
+    assert.deepEqual(unmatched, [
+      { kind: "replace", text: gone.text },
+      { kind: "keep", text: kept.text },
+    ]);
+    assert.throws(
+      () => requireEveryRuleMatches(unmatched),
+      /match nothing in bb any more[\s\S]*replace: "bb connect is turned off"\nkeep: "the bb registry"/,
+    );
+  });
+
+  test("rules that all match pass", () => {
+    const root = tree(files);
+    after(() => rmSync(root, { recursive: true, force: true }));
+    const { unmatched } = rebrandTree(root, only({ replace: [live] }));
+    assert.deepEqual(unmatched, []);
+    requireEveryRuleMatches(unmatched);
   });
 });
 

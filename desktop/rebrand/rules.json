@@ -254,14 +254,6 @@
   },
   "keep": [
     {
-      "text": " moved to bb git ",
-      "reason": "names the bb git command, which keeps its name until the CLI is renamed (phase 3)"
-    },
-    {
-      "text": "Moved to bb git ",
-      "reason": "names the bb git command, which keeps its name until the CLI is renamed (phase 3)"
-    },
-    {
       "text": "A thread id is required: bb provider-retry ",
       "reason": "CLI usage hint for the bb provider-retry command"
     },
@@ -304,16 +296,6 @@
       "text": "Plugins published to the BB registry and reviewed by the BB team.",
       "to": "Plugins from the bb community registry. 1ma does not review them.",
       "reason": "owner decision 2026-11-16 (rebrand stage 2): the store says plainly that this third-party catalog is not reviewed by 1ma"
-    },
-    {
-      "text": "bb connect is turned off on this server. Enable its plugin to get a private getbb.app address.",
-      "to": "1ma Connect is not available on this server yet. It will give this 1ma a private address that only you can open.",
-      "reason": "owner decision 2026-11-16 (rebrand stage 2): the onboarding Devices row stays and is renamed; bb connect is not shipped in 1ma, so there is no plugin to enable until 1ma Connect exists"
-    },
-    {
-      "text": "bb connect gives this bb a private getbb.app address that only you can open.",
-      "to": "1ma Connect gives this 1ma a private address that only you can open.",
-      "reason": "owner decision 2026-11-16 (rebrand stage 2): the onboarding Devices row stays and is renamed for 1ma Connect"
     },
     {
       "text": "Written by bb: runs the bb command of the bb installed on this computer.",

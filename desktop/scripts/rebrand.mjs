@@ -1345,14 +1345,31 @@ export function rebrandTree(root, rules, { write = false } = {}) {
     throw new Error(
       `These negative assertions in bb's tests may check text the rebrand renamed, so they could pass without testing anything. Add a testReplace or testKeep entry with a reason for each:\n${suspicious.join("\n")}`,
     );
+  const unmatched = ["replace", "product", "keep"].flatMap((kind) =>
+    (rules[kind] ?? [])
+      .filter((entry) => entry.file === undefined && !rules.used.has(entry))
+      .map((entry) => ({ kind, text: entry.text })),
+  );
   return {
     context: { index, graph, rules, veto },
+    unmatched,
     inventory,
     changed: [...changed, ...testsChanged],
     sourcesChanged: changed,
     testsChanged,
     counts,
   };
+}
+
+// A rule without a file is checked against the whole of bb: when bb rewords or
+// drops the text, the decision the rule recorded stops applying without a sign.
+export function requireEveryRuleMatches(unmatched) {
+  if (unmatched.length === 0) return;
+  throw new Error(
+    `These rules in desktop/rebrand/rules.json match nothing in bb any more. Find what bb says there now and move or remove each rule:\n${unmatched
+      .map(({ kind, text }) => `${kind}: ${JSON.stringify(text)}`)
+      .join("\n")}`,
+  );
 }
 
 export function formatInventory(inventory) {
@@ -1377,9 +1394,10 @@ function main(argv) {
   }
   const rules = loadRules();
   const lockPath = path.join(REBRAND_DIR, "inventory.json");
-  const { inventory, changed, counts } = rebrandTree(path.resolve(tree), rules, {
+  const { inventory, changed, counts, unmatched } = rebrandTree(path.resolve(tree), rules, {
     write: command === "apply",
   });
+  requireEveryRuleMatches(unmatched);
   const actual = formatInventory(inventory);
   if (command === "update") {
     writeFileSync(lockPath, actual);

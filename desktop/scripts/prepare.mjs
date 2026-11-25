@@ -80,10 +80,17 @@ console.log(`replaced ${ASSETS.length} bb assets with 1ma assets`);
 
 let rebranded = null;
 if (rebrand) {
-  const { REBRAND_DIR, diffInventory, formatInventory, loadRules, rebrandTree } =
-    await import("./rebrand.mjs");
+  const {
+    REBRAND_DIR,
+    diffInventory,
+    formatInventory,
+    loadRules,
+    rebrandTree,
+    requireEveryRuleMatches,
+  } = await import("./rebrand.mjs");
   const rules = loadRules();
   const result = rebrandTree(out, rules, { write: true });
+  requireEveryRuleMatches(result.unmatched);
   for (const { run, writes } of rules.derived) {
     if (!existsSync(path.join(out, run))) {
       throw new Error(`bb no longer has ${run}; update "derived" in desktop/rebrand/rules.json`);
