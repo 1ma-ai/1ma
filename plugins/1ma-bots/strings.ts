@@ -136,6 +136,9 @@ export const agentText = {
     "This conversation is waiting for the owner (a question or an error), so it cannot be marked done.",
   keepsChanging: "Something keeps happening in the bots' conversations. Try again in a moment.",
   broughtBack: "This conversation was brought back meanwhile, so it was not marked done.",
+  reassigned: "This conversation was assigned anew meanwhile, so nothing was changed.",
+  outsideParent: (title: string) =>
+    `${title} is a sub-thread of a conversation outside this bot's list. Here only its place in the order can change, so nothing was moved.`,
   moveElsewhere: "These conversations are not in this bot any more, so nothing was moved.",
   treeChanged: "The tree changed since it was drawn, so nothing was moved.",
   moveNotUndone: (reason: string, titles: readonly string[]) =>

@@ -44,6 +44,28 @@ export function BotThreadTree({
   });
   const order = bot.threads.map((member) => member.threadId);
   const drawn = new Map(threads.map((thread) => [thread.id, thread]));
+  const place = (threadId: string) => ({ threadId, parentThreadId: parentOf(threadId) });
+  const send = async (
+    ids: readonly string[],
+    threadId: string,
+    placement: "before" | "after" | "inside",
+  ) => {
+    try {
+      await move.mutate({
+        botId: bot.id,
+        sources: ids.map((id) => ({
+          ...place(id),
+          real: drawn.get(id)?.parentThreadId === parentOf(id),
+        })),
+        target: { ...place(threadId), placement },
+        levelShown: [...ids, threadId]
+          .map(parentOf)
+          .every((parent) => parent === null || drawn.has(parent)),
+      });
+    } catch (error) {
+      toast.error(getMutationErrorMessage({ error, fallbackMessage: strings.reorderFailed }));
+    }
+  };
   const dnd = useSectionThreadDnd({
     containerId: bot.id,
     enabled: true,
@@ -62,24 +84,8 @@ export function BotThreadTree({
       // archived one keeps the place it has.
       accepts: (ids, targetId) =>
         [...ids, targetId].every((id) => order.includes(id) && !drawn.get(id)?.isArchived),
-      async drop(ids, target) {
-        try {
-          await move.mutate({
-            botId: bot.id,
-            threadIds: [...ids],
-            target: {
-              threadId: target.threadId,
-              placement: target.placement,
-              parentThreadId: parentOf(target.threadId),
-            },
-            levelShown: [...ids, target.threadId]
-              .map(parentOf)
-              .every((parent) => parent === null || drawn.has(parent)),
-          });
-        } catch (error) {
-          toast.error(getMutationErrorMessage({ error, fallbackMessage: strings.reorderFailed }));
-        }
-      },
+      drop: (ids, target) => send(ids, target.threadId, target.placement),
+      nest: (ids, parentThreadId) => send(ids, parentThreadId, "inside"),
     },
   });
   return (

@@ -10,7 +10,7 @@ import { strings } from "./strings.js";
 import { BotsPanel, PANEL_PATH } from "./src/ui/bot-pages.js";
 import { assignToBotAction } from "./src/ui/assign-action.js";
 import { botsRpc } from "./src/contract.js";
-import { findBot, isDone, ThreadBotRow, topTarget } from "./src/ui/thread-bot-row.js";
+import { findBot, isDone, ThreadBotRow, topMove } from "./src/ui/thread-bot-row.js";
 
 export default definePluginApp((app) => {
   app.slots.navPanel({
@@ -41,16 +41,15 @@ export default definePluginApp((app) => {
     item({ thread, data }) {
       const member = findBot(data.bots, thread.id);
       if (!member || thread.archivedAt !== null) return null;
-      const target = topTarget(member.bot, data.bots, data.threads, thread.id);
-      if (target === null) return null;
+      const top = topMove(member.bot, data.bots, data.threads, thread.id);
+      if (top === null) return null;
       return {
         label: strings.threadBot.moveToTop,
         icon: "ArrowUp",
         run: async () => {
           await data.move.mutate({
             botId: member.bot.id,
-            threadIds: [thread.id],
-            target,
+            ...top,
             levelShown: false,
           });
         },

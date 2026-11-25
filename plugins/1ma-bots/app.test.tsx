@@ -216,7 +216,7 @@ describe("bot conversation menu", () => {
   }
   const placeBefore = (threadId: string, target: string, parentThreadId: string | null = null) => ({
     botId: "bot_a",
-    threadIds: [threadId],
+    sources: [{ threadId, parentThreadId, real: true }],
     target: { threadId: target, placement: "before", parentThreadId },
     levelShown: false,
   });
@@ -225,6 +225,15 @@ describe("bot conversation menu", () => {
     await item!.run({} as never);
     expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_c", "thr_a"));
     expect((await moveToTop([row("thr_project")], "thr_project")).item).toBeNull();
+  });
+  it("says that the parent of a conversation it moves is outside the bot", async () => {
+    const tree = [row("thr_a"), row("thr_b"), row("thr_c", "thr_elsewhere"), row("thr_elsewhere")];
+    const { item, move } = await moveToTop(tree, "thr_c");
+    await item!.run({} as never);
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith({
+      ...placeBefore("thr_c", "thr_a"),
+      sources: [{ threadId: "thr_c", parentThreadId: null, real: false }],
+    });
   });
   it("offers Move to top among the conversations under the same parent", async () => {
     const threads = ["thr_a", "thr_b", "thr_c"].map((threadId) => ({

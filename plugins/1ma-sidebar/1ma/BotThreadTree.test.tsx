@@ -90,9 +90,15 @@ function renderTree(answer: () => { ok: true } = () => ({ ok: true }), threads =
       },
     },
   );
-  const { accepts, drop } = (captured.dnd as DndArgs).botReorder!;
-  return { accepts, drop, moves, inspection };
+  const { accepts, drop, nest } = (captured.dnd as DndArgs).botReorder!;
+  return { accepts, drop, nest, moves, inspection };
 }
+
+const source = (threadId: string, real = true) => ({
+  threadId,
+  parentThreadId: PARENTS[threadId] ?? null,
+  real,
+});
 
 describe("a drop on the edge of a bot's conversation", () => {
   it("takes only conversations with a place in the bot's order", () => {
@@ -116,6 +122,7 @@ describe("a drop on the edge of a bot's conversation", () => {
     [["second"], { threadId: "first", placement: "before" }, "parent"],
     [["second", "first"], { threadId: "main", placement: "after" }, null],
     [["main"], { threadId: "guest", placement: "after" }, null],
+    [["guest", "restored"], { threadId: "main", placement: "after" }, null],
   ] as const)(
     "sends %o to %o as it was dropped, in one call",
     async (threadIds, target, parentThreadId) => {
@@ -123,7 +130,12 @@ describe("a drop on the edge of a bot's conversation", () => {
       drop(threadIds, target);
       await waitFor(() =>
         expect(moves).toEqual([
-          { botId: "bot_m", threadIds, target: { ...target, parentThreadId }, levelShown: true },
+          {
+            botId: "bot_m",
+            sources: threadIds.map((id) => source(id, !["guest", "restored"].includes(id))),
+            target: { ...target, parentThreadId },
+            levelShown: true,
+          },
         ]),
       );
       expect(inspection.sdkCalls).toEqual([]);
@@ -146,7 +158,7 @@ describe("a drop on the edge of a bot's conversation", () => {
         expect(moves).toEqual([
           {
             botId: "bot_m",
-            threadIds: [threadId],
+            sources: [source(threadId)],
             target: { threadId: target, placement: "before", parentThreadId },
             levelShown: false,
           },
@@ -155,11 +167,29 @@ describe("a drop on the edge of a bot's conversation", () => {
     },
   );
 
-  it("says why the move failed", async () => {
-    const { drop } = renderTree(() => {
+  it.each(["drop", "nest"])("says why the move failed (%s)", async (gesture) => {
+    const { drop, nest, inspection } = renderTree(() => {
       throw new Error("The parent is archived");
     });
-    drop(["second"], { threadId: "main", placement: "after" });
+    if (gesture === "drop") drop(["second"], { threadId: "main", placement: "after" });
+    else await nest(["second"], "main");
     await waitFor(() => expect(captured.error).toHaveBeenCalledWith("The parent is archived"));
+    expect(inspection.sdkCalls).toEqual([]);
+  });
+});
+
+describe("a drop on the middle of a bot's conversation", () => {
+  it("goes to the bot's server like the edge, also for a sub-thread without a place", async () => {
+    const { nest, moves, inspection } = renderTree();
+    await nest(["spawned", "guest"], "first");
+    expect(moves).toEqual([
+      {
+        botId: "bot_m",
+        sources: [source("spawned"), source("guest", false)],
+        target: { threadId: "first", placement: "inside", parentThreadId: "parent" },
+        levelShown: true,
+      },
+    ]);
+    expect(inspection.sdkCalls).toEqual([]);
   });
 });

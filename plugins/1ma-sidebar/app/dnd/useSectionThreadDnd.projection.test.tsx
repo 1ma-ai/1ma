@@ -382,7 +382,7 @@ describe("bot conversation drops", () => {
     const { result, inspection } = renderSectionThreadDnd(
       buildSectionThreadList([pinned, child, target]),
       [],
-      { groups: true, botReorder: { accepts: () => accepts, drop } },
+      { groups: true, botReorder: { accepts: () => accepts, drop, nest: async () => {} } },
     );
     const props = () => result.current!.dndContextProps;
     const rect = { top: 100, left: 0, right: 200, width: 200, height: 28, bottom: 128 };
@@ -422,7 +422,7 @@ describe("bot conversation drops", () => {
     const drop = vi.fn();
     const { result, inspection } = renderSectionThreadDnd(roots, [], {
       groups: true,
-      botReorder: { accepts: () => true, drop },
+      botReorder: { accepts: () => true, drop, nest: async () => {} },
     });
     const props = () => result.current!.dndContextProps;
     const rect = { top: 100, left: 0, right: 200, width: 200, height: 28, bottom: 128 };
@@ -455,21 +455,25 @@ describe("bot conversation drops", () => {
     expect(inspection.sdkCalls).toEqual([]);
   });
 
-  it("sets the real parent while keeping the pin and project section", async () => {
+  it("leaves the middle drop to the bot, and shows the row there until it answers", async () => {
+    let answer = () => {};
+    const nest = vi.fn(() => new Promise<void>((resolve) => (answer = resolve)));
+    const drop = vi.fn();
     const { result, inspection } = renderSectionThreadDnd(roots, [], {
       groups: true,
-      botReorder: { accepts: () => true, drop: vi.fn() },
+      botReorder: { accepts: () => true, drop, nest },
     });
     const props = () => result.current!.dndContextProps;
     act(() => props().onDragStart?.(dragStart(pinned.id)));
     act(() => props().onDragOver?.(dragOver(pinned.id, rowId)));
     act(() => props().onDragEnd?.(dragEnd(pinned.id, rowId)));
     await flushTasks();
-    resolveUpdateThread(pinned);
-    await flushTasks();
-    expect(inspection.sdkCalls).toEqual([
-      { method: "threads.update", args: [{ threadId: pinned.id, parentThreadId: target.id }] },
-    ]);
+    expect(nest).toHaveBeenCalledExactlyOnceWith([pinned.id], target.id);
+    expect(result.current!.activeItemId).toBe(pinned.id);
+    await act(async () => answer());
+    expect(result.current!.activeItemId).toBeNull();
+    expect(drop).not.toHaveBeenCalled();
+    expect(inspection.sdkCalls).toEqual([]);
   });
 });
 
@@ -973,7 +977,7 @@ describe("useSectionThreadDnd nest hover delay", () => {
         pinnedRootNodes: [],
         onReorderPinnedThread: vi.fn(),
         groups: true,
-        botReorder: { accepts: () => true, drop: vi.fn() },
+        botReorder: { accepts: () => true, drop: vi.fn(), nest: async () => {} },
       });
       return (
         <DndContext {...result.current!.dndContextProps}>

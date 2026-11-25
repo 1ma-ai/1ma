@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { strings } from "../../strings.js";
 import { branchOf, keepsOpen } from "../branch.js";
-import { botsRpc, type BotSummary, type BotThread } from "../contract.js";
+import { botsRpc, type BotSummary, type BotThread, type MoveThreadsInput } from "../contract.js";
 
 export function findBot(
   bots: readonly BotSummary[],
@@ -73,14 +73,14 @@ export function isDone(
   return branchIn(bots, threads, threadId).some((id) => findBot(bots, id)?.thread.completed);
 }
 
-// What "first under its own parent" puts the conversation before; null when
+// The move that puts the conversation first under its own parent; null when
 // that changes nothing in its group (open or done) of the bot's tree.
-export function topTarget(
+export function topMove(
   bot: BotSummary,
   bots: readonly BotSummary[],
   threads: readonly TreeRow[],
   threadId: string,
-): { threadId: string; placement: "before"; parentThreadId: string | null } | null {
+): Pick<MoveThreadsInput, "sources" | "target"> | null {
   const parentOf = (id: string) => branchIn(bots, threads, id)[1] ?? null;
   const keptOpen = new Set(
     threads.filter(keepsOpen).flatMap((row) => branchIn(bots, threads, row.id)),
@@ -97,7 +97,11 @@ export function topTarget(
   const done = shownDone(threadId);
   if (first === undefined || siblings.find((id) => shownDone(id) === done) === threadId)
     return null;
-  return { threadId: first, placement: "before", parentThreadId };
+  const real = threads.find((thread) => thread.id === threadId)?.parentThreadId === parentThreadId;
+  return {
+    sources: [{ threadId, parentThreadId, real }],
+    target: { threadId: first, placement: "before", parentThreadId },
+  };
 }
 
 function InstructionPreview({ bot, bots }: { bot: BotSummary; bots: readonly BotSummary[] }) {

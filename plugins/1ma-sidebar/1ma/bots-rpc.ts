@@ -19,6 +19,8 @@ export const sidebarBotSchema = z.object({
 });
 export type SidebarBot = z.infer<typeof sidebarBotSchema>;
 
+const treePlace = z.object({ threadId: z.string(), parentThreadId: z.string().nullable() });
+
 const ok = z.object({ ok: z.literal(true) });
 
 // The part of 1ma-bots' bots.v1 contract this sidebar reads and calls.
@@ -55,12 +57,8 @@ export const botsRpc = {
   "bots.v1.moveThreads": {
     input: z.object({
       botId: z.string(),
-      threadIds: z.array(z.string()).min(1),
-      target: z.object({
-        threadId: z.string(),
-        placement: z.enum(["before", "after"]),
-        parentThreadId: z.string().nullable(),
-      }),
+      sources: z.array(treePlace.extend({ real: z.boolean() })).min(1),
+      target: treePlace.extend({ placement: z.enum(["before", "after", "inside"]) }),
       levelShown: z.boolean(),
     }),
     output: ok,

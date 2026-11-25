@@ -118,6 +118,10 @@ interface UseSectionThreadDndArgs {
       threadIds: readonly string[],
       target: SectionThreadReorderTarget,
     ) => void;
+    nest: (
+      threadIds: readonly string[],
+      parentThreadId: string,
+    ) => Promise<void>;
   };
   pinnedReorderPending: boolean;
   pinnedThreads: readonly SidebarThread[];
@@ -1508,10 +1512,12 @@ export function useSectionThreadDnd({
         case "move":
         case "nest":
           settle(
-            commitDropChanges(
-              botReorder ? { ...decision, unpinThreadIds: [] } : decision,
-              `Failed to move ${describeThreadCount(decision.threadIds)}.`,
-            ),
+            botReorder && decision.kind === "nest"
+              ? botReorder.nest(decision.threadIds, decision.parentThreadId)
+              : commitDropChanges(
+                  decision,
+                  `Failed to move ${describeThreadCount(decision.threadIds)}.`,
+                ),
           );
           break;
         case "pin": {

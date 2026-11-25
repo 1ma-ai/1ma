@@ -148,6 +148,7 @@ function parseDefaults(raw: string | null): ChatDefaults | null {
 export class BotStore {
   private changes = 0;
   private readonly reopenings = new Map<string, number>();
+  private readonly assignments = new Map<string, number>();
 
   constructor(
     private readonly db: Database.Database,
@@ -404,7 +405,12 @@ export class BotStore {
         )
         .run(threadId, botId, Number(options.startedFromBot), this.now());
       this.writeOrder(order);
+      this.assignments.set(threadId, this.changes);
     })();
+  }
+
+  assignedSince(threadId: string, generation: number): boolean {
+    return (this.assignments.get(threadId) ?? generation) > generation;
   }
 
   hasAssignmentDecision(threadId: string): boolean {
@@ -456,6 +462,7 @@ export class BotStore {
       .prepare("DELETE FROM bot_threads WHERE thread_id = ?")
       .run(threadId);
     this.reopenings.delete(threadId);
+    this.assignments.delete(threadId);
     if (changes > 0) this.noteChange();
   }
 

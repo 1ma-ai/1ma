@@ -147,7 +147,10 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
 
   // Acts on a reading that nothing observable changed under: acting awaits
   // nothing, so no change fits between the comparison and the act.
-  const decide = async <T, R>(read: () => Promise<T>, act: (value: T) => R): Promise<R> => {
+  const decide = async <T, R>(
+    read: () => Promise<T>,
+    act: (value: T) => R | Promise<R>,
+  ): Promise<R> => {
     for (let reading = 1; reading <= DECISION_READS_MAX; reading += 1) {
       const seen = store.generation;
       const value = await read();
@@ -156,16 +159,38 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     throw new BotsError("conflict", agentText.keepsChanging);
   };
 
+  // What the readings below take from bb: where a conversation stands (archived,
+  // deleted, its parent) and what keepsOpen looks at (status, question, queue).
+  // bb has no event for visibility, a pin and a failed queue: those count from
+  // the next reading on.
+  for (const event of [
+    "thread.created",
+    "thread.archived",
+    "thread.unarchived",
+    "thread.deleted",
+    "experimental_thread.parentChanged",
+    "thread.active",
+    "thread.idle",
+    "thread.failed",
+    "interaction.pending",
+    "message.queued",
+    "message.dispatched",
+    "message.cancelled",
+  ] as const)
+    bb.events.on(event, () => store.noteChange());
+
   type ThreadRow = Awaited<ReturnType<typeof bb.sdk.threads.list>>[number];
 
-  // The rows a bot's tree can show: not archived, deleted or hidden.
-  const shownRows = async (threadIds: readonly string[]) => {
+  const rowsOf = async (threadIds: readonly string[], filter: { archived?: boolean } = {}) => {
     const rows = new Map<string, ThreadRow>();
     for (const page of pages(threadIds))
-      for (const row of await bb.sdk.threads.list({ threadIds: page, archived: false }))
+      for (const row of await bb.sdk.threads.list({ threadIds: page, ...filter }))
         rows.set(row.id, row);
     return rows;
   };
+
+  // The rows a bot's tree can show: not archived, deleted or hidden.
+  const shownRows = (threadIds: readonly string[]) => rowsOf(threadIds, { archived: false });
 
   const branchesOf = async (threadIds: readonly string[]) => {
     const chains = [];
@@ -247,60 +272,94 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   };
 
   // Puts conversations beside another one of the same bot, under its parent in
-  // the bot's tree when the caller saw that level: all of it, or nothing.
-  const moveThreads = async ({ botId, threadIds, target, levelShown }: MoveThreadsInput) => {
-    store.orderAfterMove(botId, threadIds, target);
-    const shown = await shownRows([...threadIds, target.threadId]);
-    const branches = await branchesOf([...threadIds, target.threadId]);
-    const parentOf = (threadId: string) => branches.get(threadId)?.threadIds[1] ?? null;
-    const { parentThreadId } = target;
-    const rows = threadIds.flatMap((id) => shown.get(id) ?? []);
-    if (
-      rows.length < threadIds.length ||
-      !shown.has(target.threadId) ||
-      parentOf(target.threadId) !== parentThreadId
-    )
-      throw new BotsError("conflict", agentText.treeChanged);
-    const started: ThreadRow[] = [];
-    // A failed update may have been written all the same, so every row this
-    // move touched is read again; what somebody else wrote since stays.
-    const isBack = async (row: ThreadRow) => {
-      const current = await bb.sdk.threads.get({ threadId: row.id });
-      if (current.sectionId !== row.sectionId) return false;
-      if (current.parentThreadId === row.parentThreadId) return true;
-      if (current.parentThreadId !== parentThreadId) return false;
-      await bb.sdk.threads.update({
-        threadId: row.id,
-        parentThreadId: row.parentThreadId,
-        sectionId: row.sectionId,
-      });
-      return true;
-    };
-    try {
-      for (const row of rows) {
-        if (!levelShown || parentOf(row.id) === parentThreadId) continue;
-        started.push(row);
-        await bb.sdk.threads.update({
-          threadId: row.id,
-          parentThreadId,
-          // Without it bb gives a conversation that leaves its parent the parent's section.
-          ...(parentThreadId === null && { sectionId: row.sectionId }),
-        });
-      }
-      store.moveThreads(botId, threadIds, target);
-    } catch (error) {
-      const stuck: ThreadRow[] = [];
-      for (const row of started.toReversed())
-        if (!(await isBack(row).catch(() => false))) stuck.push(row);
-      if (stuck.length === 0) throw error;
-      throw new BotsError(
-        "conflict",
-        agentText.moveNotUndone(
-          messageOf(error),
-          stuck.map((row) => row.title ?? row.titleFallback ?? row.id),
-        ),
-      );
-    }
+  // the bot's tree when the caller saw that level, or inside another one: all of
+  // it, or nothing.
+  const moveThreads = ({ botId, sources, target, levelShown }: MoveThreadsInput) => {
+    const { placement } = target;
+    const beside = placement === "inside" ? null : { threadId: target.threadId, placement };
+    const parentThreadId = beside === null ? target.threadId : target.parentThreadId;
+    const threadIds = sources.map((source) => source.threadId);
+    const titleOf = (row: ThreadRow) => row.title ?? row.titleFallback ?? row.id;
+    return decide(
+      async () => {
+        const drawn = [...threadIds, target.threadId];
+        return { rows: await rowsOf(drawn), branches: await branchesOf(drawn) };
+      },
+      async ({ rows, branches }) => {
+        if (beside !== null) store.orderAfterMove(botId, threadIds, beside);
+        const row = (threadId: string) => {
+          const found = rows.get(threadId);
+          if (found === undefined) throw new BotsError("conflict", agentText.treeChanged);
+          return found;
+        };
+        const stands = (
+          place: MoveThreadsInput["target"] | MoveThreadsInput["sources"][number],
+        ) => {
+          const branch = branches.get(place.threadId);
+          const { archivedAt } = row(place.threadId);
+          return (
+            branch?.botId === botId &&
+            (branch.threadIds[1] ?? null) === place.parentThreadId &&
+            // bb lets an archived conversation go under another one.
+            (archivedAt === null || (beside === null && place !== target))
+          );
+        };
+        const real = (source: MoveThreadsInput["sources"][number]) =>
+          row(source.threadId).parentThreadId === source.parentThreadId;
+        if (
+          ![...sources, target].every(stands) ||
+          sources.some((source) => source.real !== real(source))
+        )
+          throw new BotsError("conflict", agentText.treeChanged);
+        const moves = sources.filter(
+          (source) => (beside === null || levelShown) && source.parentThreadId !== parentThreadId,
+        );
+        const outside = moves.find((source) => !source.real);
+        if (outside !== undefined)
+          throw new BotsError("invalid", agentText.outsideParent(titleOf(row(outside.threadId))));
+        const started: ThreadRow[] = [];
+        // A failed update may have been written all the same, so every row this
+        // move touched is read again; what somebody else wrote since stays.
+        const isBack = async (before: ThreadRow) => {
+          const read = () => bb.sdk.threads.get({ threadId: before.id });
+          let current = await read();
+          if (current.parentThreadId === parentThreadId) {
+            await bb.sdk.threads.update({
+              threadId: before.id,
+              parentThreadId: before.parentThreadId,
+              ...(before.parentThreadId === null && { sectionId: current.sectionId }),
+            });
+            current = await read();
+          }
+          return (
+            current.parentThreadId === before.parentThreadId &&
+            current.sectionId === before.sectionId
+          );
+        };
+        try {
+          for (const source of moves) {
+            const before = row(source.threadId);
+            started.push(before);
+            await bb.sdk.threads.update({
+              threadId: before.id,
+              parentThreadId,
+              // Without it bb gives a conversation that leaves its parent the parent's section.
+              ...(parentThreadId === null && { sectionId: before.sectionId }),
+            });
+          }
+          if (beside !== null) store.moveThreads(botId, threadIds, beside);
+        } catch (error) {
+          const stuck: ThreadRow[] = [];
+          for (const before of started.toReversed())
+            if (!(await isBack(before).catch(() => false))) stuck.push(before);
+          if (stuck.length === 0) throw error;
+          throw new BotsError(
+            "conflict",
+            agentText.moveNotUndone(messageOf(error), stuck.map(titleOf)),
+          );
+        }
+      },
+    );
   };
 
   // The end of each bot's latest move, its undoing included; the next one waits for it.
@@ -584,10 +643,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     const branch = await membersAbove(sourceThreadId);
     if (store.bindContinuation(thread.id, sourceThreadId, branch, false)) changed();
   };
-  bb.events.on("thread.created", ({ thread }) => {
-    store.noteChange();
-    return inheritBot(thread);
-  });
+  bb.events.on("thread.created", ({ thread }) => inheritBot(thread));
   bb.experimental_hooks.on("message.dispatch", async ({ thread }) => {
     try {
       if (thread.status === "pending") await inheritBot(thread);
@@ -601,19 +657,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   bb.events.on("message.dispatched", ({ entry }) =>
     accepted({ threadId: entry.threadId, texts: textsOf(entry.content) }),
   );
-  bb.events.on("thread.archived", () => store.noteChange());
-  bb.events.on("thread.unarchived", () => store.noteChange());
-  bb.events.on("experimental_thread.parentChanged", () => store.noteChange());
-  bb.events.on("thread.idle", ({ thread }) => {
-    store.noteChange();
-    return reopenIfTurnStarted(thread.id);
-  });
+  bb.events.on("thread.idle", ({ thread }) => reopenIfTurnStarted(thread.id));
   bb.events.on("thread.active", ({ thread }) => {
-    store.noteChange();
     if (showForWork(thread.id)) changed();
   });
   bb.events.on("interaction.pending", async ({ thread }) => {
-    store.noteChange();
     const updated = store.transaction(() => {
       const shown = showForWork(thread.id);
       const reopened = store.reopen([thread.id]);
@@ -622,12 +670,8 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     if (updated) changed();
     await reopenBranch(thread.id);
   });
-  bb.events.on("thread.failed", ({ thread }) => {
-    store.noteChange();
-    return reopenBranch(thread.id);
-  });
+  bb.events.on("thread.failed", ({ thread }) => reopenBranch(thread.id));
   bb.events.on("thread.deleted", ({ thread }) => {
-    store.noteChange();
     store.forgetThread(thread.id);
     changed();
   });
@@ -810,17 +854,21 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       return { ok: true as const };
     },
     "bots.v1.setCompleted": async ({ threadId, completed }) => {
-      if (store.botOfThread(threadId) === null) {
-        throw new BotsError("not_found", agentText.notABot);
-      }
+      const botId = store.botOfThread(threadId);
+      if (botId === null) throw new BotsError("not_found", agentText.notABot);
+      const asked = store.generation;
+      const requireSameAssignment = () => {
+        if (store.botOfThread(threadId) !== botId || store.assignedSince(threadId, asked))
+          throw new BotsError("conflict", agentText.reassigned);
+      };
       if (completed) {
-        const asked = store.generation;
         await decide(
           async () => [
             ...((await treesBelow([threadId])).get(threadId) ?? []),
             ...(await bb.sdk.threads.list({ threadIds: [threadId] })),
           ],
           (branch) => {
+            requireSameAssignment();
             const waits = branch.some(
               (thread) =>
                 thread.hasPendingInteraction ||
@@ -834,7 +882,9 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
           },
         );
       } else {
-        store.reopen(await membersAbove(threadId));
+        const above = await membersAbove(threadId);
+        requireSameAssignment();
+        store.reopen(above);
       }
       changed();
       return { ok: true as const };

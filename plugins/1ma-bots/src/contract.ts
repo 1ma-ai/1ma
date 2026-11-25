@@ -122,15 +122,16 @@ export const startThreadInput = z.object({
   request: z.record(z.string(), z.unknown()),
 });
 
+// A conversation and the one above it in the bot's tree, as the caller knows it.
+const treePlace = z.object({ threadId: z.string(), parentThreadId: z.string().nullable() });
+
 export const moveThreadsInput = z.object({
   botId: z.string(),
-  threadIds: z.array(z.string()).min(1),
-  target: z.object({
-    threadId: z.string(),
-    placement: z.enum(["before", "after"]),
-    // The conversation above the target in the bot's tree, as the caller knows it.
-    parentThreadId: z.string().nullable(),
-  }),
+  // real: the conversation above is also its parent in bb; otherwise its parent
+  // is outside the bot's tree.
+  sources: z.array(treePlace.extend({ real: z.boolean() })).min(1),
+  // inside: under the target, which changes no order.
+  target: treePlace.extend({ placement: z.enum(["before", "after", "inside"]) }),
   // Whether the moved conversations and the target were drawn under their real
   // parents. Otherwise only the order changes.
   levelShown: z.boolean(),
