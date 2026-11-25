@@ -10,9 +10,9 @@ name: Desktop release
 # does the publishing; a dry run makes every check it does short of writing,
 # including the comparison with the files a release of the tag already holds.
 # A publication is started from main; a dry run may be started from a branch,
-# to try its copy of this file and of the tool. Both take the files of the
-# run's latest attempt, the one whose result is checked here; a dry run is a
-# check, not an approval of the bytes, and a publication repeats every check.
+# to try its copy of this file and of the tool. Both accept only files of the
+# attempt whose result the first step checked; a dry run is a check, not an
+# approval of the bytes, and a publication repeats every check.
 
 on:
   workflow_dispatch:

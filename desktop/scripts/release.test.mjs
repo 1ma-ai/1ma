@@ -85,7 +85,10 @@ function parse(args) {
 }
 
 const isRead = ([group, action]) =>
-  (group === "release" && ["view", "download", "list"].includes(action)) || group === "api";
+  (group === "release" && ["view", "download", "list"].includes(action)) ||
+  (group === "api" && action !== "-X");
+
+const ASSETS = `https://api.github.com/repos/${REPO}/releases/assets/`;
 
 const answer = (stdout) => ({ status: 0, stdout, stderr: "" });
 const error = (stderr, stdout = "") => ({ status: 1, stdout, stderr: `${stderr}\n` });
@@ -114,11 +117,13 @@ const store = (target, files, broken, clobber) => {
 // release, a draft has no tag, and publishing a release creates its tag at the
 // target only when the tag is missing. tags maps a name to a commit or to
 // { commit, annotated }; a release that is not a draft gets a tag at its
-// commit unless tags names one. refuse(args) may answer an error for a call
-// before it is carried out; breaks(args) may answer { after, keepDraft } for a
-// create or upload that stores `after` files, leaves the next one unfinished
-// and fails, as an upload GitHub answers with 502; meanwhile(args, state) runs
-// after a write that succeeded.
+// commit unless tags names one. Every stored file has its own id, and its
+// address names that id: a file stored again under the same name is another
+// one. refuse(args) may answer an error for a call before it is carried out;
+// breaks(args) may answer { after, keepDraft } for a create or upload that
+// stores `after` files, leaves the next one unfinished and fails, as an upload
+// GitHub answers with 502; before(args, state) runs before any call, and
+// meanwhile(args, state) after a write that succeeded.
 function github({
   tags = {},
   releases = {},
@@ -127,6 +132,7 @@ function github({
   latestDraft = false,
   refuse = () => undefined,
   breaks = () => undefined,
+  before = () => undefined,
   meanwhile = () => undefined,
 } = {}) {
   const tagged = new Map(
@@ -136,15 +142,18 @@ function github({
     ]),
   );
   const state = new Map(
-    Object.entries(releases).map(([tag, { commit = COMMIT, draft = false, assets = {} }]) => {
-      if (!draft && !tagged.has(tag)) tagged.set(tag, { commit, annotated: false });
-      return [tag, { commit, draft, assets: stored(assets) }];
-    }),
+    Object.entries(releases).map(
+      ([tag, { commit = COMMIT, draft = false, prerelease = true, assets = {} }]) => {
+        if (!draft && !tagged.has(tag)) tagged.set(tag, { commit, annotated: false });
+        return [tag, { commit, draft, prerelease, assets: stored(assets) }];
+      },
+    ),
   );
   if (latest)
     state.set("desktop-latest", {
       commit: OTHER,
       draft: latestDraft,
+      prerelease: true,
       assets: new Map(
         Object.entries(feeds).map(([name, version]) => [
           name,
@@ -154,12 +163,29 @@ function github({
     });
   const calls = [];
 
+  const holding = (id) =>
+    [...state.values()].find(({ assets }) => [...assets.values()].some((file) => file.id === id));
+
   const carry = (args) => {
     const { positional, flags } = parse(args);
     const [group, action, tag, ...files] = positional;
     if (group === "api") {
-      const route = action.slice(`repos/${REPO}/`.length);
       const notFound = error("gh: Not Found (HTTP 404)", '{"message":"Not Found","status":"404"}');
+      const method = action === "-X" ? args[2] : "GET";
+      const address = action === "-X" ? args[3] : action;
+      if (address.startsWith(ASSETS)) {
+        const id = Number(address.slice(ASSETS.length));
+        const owner = holding(id);
+        if (owner === undefined) return notFound;
+        const [name, file] = [...owner.assets].find(([, { id: held }]) => held === id);
+        if (method === "DELETE") {
+          owner.assets.delete(name);
+          return answer("");
+        }
+        assert.equal(method, "GET");
+        return answer(JSON.stringify({ id, name, state: file.state, digest: file.digest }));
+      }
+      const route = address.slice(`repos/${REPO}/`.length);
       if (route.startsWith("git/ref/tags/")) {
         const name = route.slice("git/ref/tags/".length);
         const found = tagged.get(name);
@@ -189,7 +215,14 @@ function github({
       throw new Error(`unexpected gh ${args.join(" ")}`);
     }
     assert.deepEqual(flags["--repo"], [REPO]);
-    if (action === "list") return answer([...state.keys()].map((name) => `${name}\n`).join(""));
+    if (action === "list") {
+      // gh lists drafts as well.
+      const listed = [...state].map(([name, { draft }]) => ({ tagName: name, isDraft: draft }));
+      if (flags["--jq"]?.[0] === ".[].tagName")
+        return answer(listed.map(({ tagName }) => `${tagName}\n`).join(""));
+      assert.deepEqual(flags["--json"], ["tagName,isDraft"]);
+      return answer(JSON.stringify(listed));
+    }
     const target = state.get(tag);
     if (action === "create") {
       if (target !== undefined) return error("a release with the same tag name already exists");
@@ -218,7 +251,9 @@ function github({
       return answer(
         JSON.stringify({
           isDraft: target.draft,
-          assets: [...target.assets].map(([name, { digest, state: stage }]) => ({
+          isPrerelease: target.prerelease,
+          assets: [...target.assets].map(([name, { id, digest, state: stage }]) => ({
+            apiUrl: `${ASSETS}${id}`,
             name,
             digest,
             state: stage,
@@ -240,6 +275,7 @@ function github({
       if (taken.length > 0 && !clobber) return error("asset under the same name already exists");
       return store(target, files, breaks(args), clobber) ? answer("") : error(BAD_GATEWAY);
     }
+    // gh reads the release again and deletes whatever now carries the name.
     if (action === "delete-asset") {
       assert.deepEqual(flags["--yes"], [true]);
       if (!target.assets.delete(files[0])) return error(`asset ${files[0]} not found in ${tag}`);
@@ -250,6 +286,7 @@ function github({
 
   const gh = (args) => {
     calls.push(args);
+    before(args, state);
     const refusal = refuse(args);
     if (refusal !== undefined) return error(refusal);
     const done = carry(args);
@@ -552,6 +589,9 @@ const OLD_FEEDS = {
   "server-version.json": "0.49.1-1ma.100.1",
 };
 const literal = (text) => text.replaceAll(".", "\\.");
+// A call with the files it passes by name.
+const shape = (args) =>
+  parse(args).positional.map((part) => (path.isAbsolute(part) ? path.basename(part) : part));
 const feedUploads = (fake) =>
   fake.writes().filter((args) => args[1] === "upload" && args[2] === "desktop-latest");
 const filesOf = (fake, tag) =>
@@ -698,17 +738,11 @@ describe("an unfinished upload", () => {
       output,
       new RegExp(`removed the unfinished ${literal(server)} \\(state starter\\)`),
     );
-    assert.deepEqual(
-      fake
-        .writes()
-        .slice(writes)
-        .map((args) => parse(args).positional.slice(0, 3)),
-      [
-        ["release", "delete-asset", TAG],
-        ["release", "upload", TAG],
-        ["release", "upload", "desktop-latest"],
-      ],
-    );
+    assert.deepEqual(fake.writes().slice(writes).map(shape), [
+      ["api", "-X", "DELETE", `${ASSETS}${first[server].id}`],
+      ["release", "upload", TAG, server, "SHA256SUMS"],
+      ["release", "upload", "desktop-latest", "desktop-version.json", "server-version.json"],
+    ]);
     const done = filesOf(fake, TAG);
     for (const [name, file] of Object.entries(first))
       if (file.state === "uploaded") assert.deepEqual(done[name], file);
@@ -753,6 +787,7 @@ describe("an unfinished upload", () => {
       "starter",
     );
     const released = filesOf(fake, TAG);
+    const starter = filesOf(fake, "desktop-latest")["server-version.json"].id;
 
     broken = false;
     const writes = fake.writes().length;
@@ -762,16 +797,10 @@ describe("an unfinished upload", () => {
     );
     assert.equal(fake.writes().length, writes);
     publish(artifacts, fake, false);
-    assert.deepEqual(
-      fake
-        .writes()
-        .slice(writes)
-        .map((args) => parse(args).positional.map((part) => path.basename(part))),
-      [
-        ["release", "delete-asset", "desktop-latest", "server-version.json"],
-        ["release", "upload", "desktop-latest", "desktop-version.json", "server-version.json"],
-      ],
-    );
+    assert.deepEqual(fake.writes().slice(writes).map(shape), [
+      ["api", "-X", "DELETE", `${ASSETS}${starter}`],
+      ["release", "upload", "desktop-latest", "server-version.json"],
+    ]);
     assert.deepEqual(filesOf(fake, TAG), released);
     for (const name of ["desktop-version.json", "server-version.json"]) {
       assert.equal(fake.state.get("desktop-latest").assets.get(name).state, "uploaded");
@@ -806,9 +835,227 @@ describe("an unfinished upload", () => {
   });
 });
 
+// The files a complete release of the build holds.
+function everyFile(version) {
+  const { dmg, zip, server } = names(version);
+  const contents = {
+    [zip]: `zip ${version}`,
+    [dmg]: `dmg ${version}`,
+    [server]: `server ${version}`,
+  };
+  return {
+    ...contents,
+    SHA256SUMS: [zip, dmg, server].map((name) => `${sha256(contents[name])}  ${name}\n`).join(""),
+  };
+}
+
+// Changes GitHub once, right before the first call that removes an unfinished
+// file, as a maintainer or another tool could.
+const beforeRemoving = (change) => {
+  let changed = false;
+  return (args, state) => {
+    const removing =
+      (args[0] === "api" && String(args.at(-1)).startsWith(ASSETS)) || args[1] === "delete-asset";
+    if (removing && !changed) {
+      changed = true;
+      change(state);
+    }
+  };
+};
+
+// The release of the tag with the server package left unfinished.
+function unfinishedServer(artifacts, before) {
+  const { dmg, zip, server } = names(artifacts.version);
+  const files = everyFile(artifacts.version);
+  return github({
+    feeds: OLD_FEEDS,
+    releases: { [TAG]: { assets: { [zip]: files[zip], [dmg]: files[dmg], [server]: STARTER } } },
+    before,
+  });
+}
+
+describe("an unfinished upload changed by someone else before it is removed", () => {
+  test("into an uploaded file with other bytes keeps that file and stops before the feeds", () => {
+    const artifacts = build();
+    const { server } = names(artifacts.version);
+    let replaced;
+    const fake = unfinishedServer(
+      artifacts,
+      beforeRemoving((state) => {
+        const { assets } = state.get(TAG);
+        assets.delete(server);
+        replaced = asset("a server uploaded by hand");
+        assets.set(server, replaced);
+      }),
+    );
+    assert.throws(
+      () => publish(artifacts, fake, false),
+      new RegExp(`already has a different ${literal(server)}; refusing to replace`, "u"),
+    );
+    const kept = fake.state.get(TAG).assets.get(server);
+    assert.equal(kept.id, replaced.id);
+    assert.equal(kept.content, "a server uploaded by hand");
+    assert.deepEqual(feedUploads(fake), []);
+    assert.equal(announces(fake, "server-version.json"), "0.49.1-1ma.100.1");
+  });
+
+  test("that vanished is uploaded without an error", () => {
+    const artifacts = build();
+    const { server } = names(artifacts.version);
+    const fake = unfinishedServer(
+      artifacts,
+      beforeRemoving((state) => state.get(TAG).assets.delete(server)),
+    );
+    publish(artifacts, fake, false);
+    const files = filesOf(fake, TAG);
+    assert.equal(Object.keys(files).length, 4);
+    assert.equal(files[server].digest, `sha256:${sha256(`server ${artifacts.version}`)}`);
+    assert.equal(announces(fake, "server-version.json"), artifacts.version);
+  });
+
+  test("again after the release was read anew stops, naming the file", () => {
+    const artifacts = build();
+    const { server } = names(artifacts.version);
+    const fake = unfinishedServer(artifacts, (args, state) => {
+      if (args[0] === "api" && String(args.at(-1)).startsWith(ASSETS)) {
+        const { assets } = state.get(TAG);
+        assets.delete(server);
+        assets.set(server, asset(STARTER));
+      }
+    });
+    assert.throws(
+      () => publish(artifacts, fake, false),
+      new RegExp(
+        `the unfinished ${literal(server)} in desktop/v0\\.49\\.1-1ma\\.123\\.1 changed meanwhile, also after`,
+        "u",
+      ),
+    );
+    assert.deepEqual(
+      fake.writes().filter((args) => args[0] !== "api"),
+      [],
+    );
+    assert.equal(announces(fake, "server-version.json"), "0.49.1-1ma.100.1");
+  });
+
+  test("of a feed, into a newer uploaded feed, keeps that feed and uploads no feed", () => {
+    const artifacts = build();
+    let replaced;
+    const fake = github({
+      feeds: { "desktop-version.json": "0.49.1-1ma.100.1", "server-version.json": STARTER },
+      releases: { [TAG]: { assets: everyFile(artifacts.version) } },
+      before: beforeRemoving((state) => {
+        const { assets } = state.get("desktop-latest");
+        assets.delete("server-version.json");
+        replaced = asset(JSON.stringify({ version: "0.49.1-1ma.124.1" }));
+        assets.set("server-version.json", replaced);
+      }),
+    });
+    assert.throws(
+      () => publish(artifacts, fake, false),
+      /only move forward:\ndesktop-latest already announces 0\.49\.1-1ma\.124\.1 in server-version\.json/u,
+    );
+    assert.equal(
+      fake.state.get("desktop-latest").assets.get("server-version.json").id,
+      replaced.id,
+    );
+    assert.deepEqual(feedUploads(fake), []);
+  });
+});
+
+describe("a draft of another, newer build", () => {
+  test("does not count as published, and once it is published it stops the older build", () => {
+    const artifacts = build();
+    const newer = "desktop/v0.49.1-1ma.125.1";
+    const fake = github({
+      feeds: { "desktop-version.json": artifacts.version },
+      releases: { [TAG]: { assets: everyFile(artifacts.version) }, [newer]: { draft: true } },
+    });
+    assert.match(publish(artifacts, fake, true).output, /and point desktop-latest at it/u);
+    publish(artifacts, fake, false);
+    assert.equal(announces(fake, "server-version.json"), artifacts.version);
+
+    fake.state.get(newer).draft = false;
+    fake.state.get("desktop-latest").assets.delete("server-version.json");
+    const writes = fake.writes().length;
+    for (const dryRun of [false, true])
+      assert.throws(
+        () => publish(artifacts, fake, dryRun),
+        /only move forward:\n1ma already published desktop\/v0\.49\.1-1ma\.125\.1/u,
+      );
+    assert.equal(fake.writes().length, writes);
+  });
+});
+
+describe("a release of the tag that is not a pre-release", () => {
+  test("stops both modes before the feeds, and the same as a pre-release passes", () => {
+    const artifacts = build();
+    const normal = github({
+      feeds: OLD_FEEDS,
+      releases: { [TAG]: { prerelease: false, assets: everyFile(artifacts.version) } },
+    });
+    refused(
+      artifacts,
+      normal,
+      /desktop\/v0\.49\.1-1ma\.123\.1 is a release, not a pre-release; a maintainer makes it one with 'gh release edit desktop\/v0\.49\.1-1ma\.123\.1 --prerelease --repo 1ma-ai\/1ma', then runs again/u,
+    );
+    assert.equal(announces(normal, "server-version.json"), "0.49.1-1ma.100.1");
+
+    const pre = github({
+      feeds: OLD_FEEDS,
+      releases: { [TAG]: { assets: everyFile(artifacts.version) } },
+    });
+    publish(artifacts, pre, false);
+    assert.deepEqual(pre.writes().map(shape), [
+      ["release", "upload", "desktop-latest", "desktop-version.json", "server-version.json"],
+    ]);
+    assert.equal(announces(pre, "server-version.json"), artifacts.version);
+  });
+});
+
+describe("feeds that already hold what would be written", () => {
+  test("are not uploaded again by a rerun of a complete publication", () => {
+    const artifacts = build();
+    const fake = github({ feeds: OLD_FEEDS });
+    publish(artifacts, fake, false);
+    const feeds = filesOf(fake, "desktop-latest");
+    const writes = fake.writes().length;
+    assert.match(
+      publish(artifacts, fake, true).output,
+      /the feeds in desktop-latest already point at it/u,
+    );
+    assert.match(
+      publish(artifacts, fake, false).output,
+      /the feeds in desktop-latest already point at desktop\/v0\.49\.1-1ma\.123\.1; nothing uploaded/u,
+    );
+    assert.equal(fake.writes().length, writes);
+    assert.deepEqual(filesOf(fake, "desktop-latest"), feeds);
+  });
+
+  test("leave only the lost feed to upload", () => {
+    const artifacts = build();
+    const fake = github({ feeds: OLD_FEEDS });
+    publish(artifacts, fake, false);
+    const kept = filesOf(fake, "desktop-latest")["server-version.json"];
+    fake.state.get("desktop-latest").assets.delete("desktop-version.json");
+    const writes = fake.writes().length;
+    publish(artifacts, fake, false);
+    assert.deepEqual(fake.writes().slice(writes).map(shape), [
+      ["release", "upload", "desktop-latest", "desktop-version.json"],
+    ]);
+    assert.deepEqual(filesOf(fake, "desktop-latest")["server-version.json"], kept);
+    assert.equal(announces(fake, "desktop-version.json"), artifacts.version);
+  });
+});
+
 describe("a pre-release that does not read back complete after the upload", () => {
   for (const [what, write, tamper, found] of [
     ["is a draft", "create", (draft) => (draft.draft = true), "is a draft"],
+    [
+      "is not a pre-release",
+      "create",
+      (normal) => (normal.prerelease = false),
+      "is not a pre-release; 'gh release edit desktop/v0\\.49\\.1-1ma\\.123\\.1 --prerelease --repo 1ma-ai/1ma' makes it one",
+    ],
     [
       "lacks a file",
       "upload",
