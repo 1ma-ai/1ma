@@ -74,6 +74,7 @@ export interface Executor {
   ): Promise<boolean>;
   taskOutcome(threadId: string, signal: AbortSignal): Promise<TaskOutcome | null>;
   queuedWaits(threadId: string, signal: AbortSignal): Promise<QueuedWait[]>;
+  threadStatus(threadId: string, signal: AbortSignal): Promise<string>;
 }
 
 export interface QueuedWait {

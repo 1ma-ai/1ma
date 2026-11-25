@@ -399,8 +399,18 @@ export async function runActions(deps: ActionDeps): Promise<void> {
         if (deps.signal.aborted) return;
         targets = [...running, ...queued];
         if (targets.length === 0) {
+          if (seenStopped) return;
+          let statuses: string[];
+          try {
+            statuses = await Promise.all(
+              matching.map((row) => executor.threadStatus(row.threadId, deps.signal)),
+            );
+          } catch (error) {
+            deps.warn(`reading the status of late chats of ${action.id}: ${describeError(error)}`);
+            return;
+          }
+          if (deps.signal.aborted || statuses.some(isRunningStatus)) return;
           if (
-            seenStopped ||
             !admit() ||
             !deps.actions.transition(action.id, position, "canceled", deps.now(), {
               threadId: first,

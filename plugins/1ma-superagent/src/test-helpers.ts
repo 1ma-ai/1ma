@@ -60,6 +60,7 @@ export function fakeExecutor(
     clearQueueAndStop: unused("clearQueueAndStop"),
     taskOutcome: async () => null,
     queuedWaits: async () => [],
+    threadStatus: unused("threadStatus"),
     ...overrides,
   };
 }

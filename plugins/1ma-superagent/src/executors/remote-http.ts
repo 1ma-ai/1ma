@@ -269,6 +269,14 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
       await getJson(`/threads/${id}/stop`, okSchema, signal, {});
       return true;
     },
+    async threadStatus(threadId, signal) {
+      const thread = await getJson(
+        `/threads/${encodeURIComponent(threadId)}`,
+        z.object({ status: z.string() }),
+        signal,
+      );
+      return thread.status;
+    },
     async queuedWaits(threadId, signal) {
       const rows = await getJson(
         `/threads/${encodeURIComponent(threadId)}/queued-messages`,

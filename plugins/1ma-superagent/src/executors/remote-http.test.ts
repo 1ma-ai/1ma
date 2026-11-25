@@ -86,6 +86,20 @@ async function outcomeOf(
 }
 
 describe("remote-http executor", () => {
+  it("reads one chat's status from that chat's own route", async () => {
+    const server = fakeServer({
+      "/api/v1/threads/thr_late": json(apiThread("thr_late", { status: "active" })),
+    });
+    const executor = createRemoteHttpExecutor({
+      serverId: "linux",
+      baseUrl: "http://linux.test",
+      fetch: server.fetch,
+      limits,
+    });
+    expect(await executor.threadStatus("thr_late", new AbortController().signal)).toBe("active");
+    expect(server.requested).toEqual(["/api/v1/threads/thr_late"]);
+  });
+
   it("pages through live chats and maps them", async () => {
     const server = fakeServer({
       "/api/v1/threads?archived=false&includeHidden=true&limit=2&offset=0": json([

@@ -72,6 +72,21 @@ describe("local executor", () => {
     expect(harness.callsTo("threads.stop")).toEqual([]);
   });
 
+  it("reads one chat's status with a single-chat read", async () => {
+    const { sdk, harness } = createFakeSdk({
+      pluginId: "1ma-superagent",
+      overrides: {
+        threads: { get: async () => makeThreadResponse({ id: "thr_late", status: "active" }) },
+      },
+    });
+    const executor = createLocalExecutor(sdk);
+    expect(await executor.threadStatus("thr_late", new AbortController().signal)).toBe("active");
+    expect(harness.callsTo("threads.get")).toEqual([
+      [expect.objectContaining({ threadId: "thr_late" })],
+    ]);
+    expect(harness.callsTo("threads.list")).toEqual([]);
+  });
+
   it("deletes and stops nothing once the guard refuses after the queue was read", async () => {
     let allowed = true;
     const { sdk, harness } = createFakeSdk({

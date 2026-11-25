@@ -45,6 +45,7 @@ function setup() {
   const stopped: string[] = [];
   const stopping = { failures: 0 };
   const queues = new Map<string, number>();
+  const reads: { onQueueRead?: (threadId: string) => void; statusFails?: boolean } = {};
   const target = { remote: "https://github.com/example/app.git", excluded: [] as string[] };
   let spawnBehavior: (request: SpawnRequest) => Promise<{ threadId: string }> = async (request) => {
     const threadId = `thr_${spawned.length}`;
@@ -74,8 +75,17 @@ function setup() {
       queues.delete(threadId);
       return true;
     },
-    queuedWaits: async (threadId) =>
-      Array.from({ length: queues.get(threadId) ?? 0 }, () => ({ retry: false, waitingOn: null })),
+    queuedWaits: async (threadId) => {
+      reads.onQueueRead?.(threadId);
+      return Array.from({ length: queues.get(threadId) ?? 0 }, () => ({
+        retry: false,
+        waitingOn: null,
+      }));
+    },
+    threadStatus: async (threadId) => {
+      if (reads.statusFails) throw new TypeError("fetch failed");
+      return existing.find((row) => row.threadId === threadId)?.status ?? "idle";
+    },
   });
   const settingsOf = (active: boolean): PluginSettings => ({
     generation: 0,
@@ -117,6 +127,7 @@ function setup() {
     stopped,
     stopping,
     queues,
+    reads,
     target,
     advance: (ms: number) => {
       clock += ms;
@@ -372,6 +383,45 @@ describe("spawn actions", () => {
 
   const titles = (t: ReturnType<typeof setup>) =>
     t.questions.waiting().map((item) => item.card.title);
+
+  it("says nothing about a stop when the chat started running while its queue was read", async () => {
+    const t = setup();
+    const { id, chat } = await lateChat(t);
+    await t.run();
+    expect(t.actions.get(id)?.result).toBe("stopping late");
+    t.reads.onQueueRead = () => {
+      chat.status = "active";
+    };
+    await t.run();
+    expect(t.actions.get(id)?.result).toBe("stopping late");
+    expect(titles(t)).toEqual([]);
+    t.reads.onQueueRead = undefined;
+    const stops = t.stopped.length;
+    await t.run();
+    expect(t.stopped.length).toBe(stops + 1);
+    expect(t.actions.get(id)?.result).toBe("stopping late");
+  });
+
+  it("confirms no stop when the chat's status cannot be read after its queue", async () => {
+    const t = setup();
+    const { id } = await lateChat(t);
+    await t.run();
+    t.reads.statusFails = true;
+    await t.run();
+    expect(t.actions.get(id)?.result).toBe("stopping late");
+    expect(titles(t)).toEqual([]);
+  });
+
+  it("confirms a stop once when the chat is idle before and after its empty queue was read", async () => {
+    const t = setup();
+    const { id } = await lateChat(t);
+    await t.run();
+    await t.run();
+    await t.run();
+    await t.run();
+    expect(t.actions.get(id)?.result).toBe("stopped late");
+    expect(titles(t)).toEqual(["Отменённый чат всё-таки создан"]);
+  });
 
   it("keeps stopping a late chat until it is seen stopped", async () => {
     const t = setup();

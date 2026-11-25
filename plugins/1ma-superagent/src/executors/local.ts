@@ -130,6 +130,9 @@ export function createLocalExecutor(
       await sdk.threads.stop({ threadId });
       return true;
     },
+    async threadStatus(threadId, signal) {
+      return (await sdk.threads.get({ threadId, signal })).status;
+    },
     async queuedWaits(threadId, signal) {
       const rows = await sdk.threads.queuedMessages.list({ threadId, signal });
       return rows.map((row) => ({
