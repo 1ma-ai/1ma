@@ -210,10 +210,9 @@ describe("Pi sessions of a bb older than 0.50", () => {
     }
   }
 
-  function homeImport(home, { more = [], env = {}, prepare = () => {} } = {}) {
+  function homeImport(home, { more = [], env = {}, prepare = () => {}, to = fresh("1ma") } = {}) {
     const from = bbFolder();
     prepare(from);
-    const to = fresh("1ma");
     const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
     const lines = [];
     const record = withEnv({ HOME: home, BB_PI_BRIDGE_SESSION_DIR: undefined, ...env }, () =>
@@ -293,6 +292,90 @@ describe("Pi sessions of a bb older than 0.50", () => {
       "given\n",
     );
     assert.equal(sessionOneMaReads(fromOption.to, home, "thr_configured.jsonl"), undefined);
+  });
+
+  // bb's Pi bridge data can be a link to storage kept elsewhere. The copy keeps
+  // the link, so a session written under 1ma's folder would land in that storage.
+  const everyFile = (dir) =>
+    readdirSync(dir, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => path.relative(dir, path.join(entry.parentPath, entry.name)))
+      .toSorted();
+
+  for (const [linked, there] of [
+    ["bridge-data", true],
+    ["bridge-data/sessions", true],
+    ["bridge-data/sessions", false],
+  ])
+    test(`are not written through a link out of 1ma's data folder (${linked}${there ? "" : ", its folder missing"})`, () => {
+      const home = fresh("home");
+      const given = fresh("pi-given");
+      write(given, "thr_given.jsonl", "given\n");
+      const to = fresh("1ma");
+      write(to, "earlier.txt", "earlier 1ma\n");
+      let storage;
+      const prepare = (from) => {
+        storage = path.join(from, "moved-pi-storage");
+        if (there) write(storage, "other/thr_other.jsonl", "bb's own\n");
+        const link = path.join(from, "plugins/provider-pi", linked);
+        mkdirSync(path.dirname(link), { recursive: true });
+        symlinkSync(storage, link);
+      };
+      assert.throws(
+        () => homeImport(home, { more: ["--pi-sessions", given, "--move-aside"], prepare, to }),
+        (error) => {
+          assert.match(error.message, /would be written outside/);
+          assert.ok(error.message.includes(storage), error.message);
+          assert.match(error.message, /Nothing was written into/);
+          return true;
+        },
+      );
+      if (there) assert.deepEqual(everyFile(storage), ["other/thr_other.jsonl"]);
+      else assert.equal(existsSync(storage), false);
+      assert.equal(readFileSync(path.join(to, "earlier.txt"), "utf8"), "earlier 1ma\n");
+    });
+
+  test("a linked folder that already has the session is left as it is", () => {
+    const home = fresh("home");
+    const given = fresh("pi-given");
+    write(given, "thr_given.jsonl", "given\n");
+    let storage;
+    const { record } = homeImport(home, {
+      more: ["--pi-sessions", given],
+      prepare: (from) => {
+        storage = path.join(from, "moved-pi-storage");
+        write(storage, "sessions/thr_given.jsonl", "bb's own\n");
+        mkdirSync(path.join(from, "plugins/provider-pi"), { recursive: true });
+        symlinkSync(storage, path.join(from, "plugins/provider-pi/bridge-data"));
+      },
+    });
+    assert.deepEqual(record.piSessions, { from: given, copied: 0, kept: 1 });
+    assert.deepEqual(everyFile(storage), ["sessions/thr_given.jsonl"]);
+    assert.equal(
+      readFileSync(path.join(storage, "sessions/thr_given.jsonl"), "utf8"),
+      "bb's own\n",
+    );
+  });
+
+  test("are written through a link that stays inside 1ma's data folder", () => {
+    const home = fresh("home");
+    const given = fresh("pi-given");
+    write(given, "thr_given.jsonl", "given\n");
+    const { from, to, record } = homeImport(home, {
+      more: ["--pi-sessions", given],
+      prepare: (bb) => {
+        write(bb, "plugins/provider-pi/bridge-data/store/thr_own.jsonl", "bb's own\n");
+        symlinkSync("store", path.join(bb, "plugins/provider-pi/bridge-data/sessions"));
+      },
+    });
+    assert.equal(record.piSessions.copied, 1);
+    assert.equal(
+      readFileSync(path.join(to, "plugins/provider-pi/bridge-data/store/thr_given.jsonl"), "utf8"),
+      "given\n",
+    );
+    assert.deepEqual(everyFile(path.join(from, "plugins/provider-pi/bridge-data/store")), [
+      "thr_own.jsonl",
+    ]);
   });
 });
 

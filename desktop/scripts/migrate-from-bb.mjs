@@ -33,6 +33,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   statSync,
@@ -50,6 +51,7 @@ export const PLUGIN_HOST_DIRECTORIES = ["host-data", "bridge-data"];
 // them from its bridge data in 1ma's data folder.
 const PI_LEGACY_SESSIONS = path.join(".bb", "pi-bridge-sessions");
 export const PI_SESSIONS = "plugins/provider-pi/bridge-data/sessions";
+const MAX_LINKS = 40;
 // Copying these would leave stale duplicates: the database points at the
 // originals, and 1ma removes them there when their threads are archived.
 export const LEFT_IN_PLACE = [
@@ -203,11 +205,18 @@ export function piSessionPlan(dir) {
 }
 
 // A session the 1ma data folder already has is newer than bb's and stays.
+// The machine entries copied before keep bb's symbolic links as they are, so
+// the folder may lead out of the 1ma data folder: nothing is written there.
 export function copyPiSessions({ from, to, plan }) {
   const target = path.join(to, PI_SESSIONS);
   let copied = 0;
   for (const name of plan) {
     if (existsSync(path.join(target, name))) continue;
+    const physical = real(target);
+    if (!within(physical, real(to)))
+      throw new Error(
+        `Pi's earlier conversations would be written outside ${to}: ${target} is a symbolic link to ${physical}, copied from bb as it is. Replace the link in bb's data folder with a real folder, or pass --pi-sessions with an empty folder to import without them, then run the import again.`,
+      );
     mkdirSync(target, { recursive: true });
     copyFileSync(path.join(from, name), path.join(target, name), constants.COPYFILE_EXCL);
     copied += 1;
@@ -262,11 +271,19 @@ function within(child, parent) {
 }
 
 // A folder that does not exist yet resolves through its nearest existing
-// parent, so both sides of a comparison pass the same symbolic links.
+// parent, so both sides of a comparison pass the same symbolic links. A link
+// to a folder that does not exist is followed too: a write under it would
+// create that folder where the link points.
 function real(dir) {
   const missing = [];
   let existing = path.resolve(dir);
-  while (!existsSync(existing) && path.dirname(existing) !== existing) {
+  for (let links = 0; !existsSync(existing) && path.dirname(existing) !== existing;) {
+    if (lstatSync(existing, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      if ((links += 1) > MAX_LINKS)
+        throw new Error(`${dir} passes through a loop of symbolic links`);
+      existing = path.resolve(path.dirname(existing), readlinkSync(existing));
+      continue;
+    }
     missing.unshift(path.basename(existing));
     existing = path.dirname(existing);
   }

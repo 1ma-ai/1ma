@@ -1322,9 +1322,10 @@ export function rebrandTree(root, rules, { write = false } = {}) {
           decisions.push({ ...decision, index: decision.index + start });
       return { result: compose(pattern, decisions, rules.replacement), decisions };
     };
-    const flag = (literal, decided, relaxed) => {
-      const reviewed = (testEdits.get(file) ?? []).some((entry) => entry.find.includes(literal));
-      if (relaxed.result !== decided.result && !reviewed)
+    const flag = (literal, decided, relax) => {
+      if ((testEdits.get(file) ?? []).some((entry) => entry.find.includes(literal))) return;
+      const relaxed = relax();
+      if (relaxed.result !== decided.result)
         suspicious.push(
           `${file}: ${JSON.stringify(literal)} stays as is, but a renamed source suggests ${JSON.stringify(relaxed.result)}`,
         );
@@ -1334,12 +1335,13 @@ export function rebrandTree(root, rules, { write = false } = {}) {
       decide: (cooked, context) => {
         const decided = named(cooked) ?? propagate(cooked, index, options);
         if (context.negative && !named(cooked))
-          flag(cooked, decided, propagate(cooked, index, { ...options, relaxed: true }));
+          flag(cooked, decided, () => propagate(cooked, index, { ...options, relaxed: true }));
         return decided;
       },
       regexes: (pattern, context) => {
         const decided = byAlternative(pattern, {});
-        if (context.negative) flag(pattern, decided, byAlternative(pattern, { relaxed: true }));
+        if (context.negative)
+          flag(pattern, decided, () => byAlternative(pattern, { relaxed: true }));
         return decided;
       },
     });

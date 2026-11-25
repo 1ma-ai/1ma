@@ -710,6 +710,40 @@ describe("prepare stops when a rule for all of bb matches nothing", () => {
     assert.deepEqual(results[1].unmatched, [{ kind: "keep", text: inside.text }]);
   });
 
+  test("a keep rule that only changes a suggestion a testReplace already settles is still named", () => {
+    const whole = { text: "Please Restart bb", reason: "test" };
+    const inside = { text: "Restart bb", reason: "test" };
+    const reviewed = {
+      file: "apps/app/src/hint.test.tsx",
+      find: 'not.toContain("Restart bb soon")',
+      replace: 'not.toContain("Restart 1ma soon")',
+      reason: "test",
+    };
+    const files = {
+      "apps/app/package.json": manifest("@bb/app"),
+      "apps/app/src/hint.tsx": 'export const hint = "Please Restart bb";\n',
+      "apps/app/src/hint.test.tsx": 'expect(title).not.toContain("Restart bb soon");\n',
+    };
+    const run = (more) => {
+      const root = tree(files);
+      after(() => rmSync(root, { recursive: true, force: true }));
+      const { unmatched } = rebrandTree(root, only({ product: [whole], ...more }), { write: true });
+      return {
+        unmatched,
+        test: readFileSync(path.join(root, "apps/app/src/hint.test.tsx"), "utf8"),
+      };
+    };
+    assert.throws(() => run({}), /negative assertions[\s\S]*"Restart bb soon" stays as is/);
+    const settled = run({ testReplace: [reviewed] });
+    const both = run({ testReplace: [reviewed], keep: [inside] });
+    assert.match(both.test, /not\.toContain\("Restart 1ma soon"\)/);
+    assert.equal(both.test, settled.test);
+    assert.deepEqual(both.unmatched, [{ kind: "keep", text: inside.text }]);
+    const alone = run({ keep: [inside] });
+    assert.match(alone.test, /not\.toContain\("Restart bb soon"\)/);
+    assert.deepEqual(alone.unmatched, []);
+  });
+
   test("a keep rule inside a longer rule that no test quotes is still named", () => {
     const whole = { text: "Please Restart bb server now", reason: "test" };
     const inside = { text: "Restart bb server", reason: "test" };
