@@ -55,7 +55,7 @@ export function askAboutConflicts(prStore: PrStore, questions: QuestionStore, no
     for (const question of waiting)
       if (question.subject === subject(link) && question.key !== key)
         questions.cancel(question.key);
-    if (key === null || questions.latest(key) !== null) continue;
+    if (key === null || questions.isPendingOrDecided(key)) continue;
     questions.ask(
       {
         key,

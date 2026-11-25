@@ -205,7 +205,7 @@ export class PrStore {
         thread: delivery.thread,
         kind: manual ? "manual" : decision.kind === "claim" || kept ? "claim" : null,
         confirmedAt,
-        conflict: kept ? decision.conflict : null,
+        conflict: kept && pull.state === "open" ? decision.conflict : null,
         problem: decision.kind === "none" ? decision.problem : null,
         hint: branchHint,
         now,

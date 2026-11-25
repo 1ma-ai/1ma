@@ -8,7 +8,14 @@ export const QUESTION_RENDERER = "question";
 export const QUESTION_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000;
 export const UNRECORDED_RETRY_MS = [30 * 1000, 2 * 60 * 1000, 10 * 60 * 1000] as const;
 
-export type QuestionState = "queued" | "open" | "answered" | "stale" | "expired" | "canceled";
+export type QuestionState =
+  | "queued"
+  | "open"
+  | "answered"
+  | "dismissed"
+  | "stale"
+  | "expired"
+  | "canceled";
 
 export interface QuestionRow {
   id: string;
@@ -50,6 +57,7 @@ const STATES: readonly QuestionState[] = [
   "queued",
   "open",
   "answered",
+  "dismissed",
   "stale",
   "expired",
   "canceled",
@@ -126,6 +134,16 @@ export class QuestionStore {
       .prepare(`SELECT * FROM questions WHERE key = ? AND state IN ('queued', 'open')`)
       .get(key) as RawQuestion | undefined;
     return raw === undefined ? null : toRow(raw);
+  }
+
+  isPendingOrDecided(key: string): boolean {
+    return (
+      this.#db
+        .prepare(
+          `SELECT 1 FROM questions WHERE key = ? AND state IN ('queued', 'open', 'answered', 'dismissed') LIMIT 1`,
+        )
+        .get(key) !== undefined
+    );
   }
 
   latest(key: string): QuestionRow | null {
@@ -205,7 +223,7 @@ export class QuestionStore {
       .run({ id, token, now, first, second, later });
   }
 
-  closeAs(id: string, token: string, state: "canceled" | "expired"): void {
+  closeAs(id: string, token: string, state: "dismissed" | "expired"): void {
     this.#db
       .prepare(`UPDATE questions SET state = ? WHERE id = ? AND token = ? AND state = 'open'`)
       .run(state, id, token);

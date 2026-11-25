@@ -121,7 +121,7 @@ function askBaseline(questions: QuestionStore, repo: string, head: string, now: 
   for (const waiting of questions.waiting())
     if (waiting.subject.startsWith(`${BASELINE}${repo}@`) && waiting.key !== key)
       questions.cancel(waiting.key);
-  if (questions.latest(key) !== null) return;
+  if (questions.isPendingOrDecided(key)) return;
   questions.ask(
     {
       key,

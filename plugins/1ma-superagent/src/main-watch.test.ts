@@ -339,6 +339,46 @@ describe("main watch rows written before the confirmed head was kept apart", () 
     }
   });
 
+  it("asks for the baseline of a head again when main comes back to it, and the new card sets it", async () => {
+    const old = legacy([{ lastHead: B, state: "needs_reconcile" }]);
+    try {
+      old.upgrade();
+      const questions = new QuestionStore(old.db);
+      await watchOnce(old.db, B, "");
+      const [first] = questions.waiting();
+      await watchOnce(old.db, C, "");
+      const [second] = questions.waiting();
+      await watchOnce(old.db, B, "");
+      const asked = questions.waiting();
+      expect(asked.map((question) => question.subject)).toEqual([`baseline:${REPO}@${B}`]);
+      expect([first?.id, second?.id]).not.toContain(asked[0]?.id);
+      expect([first, second].map((question) => questions.get(question?.id ?? "")?.state)).toEqual([
+        "canceled",
+        "canceled",
+      ]);
+      expect(answerBaseline(old.db)).toBe("applied");
+      expect(mainWatchRows(old.db)[0]).toMatchObject({ anchor: B, observedHead: B, state: "ok" });
+    } finally {
+      old.close();
+    }
+  });
+
+  it("asks for an unknown baseline once over several passes of an unchanged head", async () => {
+    const old = legacy([{ lastHead: B, state: "needs_reconcile" }]);
+    try {
+      old.upgrade();
+      const questions = new QuestionStore(old.db);
+      await watchOnce(old.db, B, "");
+      const first = questions.waiting().map((question) => question.id);
+      await watchOnce(old.db, B, "");
+      await watchOnce(old.db, B, "");
+      expect(questions.waiting().map((question) => question.id)).toEqual(first);
+      expect(first).toHaveLength(1);
+    } finally {
+      old.close();
+    }
+  });
+
   it("keeps an ok row as the confirmed head and judges the next train from it", async () => {
     const old = legacy([{ lastHead: A, state: "ok" }]);
     try {

@@ -97,9 +97,7 @@ export function askAboutUnlinked(
       continue;
     }
     if (now - (link.unlinkedSince ?? now) < UNLINKED_GRACE_MS) continue;
-    const latest = questions.latest(key);
-    if (latest !== null && (latest.state === "answered" || latest.state === "canceled")) continue;
-    if (latest !== null && (latest.state === "queued" || latest.state === "open")) continue;
+    if (questions.isPendingOrDecided(key)) continue;
     questions.ask(
       {
         key,

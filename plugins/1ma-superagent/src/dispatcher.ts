@@ -111,7 +111,7 @@ export class QuestionDispatcher {
             if (recorded?.state === "open" && recorded.token === token)
               this.#deps.store.requeueUnrecorded(question.id, token, this.#deps.now());
           } else if (result.reason === "user") {
-            this.#deps.store.closeAs(question.id, token, "canceled");
+            this.#deps.store.closeAs(question.id, token, "dismissed");
           } else if (result.reason === "timeout") {
             this.#deps.store.closeAs(question.id, token, "expired");
           } else {

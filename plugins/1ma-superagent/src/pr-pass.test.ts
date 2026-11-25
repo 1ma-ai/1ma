@@ -486,6 +486,7 @@ describe("runPrPass", () => {
 describe("a second claim on a linked PR", () => {
   const contested = (others: string[]) => {
     const metadata: Record<string, unknown> = { thr_old: claimsOf(7) };
+    const pulls = [pull(7)];
     const t = setup({
       threads: {
         mac: [],
@@ -495,7 +496,7 @@ describe("a second claim on a linked PR", () => {
         ],
       },
       metadata,
-      pulls: [pull(7)],
+      pulls,
     });
     const questions = new QuestionStore(t.db);
     const pass = async (now: number, observed: Partial<Record<ServerId, Completeness>> = {}) => {
@@ -504,7 +505,7 @@ describe("a second claim on a linked PR", () => {
     };
     const conflicts = () =>
       questions.waiting().filter((question) => question.kind === "pr_conflict");
-    return { ...t, metadata, questions, pass, conflicts };
+    return { ...t, metadata, pulls, questions, pass, conflicts };
   };
 
   it("keeps the link while the linked chat is read again with its claim, and calls the other a conflict", async () => {
@@ -554,6 +555,42 @@ describe("a second claim on a linked PR", () => {
     expect(t.conflicts()[0]?.id).not.toBe(first.id);
   });
 
+  it("asks one new card when a PR with an unchanged conflict closes and opens again, and refuses the old card", async () => {
+    const t = contested(["thr_new"]);
+    await t.pass(10_000);
+    t.metadata.thr_new = claimsOf(7);
+    await t.pass(20_000);
+    const [first] = t.conflicts();
+    if (first === undefined) throw new Error("no conflict card");
+    expect(t.questions.markOpen(first.id, "thr_bot", "tok_1", 20_500)).toBe(true);
+    t.pulls[0] = pull(7, { state: "closed", updatedAt: 6_000 });
+    await t.pass(30_000);
+    expect(t.conflicts()).toEqual([]);
+    expect(t.prStore.get("example/app", 7)).toMatchObject({
+      conflictChat: null,
+      conflictSince: null,
+    });
+    t.pulls[0] = pull(7, { updatedAt: 7_000 });
+    await t.pass(40_000);
+    expect(t.prStore.get("example/app", 7)).toMatchObject({
+      deliveryThreadId: "thr_old",
+      conflictChat: "linux:thr_new",
+      conflictSince: 40_000,
+    });
+    const again = t.conflicts();
+    expect(again).toHaveLength(1);
+    expect(again[0]?.id).not.toBe(first.id);
+    expect(
+      t.questions.answer(
+        first.id,
+        "tok_1",
+        "keep",
+        new Map([["pr_conflict", conflictKind(t.prStore, t.store)]]),
+        40_500,
+      ),
+    ).toBe("unknown");
+  });
+
   it("does not ask again while the same conflict goes on after the owner closed the card", async () => {
     const t = contested(["thr_new"]);
     await t.pass(10_000);
@@ -562,7 +599,7 @@ describe("a second claim on a linked PR", () => {
     const [first] = t.conflicts();
     if (first === undefined) throw new Error("no conflict card");
     expect(t.questions.markOpen(first.id, "thr_bot", "tok_1", 20_500)).toBe(true);
-    t.questions.closeAs(first.id, "tok_1", "canceled");
+    t.questions.closeAs(first.id, "tok_1", "dismissed");
     await t.pass(30_000);
     await t.pass(40_000);
     expect(t.conflicts()).toEqual([]);

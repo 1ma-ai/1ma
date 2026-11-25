@@ -335,7 +335,7 @@ describe("question dispatcher", () => {
     if (first === undefined) throw new Error("no card");
     harness.behavior.cancelInteraction(first.id);
     await settle();
-    expect(store.latest("first")?.state).toBe("canceled");
+    expect(store.latest("first")?.state).toBe("dismissed");
   });
 
   it("records a decision before the card closes and does not apply it again when the card's answer arrives", async () => {

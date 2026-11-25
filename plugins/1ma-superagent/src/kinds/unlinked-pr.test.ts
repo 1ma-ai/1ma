@@ -83,6 +83,36 @@ describe("unlinked PR questions", () => {
     expect(question?.card.options.filter((option) => option.recommended)).toHaveLength(1);
   });
 
+  it("asks once over several passes of an unchanged unlinked PR, and not again after the owner dismissed its card", () => {
+    const { prStore, questions } = setup();
+    const at = 1_000 + UNLINKED_GRACE_MS;
+    askAboutUnlinked(prStore, questions, policy, at);
+    askAboutUnlinked(prStore, questions, policy, at + 60_000);
+    askAboutUnlinked(prStore, questions, policy, at + 120_000);
+    const asked = questions.waiting();
+    expect(asked).toHaveLength(1);
+    const id = asked[0]?.id ?? "";
+    expect(questions.markOpen(id, "thr_bot", "t", at + 121_000)).toBe(true);
+    questions.closeAs(id, "t", "dismissed");
+    askAboutUnlinked(prStore, questions, policy, at + 180_000);
+    expect(questions.waiting()).toEqual([]);
+  });
+
+  it("asks again about a PR that closed and opened again after its card was canceled", () => {
+    const { prStore, questions, recordPull } = setup();
+    const at = 1_000 + UNLINKED_GRACE_MS;
+    askAboutUnlinked(prStore, questions, policy, at);
+    const [first] = questions.waiting();
+    recordPull("closed", at + 1_000);
+    askAboutUnlinked(prStore, questions, policy, at + 1_000);
+    expect(questions.waiting()).toEqual([]);
+    recordPull("open", at + 2_000);
+    askAboutUnlinked(prStore, questions, policy, at + 2_000);
+    const again = questions.waiting();
+    expect(again).toHaveLength(1);
+    expect(again[0]?.id).not.toBe(first?.id);
+  });
+
   it("does not ask about a PR by someone else's account", () => {
     const { prStore, questions } = setup("stranger");
     askAboutUnlinked(prStore, questions, policy, 1_000 + UNLINKED_GRACE_MS);
