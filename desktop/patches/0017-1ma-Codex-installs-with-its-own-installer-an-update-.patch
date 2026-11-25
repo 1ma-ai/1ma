@@ -1,0 +1,552 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 1ma <hello@1ma.ai>
+Date: Wed, 25 Nov 2026 05:00:57 +0100
+Subject: [PATCH] 1ma: Codex installs with its own installer; an update is
+ offered only when it can run
+
+Codex was installed with `npm install -g` through whatever npm the machine
+had, and the Update button was always shown. A machine without Node could
+not install it at all, and an installation npm had no right to replace
+failed with EACCES.
+
+Install now runs Codex's own installer without questions, as Codex's own
+updater does. The Update button follows the way `codex update` would run:
+Codex's own installation, a global npm folder this user can write to, or
+Homebrew on macOS. Otherwise no update is offered. An install on a host
+without curl says so instead of starting.
+---
+ .../src/bridge/provider-maintenance.test.ts   | 242 +++++++++++++++++-
+ .../src/bridge/provider-maintenance.ts        | 163 +++++++++++-
+ 2 files changed, 390 insertions(+), 15 deletions(-)
+
+diff --git a/plugins/provider-codex/src/bridge/provider-maintenance.test.ts b/plugins/provider-codex/src/bridge/provider-maintenance.test.ts
+index 2a6237c..aa0994a 100644
+--- a/plugins/provider-codex/src/bridge/provider-maintenance.test.ts
++++ b/plugins/provider-codex/src/bridge/provider-maintenance.test.ts
+@@ -1,6 +1,8 @@
++import { execFile } from "node:child_process";
+ import fs from "node:fs/promises";
+ import os from "node:os";
+ import path from "node:path";
++import { promisify } from "node:util";
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ import { resetChatGptCloudflareCookiesForTests } from "../ai/chatgpt-fetch.js";
+ import {
+@@ -112,7 +114,11 @@ describe("Codex provider maintenance", () => {
+ 
+   it("resolves a fresh typed update plan and rejects a stale action", () => {
+     expect(
+-      __testing.buildProviderInstallationRun(installationStatus(), "update"),
++      __testing.buildProviderInstallationRun(
++        installationStatus(),
++        "update",
++        null,
++      ),
+     ).toEqual({
+       available: true,
+       command: {
+@@ -123,12 +129,161 @@ describe("Codex provider maintenance", () => {
+       verification: { kind: "version_at_least", version: "1.1.0" },
+     });
+     expect(
+-      __testing.buildProviderInstallationRun(installationStatus(), "install"),
++      __testing.buildProviderInstallationRun(
++        installationStatus(),
++        "install",
++        null,
++      ),
+     ).toEqual({
+       available: false,
+       message: "Codex install is no longer available on this host.",
+     });
+   });
++
++  it("plans the install with Codex's own installer, or names the tool it lacks", () => {
++    const missing = {
++      ...installationStatus(),
++      executablePath: null,
++      installed: false,
++      installSource: "notInstalled" as const,
++      currentVersion: null,
++      npmGlobalPackageVersion: null,
++      installAction: {
++        kind: "install" as const,
++        label: "Install" as const,
++        command: __testing.installerCommand().displayCommand,
++      },
++      needsUpdate: false,
++    };
++
++    const run = __testing.buildProviderInstallationRun(
++      missing,
++      "install",
++      null,
++    );
++
++    expect(run).toEqual({
++      available: true,
++      command: __testing.installerCommand(),
++      verification: { kind: "installed" },
++    });
++    expect(JSON.stringify(run)).not.toContain("npm");
++    expect(__testing.installerCommand("win32").args.at(-1)).toBe(
++      "$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex",
++    );
++    expect(
++      __testing.buildProviderInstallationRun(missing, "install", "curl"),
++    ).toEqual({
++      available: false,
++      message:
++        "Installing Codex needs curl, which was not found on this host. Install curl and try again.",
++    });
++  });
++
++  it("routes an update the way Codex itself would run it", () => {
++    const releases = path.resolve(
++      "/home/u/.codex/packages/standalone/releases",
++    );
++    const route = (
++      overrides: Partial<Parameters<typeof __testing.codexUpdateRoute>[0]>,
++    ) =>
++      __testing.codexUpdateRoute({
++        platform: "linux",
++        executablePath: "/home/u/bin/codex",
++        realExecutablePath: "/home/u/bin/codex",
++        standaloneReleases: releases,
++        installSource: "external",
++        ...overrides,
++      });
++
++    expect(
++      route({
++        executablePath: "/home/u/.local/bin/codex",
++        realExecutablePath: path.join(releases, "0.150.0-x64", "bin", "codex"),
++        installSource: "npmGlobal",
++      }),
++    ).toBe("standalone");
++    expect(
++      route({
++        realExecutablePath: `${releases}-old/0.150.0-x64/bin/codex`,
++      }),
++    ).toBeNull();
++    expect(route({ installSource: "npmGlobal" })).toBe("npm");
++    expect(
++      route({
++        platform: "darwin",
++        executablePath: "/opt/homebrew/bin/codex",
++        realExecutablePath: "/opt/homebrew/Caskroom/codex/0.150.0/codex",
++      }),
++    ).toBe("homebrew");
++    expect(
++      route({
++        executablePath: "/usr/local/bin/codex",
++        realExecutablePath: "/usr/local/bin/codex",
++      }),
++    ).toBeNull();
++    expect(route({ standaloneReleases: null })).toBeNull();
++  });
++});
++
++describe.skipIf(process.platform === "win32")("Codex installer command", () => {
++  let scratch: string;
++
++  async function runInstaller(curlScript: string) {
++    const binDir = path.join(scratch, "bin");
++    await fs.mkdir(binDir);
++    await fs.writeFile(path.join(binDir, "curl"), curlScript, { mode: 0o755 });
++    const command = __testing.installerCommand();
++    return promisify(execFile)(command.command, command.args, {
++      env: {
++        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
++        MARKER: path.join(scratch, "marker"),
++      },
++    });
++  }
++
++  beforeEach(async () => {
++    scratch = await fs.mkdtemp(path.join(os.tmpdir(), "bb-codex-installer-"));
++  });
++
++  afterEach(async () => {
++    await fs.rm(scratch, { force: true, recursive: true });
++  });
++
++  it("runs the downloaded installer without questions", async () => {
++    await runInstaller(
++      [
++        "#!/bin/sh",
++        "cat <<'INSTALLER'",
++        'printf %s "${CODEX_NON_INTERACTIVE:-asks}" > "$MARKER"',
++        "INSTALLER",
++        "",
++      ].join("\n"),
++    );
++
++    await expect(
++      fs.readFile(path.join(scratch, "marker"), "utf8"),
++    ).resolves.toBe("1");
++  });
++
++  it("runs nothing when the download fails part way", async () => {
++    await expect(
++      runInstaller(
++        [
++          "#!/bin/sh",
++          "cat <<'INSTALLER'",
++          'printf partial > "$MARKER"',
++          "INSTALLER",
++          "exit 22",
++          "",
++        ].join("\n"),
++      ),
++    ).rejects.toMatchObject({ code: 22 });
++
++    await expect(fs.stat(path.join(scratch, "marker"))).rejects.toMatchObject({
++      code: "ENOENT",
++    });
++  });
+ });
+ 
+ describe("Codex credential health and usage", () => {
+@@ -231,6 +386,89 @@ describe("Codex credential health and usage", () => {
+     },
+   );
+ 
++  describe.skipIf(process.platform === "win32")("update offer", () => {
++    async function installOutdatedCodex(npmPrefix: string): Promise<string> {
++      const binDir = path.join(homeDir, "bin");
++      await writeFakeCli({
++        binDir,
++        name: "codex",
++        output: "codex-cli 0.100.0",
++      });
++      await writeFakeCli({ binDir, name: "npm", output: npmPrefix });
++      return binDir;
++    }
++
++    it("offers the update npm can install into its global folder", async () => {
++      await installOutdatedCodex(homeDir);
++      await fs.mkdir(path.join(homeDir, "lib", "node_modules"), {
++        recursive: true,
++      });
++
++      const status = await getCodexProviderInstallationStatus();
++
++      expect(status.installSource).toBe("npmGlobal");
++      expect(status.versionUnsupported).toBe(true);
++      expect(status.installAction).toEqual({
++        kind: "update",
++        label: "Update",
++        command: "codex update",
++      });
++    });
++
++    it.skipIf(process.getuid?.() === 0)(
++      "does not offer an update npm has no right to install",
++      async () => {
++        await installOutdatedCodex(homeDir);
++        const modules = path.join(homeDir, "lib", "node_modules");
++        await fs.mkdir(modules, { recursive: true });
++        await fs.chmod(modules, 0o555);
++
++        const status = await getCodexProviderInstallationStatus();
++
++        expect(status.installSource).toBe("npmGlobal");
++        expect(status.versionUnsupported).toBe(true);
++        expect(status.installAction).toBeNull();
++      },
++    );
++
++    it("offers the update of Codex's own installation", async () => {
++      const binDir = await installOutdatedCodex(path.join(homeDir, "npm"));
++      const releaseBin = path.join(
++        homeDir,
++        ".codex",
++        "packages",
++        "standalone",
++        "releases",
++        "0.100.0-x86_64-unknown-linux-musl",
++        "bin",
++      );
++      await fs.mkdir(releaseBin, { recursive: true });
++      await fs.rename(
++        path.join(binDir, "codex"),
++        path.join(releaseBin, "codex"),
++      );
++      await fs.symlink(
++        path.join(releaseBin, "codex"),
++        path.join(binDir, "codex"),
++      );
++
++      const status = await getCodexProviderInstallationStatus();
++
++      expect(status.installSource).toBe("external");
++      expect(status.installAction?.kind).toBe("update");
++    });
++
++    it("does not offer an update of an installation it cannot replace", async () => {
++      await installOutdatedCodex(path.join(homeDir, "npm"));
++
++      const status = await getCodexProviderInstallationStatus();
++
++      expect(status.installSource).toBe("external");
++      expect(status.versionUnsupported).toBe(true);
++      expect(status.installAction).toBeNull();
++    });
++  });
++
+   it("reports unauthenticated when auth.json is missing", async () => {
+     await expect(getCodexProviderHealth()).resolves.toEqual({
+       supported: true,
+diff --git a/plugins/provider-codex/src/bridge/provider-maintenance.ts b/plugins/provider-codex/src/bridge/provider-maintenance.ts
+index 99d2dcc..5fd9b0c 100644
+--- a/plugins/provider-codex/src/bridge/provider-maintenance.ts
++++ b/plugins/provider-codex/src/bridge/provider-maintenance.ts
+@@ -1,5 +1,10 @@
++import { constants as fsConstants } from "node:fs";
++import fs from "node:fs/promises";
++import os from "node:os";
++import path from "node:path";
+ import {
+   type ProviderHealthResult,
++  type ProviderInstallationCommand,
+   type ProviderInstallationRunResult,
+   type ProviderInstallationStatus,
+   type ProviderUsage,
+@@ -10,7 +15,6 @@ import {
+   experimental_compareVersions as compareVersions,
+   experimental_formatCommand as formatCommand,
+   experimental_installationVerification as installationVerification,
+-  experimental_npmGlobalInstallCommand as npmGlobalInstallCommand,
+   experimental_npmGlobalInstallSource as npmGlobalInstallSource,
+   experimental_npmLatestVersion as npmLatestVersion,
+   experimental_probeNpmGlobalPackage as probeNpmGlobalPackage,
+@@ -24,12 +28,16 @@ import {
+   readCodexAuthFile,
+   type CodexAuthCredentials,
+ } from "../ai/codex-auth.js";
++import { resolveCodexHome } from "../codex-home.js";
+ 
+ const CODEX_MINIMUM_SUPPORTED_VERSION = "0.136.0";
+ const CODEX_REWIND_MINIMUM_SUPPORTED_VERSION = "0.143.0";
+ const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+ const USAGE_FETCH_TIMEOUT_MS = 15_000;
+ const CODEX_NPM_PACKAGE = "@openai/codex";
++const CODEX_INSTALL_SCRIPT_URL = "https://chatgpt.com/codex/install.sh";
++const CODEX_POWERSHELL_INSTALL_SCRIPT_URL =
++  "https://chatgpt.com/codex/install.ps1";
+ 
+ function fetchCodexUsage(headers: Headers): Promise<Response> {
+   return fetchChatGpt({
+@@ -82,6 +90,115 @@ function codexUpdateCommand(): {
+   };
+ }
+ 
++function codexInstallerCommand(
++  platform: NodeJS.Platform = process.platform,
++): ProviderInstallationCommand {
++  if (platform === "win32") {
++    const script = `$env:CODEX_NON_INTERACTIVE=1; irm ${CODEX_POWERSHELL_INSTALL_SCRIPT_URL} | iex`;
++    return {
++      command: "powershell.exe",
++      args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
++      displayCommand: script,
++    };
++  }
++  const script = `s=$(curl -fsSL ${CODEX_INSTALL_SCRIPT_URL}) && CODEX_NON_INTERACTIVE=1 eval "$s"`;
++  return { command: "sh", args: ["-c", script], displayCommand: script };
++}
++
++async function codexInstallerMissingTool(): Promise<string | null> {
++  if (process.platform === "win32") return null;
++  return (await resolveExecutablePath("curl")) === null ? "curl" : null;
++}
++
++type CodexUpdateRoute = "standalone" | "npm" | "homebrew";
++
++function pathIsInside(child: string, parent: string): boolean {
++  const relative = path.relative(parent, child);
++  return (
++    relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)
++  );
++}
++
++function codexUpdateRoute(args: {
++  platform: NodeJS.Platform;
++  executablePath: string;
++  realExecutablePath: string;
++  standaloneReleases: string | null;
++  installSource: ProviderInstallationStatus["installSource"];
++}): CodexUpdateRoute | null {
++  if (
++    args.standaloneReleases !== null &&
++    pathIsInside(args.realExecutablePath, args.standaloneReleases)
++  ) {
++    return "standalone";
++  }
++  if (args.installSource === "npmGlobal") return "npm";
++  return args.platform === "darwin" &&
++    ["/opt/homebrew/", "/usr/local/"].some((prefix) =>
++      args.executablePath.startsWith(prefix),
++    )
++    ? "homebrew"
++    : null;
++}
++
++async function realPathOrNull(target: string): Promise<string | null> {
++  try {
++    return await fs.realpath(target);
++  } catch {
++    return null;
++  }
++}
++
++async function isWritableDirectory(directory: string): Promise<boolean> {
++  try {
++    await fs.access(directory, fsConstants.W_OK);
++    return true;
++  } catch {
++    return false;
++  }
++}
++
++async function npmCanReplaceGlobalPackage(npmBin: string): Promise<boolean> {
++  const modules =
++    process.platform === "win32"
++      ? path.join(npmBin, "node_modules")
++      : path.join(path.dirname(npmBin), "lib", "node_modules");
++  const writable = await Promise.all([
++    isWritableDirectory(npmBin),
++    isWritableDirectory(modules),
++  ]);
++  return writable.every(Boolean);
++}
++
++async function canRunCodexUpdate(args: {
++  executablePath: string | null;
++  installSource: ProviderInstallationStatus["installSource"];
++  npmBin: string | null;
++}): Promise<boolean> {
++  if (args.executablePath === null) return false;
++  const [realExecutablePath, standaloneReleases] = await Promise.all([
++    realPathOrNull(args.executablePath),
++    realPathOrNull(
++      path.join(
++        resolveCodexHome(os.homedir(), process.env),
++        "packages",
++        "standalone",
++        "releases",
++      ),
++    ),
++  ]);
++  const route = codexUpdateRoute({
++    platform: process.platform,
++    executablePath: args.executablePath,
++    realExecutablePath: realExecutablePath ?? args.executablePath,
++    standaloneReleases,
++    installSource: args.installSource,
++  });
++  return route === "npm"
++    ? args.npmBin !== null && (await npmCanReplaceGlobalPackage(args.npmBin))
++    : route !== null;
++}
++
+ export async function getCodexProviderInstallationStatus(
+   requirement?: "thread_rewind",
+   checkUpdates = true,
+@@ -109,9 +226,19 @@ export async function getCodexProviderInstallationStatus(
+     (currentVersion === null
+       ? requirement === "thread_rewind"
+       : compareVersions(currentVersion, minimumSupportedVersion) < 0);
++  const installSource = npmGlobalInstallSource({
++    installed,
++    executablePath: resolvedExecutable,
++    npmBin: npmGlobal.npmBin,
++  });
+   const actionKind = !installed
+     ? "install"
+-    : needsUpdate || versionUnsupported
++    : (needsUpdate || versionUnsupported) &&
++        (await canRunCodexUpdate({
++          executablePath: resolvedExecutable,
++          installSource,
++          npmBin: npmGlobal.npmBin,
++        }))
+       ? "update"
+       : null;
+ 
+@@ -119,11 +246,7 @@ export async function getCodexProviderInstallationStatus(
+     executableName: "codex",
+     executablePath: resolvedExecutable,
+     installed,
+-    installSource: npmGlobalInstallSource({
+-      installed,
+-      executablePath: resolvedExecutable,
+-      npmBin: npmGlobal.npmBin,
+-    }),
++    installSource,
+     currentVersion,
+     latestVersion,
+     minimumSupportedVersion,
+@@ -137,7 +260,7 @@ export async function getCodexProviderInstallationStatus(
+             label: actionKind === "install" ? "Install" : "Update",
+             command:
+               actionKind === "install"
+-                ? npmGlobalInstallCommand(CODEX_NPM_PACKAGE).displayCommand
++                ? codexInstallerCommand().displayCommand
+                 : codexUpdateCommand().displayCommand,
+           },
+     needsUpdate,
+@@ -148,13 +271,21 @@ export async function getCodexProviderInstallationStatus(
+ export async function getCodexProviderInstallationRun(
+   action: "install" | "update",
+ ): Promise<ProviderInstallationRunResult> {
+-  const status = await getCodexProviderInstallationStatus();
+-  return buildCodexProviderInstallationRun(status, action);
++  const [status, missingInstallerTool] = await Promise.all([
++    getCodexProviderInstallationStatus(),
++    codexInstallerMissingTool(),
++  ]);
++  return buildCodexProviderInstallationRun(
++    status,
++    action,
++    missingInstallerTool,
++  );
+ }
+ 
+ function buildCodexProviderInstallationRun(
+   status: ProviderInstallationStatus,
+   action: "install" | "update",
++  missingInstallerTool: string | null,
+ ): ProviderInstallationRunResult {
+   if (status.installAction?.kind !== action) {
+     return {
+@@ -162,12 +293,16 @@ function buildCodexProviderInstallationRun(
+       message: `Codex ${action} is no longer available on this host.`,
+     };
+   }
++  if (action === "install" && missingInstallerTool !== null) {
++    return {
++      available: false,
++      message: `Installing Codex needs ${missingInstallerTool}, which was not found on this host. Install ${missingInstallerTool} and try again.`,
++    };
++  }
+   return {
+     available: true,
+     command:
+-      action === "install"
+-        ? npmGlobalInstallCommand(CODEX_NPM_PACKAGE)
+-        : codexUpdateCommand(),
++      action === "install" ? codexInstallerCommand() : codexUpdateCommand(),
+     verification: installationVerification(status, action),
+   };
+ }
+@@ -408,6 +543,8 @@ export async function getCodexProviderUsage(): Promise<ProviderUsageResult> {
+ 
+ export const __testing = {
+   buildProviderInstallationRun: buildCodexProviderInstallationRun,
++  codexUpdateRoute,
++  installerCommand: codexInstallerCommand,
+   minimumSupportedVersionForRequirement,
+   normalizeUsage,
+ };
