@@ -27,9 +27,11 @@ helper one suite needs goes here, not into a copy inside the suite.
   test sets: `swallow`, `drop-response`, `forward-later`, `delay` (each
   optionally `once`), or `refuse` for every connection.
 - `fake-gh/gh`: an optional `gh` for the plugin host's `PATH`, answering
-  read-only `gh api` calls (GET, no fields) from the JSON file in
-  `E2E_GH_FIXTURES`; `E2E_GH_ALLOW` (a regular expression) narrows the allowed
-  paths. With `E2E_GH_LOG` set it logs every answered path and every refused
+  read-only `gh api` calls from the JSON file in `E2E_GH_FIXTURES`. It accepts
+  only `gh api [--method GET] [-H "Accept: …"] <path>` with exactly one path;
+  any other flag or spelling (`--method=POST`, `-XPOST`, fields, `--input`,
+  `--paginate`) exits 2. `E2E_GH_ALLOW` (a regular expression) narrows the
+  allowed paths. `fake-gh.test.mjs` checks this and runs in `test:scripts`. With `E2E_GH_LOG` set it logs every answered path and every refused
   call as `REJECTED [args]` or `NOT-API [args]`.
 
 A suite needs `E2E_ROOT` (a scratch directory) and `node e2e/lib/install-server.mjs`

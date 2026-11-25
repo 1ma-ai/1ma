@@ -7,15 +7,23 @@ const allowed = new RegExp(process.env.E2E_GH_ALLOW ?? "^/");
 const log = (line) => {
   if (process.env.E2E_GH_LOG !== undefined) appendFileSync(process.env.E2E_GH_LOG, `${line}\n`);
 };
-const methodAt = args.findIndex((arg) => arg === "--method" || arg === "-X");
-const method = methodAt === -1 ? "GET" : (args[methodAt + 1] ?? "").toUpperCase();
-const writes = args.some((arg) =>
-  ["-f", "-F", "--field", "--raw-field", "--input"].some(
-    (flag) => arg === flag || arg.startsWith(`${flag}=`),
-  ),
-);
-const path = args.at(-1) ?? "";
-if (args[0] !== "api" || fixtures === undefined || method !== "GET" || writes || !allowed.test(path)) {
+
+function readOnlyPath(call) {
+  if (call[0] !== "api") return null;
+  let path = null;
+  for (let at = 1; at < call.length; at += 1) {
+    const arg = call[at];
+    const value = call[at + 1];
+    if (arg === "--method" && value === "GET") at += 1;
+    else if (arg === "-H" && value?.startsWith("Accept: ")) at += 1;
+    else if (arg.startsWith("-") || path !== null) return null;
+    else path = arg;
+  }
+  return path;
+}
+
+const path = readOnlyPath(args);
+if (path === null || fixtures === undefined || !allowed.test(path)) {
   log(`${args[0] === "api" ? "REJECTED" : "NOT-API"} ${JSON.stringify(args)}`);
   process.stderr.write(`fake gh: unsupported call ${args.join(" ")}\n`);
   process.exit(2);
