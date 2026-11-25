@@ -10,7 +10,8 @@ import { strings } from "./strings.js";
 import { BotsPanel, PANEL_PATH } from "./src/ui/bot-pages.js";
 import { assignToBotAction } from "./src/ui/assign-action.js";
 import { botsRpc } from "./src/contract.js";
-import { findBot, isDone, ThreadBotRow, topMove } from "./src/ui/thread-bot-row.js";
+import { findBot, seenThread, topMove } from "./src/ui/seen.js";
+import { ThreadBotRow } from "./src/ui/thread-bot-row.js";
 
 export default definePluginApp((app) => {
   app.slots.navPanel({
@@ -34,7 +35,7 @@ export default definePluginApp((app) => {
     order: 61,
     useData() {
       const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
-      const move = useRpcMutation({ contract: botsRpc, method: "bots.v1.moveThreads" });
+      const move = useRpcMutation({ contract: botsRpc, method: "bots.v2.moveThreads" });
       const { threads } = useSidebarThreads();
       return { bots: list.data?.bots ?? [], move, threads };
     },
@@ -47,11 +48,7 @@ export default definePluginApp((app) => {
         label: strings.threadBot.moveToTop,
         icon: "ArrowUp",
         run: async () => {
-          await data.move.mutate({
-            botId: member.bot.id,
-            ...top,
-            levelShown: false,
-          });
+          await data.move.mutate(top);
         },
       };
     },
@@ -64,18 +61,24 @@ export default definePluginApp((app) => {
     order: 62,
     useData() {
       const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
-      const setCompleted = useRpcMutation({ contract: botsRpc, method: "bots.v1.setCompleted" });
+      const setCompleted = useRpcMutation({ contract: botsRpc, method: "bots.v2.setCompleted" });
       const { threads } = useSidebarThreads();
       return { bots: list.data?.bots ?? [], setCompleted, threads };
     },
     item({ thread, data }) {
-      if (!findBot(data.bots, thread.id) || thread.archivedAt !== null) return null;
-      const done = isDone(data.bots, data.threads, thread.id);
+      const member = findBot(data.bots, thread.id);
+      const seen = seenThread(data.bots, data.threads, thread.id);
+      if (!member || seen === null || thread.archivedAt !== null) return null;
+      const done = seen.branch.some((mark) => mark.completed);
       return {
         label: done ? strings.threadBot.markNotDone : strings.threadBot.markDone,
         icon: "Check",
         run: async () => {
-          await data.setCompleted.mutate({ threadId: thread.id, completed: !done });
+          await data.setCompleted.mutate({
+            botId: member.bot.id,
+            thread: seen,
+            completed: !done,
+          });
         },
       };
     },

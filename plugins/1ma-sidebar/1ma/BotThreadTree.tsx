@@ -10,7 +10,7 @@ import {
 } from "../app/model/project-thread-groups.js";
 import type { SidebarThread } from "../app/model/sidebar-thread.js";
 import { getMutationErrorMessage } from "../app/ui/mutation-errors.js";
-import { BOTS_PLUGIN_ID, botsRpc, type SidebarBot } from "./bots-rpc.js";
+import { BOTS_PLUGIN_ID, botsRpc, type SeenRow, type SidebarBot } from "./bots-rpc.js";
 import { strings } from "./strings.js";
 
 const empty = [] as const;
@@ -21,6 +21,7 @@ export function BotThreadTree({
   threads,
   compareThreads,
   parentOf,
+  seenOf,
   ...tree
 }: Omit<
   ComponentProps<typeof SectionThreadTreeItems>,
@@ -32,6 +33,7 @@ export function BotThreadTree({
   // The conversation above this one in the bot's tree; it is drawn there when
   // these threads have it.
   parentOf: (threadId: string) => string | null;
+  seenOf: ReadonlyMap<string, SeenRow>;
 }) {
   const rootItems = useMemo(
     () => buildProjectThreadGroups(threads, compareThreads, false, ({ id }) => parentOf(id)),
@@ -40,11 +42,10 @@ export function BotThreadTree({
   const move = useRpcMutation({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.moveThreads",
+    method: "bots.v2.moveThreads",
   });
   const order = bot.threads.map((member) => member.threadId);
   const drawn = new Map(threads.map((thread) => [thread.id, thread]));
-  const place = (threadId: string) => ({ threadId, parentThreadId: parentOf(threadId) });
   const send = async (
     ids: readonly string[],
     threadId: string,
@@ -53,11 +54,8 @@ export function BotThreadTree({
     try {
       await move.mutate({
         botId: bot.id,
-        sources: ids.map((id) => ({
-          ...place(id),
-          real: drawn.get(id)?.parentThreadId === parentOf(id),
-        })),
-        target: { ...place(threadId), placement },
+        sources: ids.map((id) => seenOf.get(id)!),
+        target: { ...seenOf.get(threadId)!, placement },
         levelShown: [...ids, threadId]
           .map(parentOf)
           .every((parent) => parent === null || drawn.has(parent)),

@@ -140,7 +140,8 @@ export const agentText = {
   outsideParent: (title: string) =>
     `${title} is a sub-thread of a conversation outside this bot's list. Here only its place in the order can change, so nothing was moved.`,
   moveElsewhere: "These conversations are not in this bot any more, so nothing was moved.",
-  treeChanged: "The tree changed since it was drawn, so nothing was moved.",
+  treeChanged: "The tree changed since it was shown, so nothing was done.",
+  botsReordered: "The order of the bots changed since it was shown, so nothing was moved.",
   moveNotUndone: (reason: string, titles: readonly string[]) =>
     `${reason}. These may not be where they were: ${titles.join(", ")}`,
 } as const;

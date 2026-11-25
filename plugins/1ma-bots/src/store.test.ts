@@ -13,6 +13,24 @@ function storeWithBot() {
   return { store, bot };
 }
 
+it("gives every assignment of the released database an identity of its own", () => {
+  const { bb } = createFakePluginHost({ pluginId: "1ma-bots" });
+  const db = bb.storage.database();
+  bb.storage.migrate(db, MIGRATIONS.slice(0, 3));
+  db.exec(`INSERT INTO bots (id, name, appearance, position, created_at, updated_at)
+      VALUES ('bot_a', 'Marketer', '{}', 1, 1, 1);
+    INSERT INTO bot_threads (thread_id, bot_id, position, started_from_bot, bound_at)
+      VALUES ('thr_a', 'bot_a', 1, 0, 1), ('thr_b', 'bot_a', 2, 0, 1);`);
+
+  bb.storage.migrate(db, MIGRATIONS);
+
+  const store = new BotStore(db);
+  const [a, b] = ["thr_a", "thr_b"].map((id) => store.assignmentOf(id)?.assignment);
+  expect(a).toBeTruthy();
+  expect(b).toBeTruthy();
+  expect(a).not.toBe(b);
+});
+
 it.each<[string, (store: BotStore, botId: string) => unknown]>([
   ["bind", (store, id) => store.bind("thr_c", id, { startedFromBot: false, place: "last" })],
   ["unbind", (store) => store.unbind("thr_a")],

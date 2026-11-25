@@ -7,7 +7,12 @@ const bot = (threadIds: string[], hidden = false, id = "bot_1") => ({
   role: "",
   avatar: "",
   hidden,
-  threads: threadIds.map((threadId) => ({ threadId, startedFromBot: true, completed: false })),
+  threads: threadIds.map((threadId) => ({
+    threadId,
+    startedFromBot: true,
+    completed: false,
+    assignment: "",
+  })),
 });
 
 const row = (id: string, parentThreadId: string | null, state = {}) => ({

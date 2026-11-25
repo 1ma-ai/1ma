@@ -52,7 +52,7 @@ import { sidebarThreadLifecyclesAtom } from "../app/preferences/atoms.js";
 import { createSyncedPreferenceAtom } from "../app/preferences/synced-preference-atom.js";
 import { SidebarChildToggleChevron } from "../app/rows/SidebarChildToggleChevron.js";
 import { SidebarControlButton, SidebarRowControls } from "../app/rows/SidebarRowControls.js";
-import { BOTS_PLUGIN_ID, botsRpc, type SidebarBot } from "./bots-rpc.js";
+import { BOTS_PLUGIN_ID, botsRpc, type SeenRow, type SidebarBot } from "./bots-rpc.js";
 import { botBranches } from "./bot-threads.js";
 import { strings } from "./strings.js";
 import { useSidebarBots } from "./use-bots.js";
@@ -85,7 +85,7 @@ interface BotsBlockProps extends TreeState {
   onProjectSelect?: () => void;
 }
 
-// bots.v1.assign gives these answers before it writes anything: the host's
+// bots.v2.assign gives these answers before it writes anything: the host's
 // own checks of the call and the plugin's refusals (BotsError).
 const REFUSALS: ReadonlySet<PluginRpcCallError["code"]> = new Set([
   "forbidden",
@@ -121,7 +121,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
   const assign = useRpcMutation({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.assign",
+    method: "bots.v2.assign",
   });
   // A fresh read of the bots, to learn where conversations ended up when an
   // assignment's answer was lost.
@@ -146,12 +146,22 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
         // Assigning in reverse keeps a dragged selection in its order at the top.
         const ordered = target.place === "first" ? [...threadIds].reverse() : threadIds;
         const had = new Set(bot.threads.map((item) => item.threadId));
+        const seen = new Map(
+          state.bots.flatMap(({ id: botId, threads }) =>
+            threads.map(({ threadId, assignment }) => [threadId, { botId, assignment }] as const),
+          ),
+        );
         void (async () => {
           const confirmed: string[] = [];
           let failure: unknown = null;
           for (const threadId of ordered) {
             try {
-              await assign.mutate({ threadId, botId: bot.id, place: target.place });
+              await assign.mutate({
+                threadId,
+                botId: bot.id,
+                place: target.place,
+                seen: seen.get(threadId) ?? null,
+              });
               confirmed.push(threadId);
             } catch (error) {
               failure = error;
@@ -160,7 +170,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
           }
           // The call that failed is the only one in doubt: the ones before it
           // were confirmed and the ones after it were never sent. A refusal
-          // is a definite answer, since bots.v1.assign refuses only before it
+          // is a definite answer, since bots.v2.assign refuses only before it
           // writes. Any other failure may have been saved or may still be
           // saved, so the bot is read again and only what the read shows is
           // counted: a conversation from elsewhere that the bot now has, or
@@ -352,9 +362,10 @@ interface BotConversations {
   compare: ThreadComparator;
   // The conversation above this one in its bot's tree.
   parentOf: (threadId: string) => string | null;
+  seenOf: ReadonlyMap<string, SeenRow>;
 }
 
-function useBotConversations(bots: readonly SidebarBot[]) {
+export function useBotConversations(bots: readonly SidebarBot[]) {
   const lifecycles = useAtomValue(sidebarThreadLifecyclesAtom);
   const { threads } = useSidebarThreads({ experimental_lifecycles: lifecycles });
   return useMemo(() => {
@@ -365,10 +376,15 @@ function useBotConversations(bots: readonly SidebarBot[]) {
     const byBot = new Map<string, BotConversations>();
     for (const bot of bots) {
       const order = new Map(bot.threads.map((thread, index) => [thread.threadId, index]));
+      const places = new Map(bot.threads.map((thread) => [thread.threadId, thread]));
       const shown = threads.filter(
         (thread) => !thread.isHidden && branches.get(thread.id)?.botId === bot.id,
       );
-      const kept = new Set(shown.filter(keepsOpen).flatMap((thread) => branchOf(thread.id)));
+      const kept = new Set(
+        shown
+          .filter((thread) => !thread.isArchived && keepsOpen(thread))
+          .flatMap((thread) => branchOf(thread.id)),
+      );
       const marked = new Set(
         bot.threads
           .filter((item) => item.completed && !kept.has(item.threadId))
@@ -382,12 +398,29 @@ function useBotConversations(bots: readonly SidebarBot[]) {
       const compare: ThreadComparator = (left, right) =>
         (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
           (order.get(right.id) ?? Number.MAX_SAFE_INTEGER) || right.createdAt - left.createdAt;
+      const seenOf = new Map<string, SeenRow>();
+      for (const { id, parentThreadId } of shown) {
+        const branch = branchOf(id);
+        const place = branch.map((above) => places.get(above)).find((found) => found !== undefined);
+        if (place === undefined) continue;
+        seenOf.set(id, {
+          threadId: id,
+          assignment: place.assignment,
+          parentThreadId,
+          branch: branch.map((threadId) => ({
+            threadId,
+            completed: places.get(threadId)?.completed ?? false,
+          })),
+          shownDone: doneIds.has(id),
+        });
+      }
       byBot.set(bot.id, {
         open,
         done,
         doneCount: done.filter(({ id }) => !doneIds.has(parentOf(id) ?? "")).length,
         compare,
         parentOf,
+        seenOf,
       });
     }
     const empty: BotConversations = {
@@ -396,6 +429,7 @@ function useBotConversations(bots: readonly SidebarBot[]) {
       doneCount: 0,
       compare: () => 0,
       parentOf,
+      seenOf: new Map(),
     };
     return {
       of: (bot: SidebarBot) => byBot.get(bot.id) ?? empty,
@@ -413,7 +447,7 @@ export function useMainThread(
   const { data, isLoading, refetch } = useRpcQuery({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.main",
+    method: "bots.v2.main",
     input: { botId: bot.id },
   });
   const rows = [...open, ...done];
@@ -552,11 +586,11 @@ function BotRow({
   const [showDone, setShowDone] = useState(false);
   const [composing, setComposing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const { open, done, doneCount, compare, parentOf } = conversations;
+  const { open, done, doneCount, compare, parentOf, seenOf } = conversations;
   const main = useRpcMutation({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.main",
+    method: "bots.v2.main",
   });
   // A hidden bot's conversations stay in their projects; shown here, it is
   // only a row to bring it back.
@@ -593,6 +627,7 @@ function BotRow({
   const treeProps = {
     compareThreads: compare,
     parentOf,
+    seenOf,
     selectedThreadId,
     onProjectSelect,
     depthOffset: 1,

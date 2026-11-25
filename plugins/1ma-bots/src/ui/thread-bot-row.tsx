@@ -5,7 +5,6 @@ import {
   experimental_useRpcQuery as useRpcQuery,
   useBbNavigate,
   type ExperimentalThreadInfoProps,
-  type PluginSidebarThread,
 } from "@get-bb/plugin-sdk/app";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -18,91 +17,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { strings } from "../../strings.js";
-import { branchOf, keepsOpen } from "../branch.js";
-import { botsRpc, type BotSummary, type BotThread, type MoveThreadsInput } from "../contract.js";
-
-export function findBot(
-  bots: readonly BotSummary[],
-  threadId: string,
-): { bot: BotSummary; thread: BotThread } | null {
-  for (const bot of bots) {
-    const thread = bot.threads.find((item) => item.threadId === threadId);
-    if (thread) return { bot, thread };
-  }
-  return null;
-}
-
-type TreeRow = Pick<
-  PluginSidebarThread,
-  | "id"
-  | "parentThreadId"
-  | "isArchived"
-  | "isHidden"
-  | "status"
-  | "hasPendingInteraction"
-  | "queuedWork"
->;
-
-function isShown(threads: readonly TreeRow[], threadId: string): boolean {
-  const row = threads.find((thread) => thread.id === threadId);
-  return row !== undefined && !row.isArchived && !row.isHidden;
-}
-
-// The conversation and the ones it is drawn under in its bot's tree.
-function branchIn(bots: readonly BotSummary[], threads: readonly TreeRow[], threadId: string) {
-  const chain: string[] = [];
-  for (let id: string | null = threadId; id !== null && !chain.includes(id);) {
-    chain.push(id);
-    id = threads.find((thread) => thread.id === id)?.parentThreadId ?? null;
-  }
-  const branch = branchOf(
-    chain,
-    (id) => findBot(bots, id)?.bot.id ?? null,
-    (id) => isShown(threads, id),
-  );
-  return branch?.threadIds ?? [];
-}
-
-// Done covers the branch, so a sub-thread is done with the conversations above
-// it in its bot's tree.
-export function isDone(
-  bots: readonly BotSummary[],
-  threads: readonly TreeRow[],
-  threadId: string,
-): boolean {
-  return branchIn(bots, threads, threadId).some((id) => findBot(bots, id)?.thread.completed);
-}
-
-// The move that puts the conversation first under its own parent; null when
-// that changes nothing in its group (open or done) of the bot's tree.
-export function topMove(
-  bot: BotSummary,
-  bots: readonly BotSummary[],
-  threads: readonly TreeRow[],
-  threadId: string,
-): Pick<MoveThreadsInput, "sources" | "target"> | null {
-  const parentOf = (id: string) => branchIn(bots, threads, id)[1] ?? null;
-  const keptOpen = new Set(
-    threads.filter(keepsOpen).flatMap((row) => branchIn(bots, threads, row.id)),
-  );
-  const shownDone = (id: string) =>
-    branchIn(bots, threads, id).some(
-      (above) => !keptOpen.has(above) && findBot(bots, above)?.thread.completed,
-    );
-  const parentThreadId = parentOf(threadId);
-  const siblings = bot.threads
-    .map((member) => member.threadId)
-    .filter((id) => isShown(threads, id) && parentOf(id) === parentThreadId);
-  const [first] = siblings;
-  const done = shownDone(threadId);
-  if (first === undefined || siblings.find((id) => shownDone(id) === done) === threadId)
-    return null;
-  const real = threads.find((thread) => thread.id === threadId)?.parentThreadId === parentThreadId;
-  return {
-    sources: [{ threadId, parentThreadId, real }],
-    target: { threadId: first, placement: "before", parentThreadId },
-  };
-}
+import { botsRpc, type BotSummary } from "../contract.js";
+import { assignmentOf, findBot } from "./seen.js";
 
 function InstructionPreview({ bot, bots }: { bot: BotSummary; bots: readonly BotSummary[] }) {
   const [open, setOpen] = useState(false);
@@ -136,11 +52,12 @@ function InstructionPreview({ bot, bots }: { bot: BotSummary; bots: readonly Bot
 export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
   const navigate = useBbNavigate();
   const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
-  const assign = useRpcMutation({ contract: botsRpc, method: "bots.v1.assign" });
-  const continueInBot = useRpcMutation({ contract: botsRpc, method: "bots.v1.continueInBot" });
+  const assign = useRpcMutation({ contract: botsRpc, method: "bots.v2.assign" });
+  const continueInBot = useRpcMutation({ contract: botsRpc, method: "bots.v2.continueInBot" });
   const bots = list.data?.bots ?? [];
   if (bots.length === 0) return null;
   const current = findBot(bots, threadId);
+  const seen = assignmentOf(bots, threadId);
   return (
     <DetailRow label={strings.threadBot.title} icon="Bot" align="start">
       <div className="flex min-w-0 flex-col items-start gap-1">
@@ -162,7 +79,7 @@ export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
               <DropdownMenuItem
                 key={bot.id}
                 disabled={bot.id === current?.bot.id}
-                onSelect={() => void assign.mutate({ threadId, botId: bot.id })}
+                onSelect={() => void assign.mutate({ threadId, botId: bot.id, seen })}
               >
                 <img src={bot.avatar} width={16} height={16} alt="" />
                 {bot.name}
@@ -171,7 +88,9 @@ export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
             {current ? (
               <>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => void assign.mutate({ threadId, botId: null })}>
+                <DropdownMenuItem
+                  onSelect={() => void assign.mutate({ threadId, botId: null, seen })}
+                >
                   {strings.threadBot.none}
                 </DropdownMenuItem>
               </>
@@ -179,7 +98,7 @@ export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
           </DropdownMenuContent>
         </DropdownMenu>
         {current && <InstructionPreview key={current.bot.id} bot={current.bot} bots={bots} />}
-        {current && !current.thread.startedFromBot ? (
+        {current && seen && !current.thread.startedFromBot ? (
           <>
             <p className="text-xs text-muted-foreground">{strings.threadBot.notStartedFromBot}</p>
             <Button
@@ -189,7 +108,7 @@ export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
               disabled={continueInBot.isPending}
               onClick={() =>
                 void continueInBot
-                  .mutate({ threadId })
+                  .mutate({ threadId, seen })
                   .then(({ threadId: next }) => navigate.toThread(next))
               }
             >

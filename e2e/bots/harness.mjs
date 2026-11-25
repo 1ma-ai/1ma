@@ -92,13 +92,10 @@ export function regularThread(projectId, title, prompt = "[stub:reply plain]", m
 export const rename = (threadId, title) => server.api("PATCH", `/threads/${threadId}`, { title });
 export const thread = (threadId) => server.api("GET", `/threads/${threadId}`);
 
-export async function turnsDone(threadId) {
-  const events = await server.api(
-    "GET",
-    `/threads/${threadId}/events?types=turn/completed&limit=100`,
-  );
-  return events.length;
-}
+const eventsOf = (threadId, ...types) =>
+  server.api("GET", `/threads/${threadId}/events?types=${types.join(",")}&limit=100`);
+
+export const turnsDone = async (threadId) => (await eventsOf(threadId, "turn/completed")).length;
 
 export const waitTurns = (threadId, count, timeoutMs = 120_000) =>
   waitFor(
@@ -106,6 +103,30 @@ export const waitTurns = (threadId, count, timeoutMs = 120_000) =>
     timeoutMs,
     async () => (await turnsDone(threadId)) >= count,
   );
+
+// The turn bb itself gives a conversation to tell it about its sub-thread.
+export const waitNotice = (threadId, kind, childId) =>
+  waitFor(`the end of the ${kind} turn of ${threadId} about ${childId}`, 120_000, async () => {
+    const events = await eventsOf(
+      threadId,
+      "client/turn/requested",
+      "turn/input/accepted",
+      "turn/completed",
+    );
+    const notice = events.find(
+      ({ type, data }) =>
+        type === "client/turn/requested" &&
+        data.systemMessageKind === kind &&
+        data.systemMessageSubject?.threadId === childId,
+    );
+    const taken = events.find(
+      ({ type, data }) =>
+        type === "turn/input/accepted" && data.clientRequestId === notice?.data.requestId,
+    );
+    return events.some(
+      ({ type, scope }) => type === "turn/completed" && scope.turnId === taken?.scope.turnId,
+    );
+  });
 
 export const waitStatus = (threadId, status, timeoutMs = 60_000) =>
   waitFor(

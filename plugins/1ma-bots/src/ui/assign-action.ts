@@ -5,22 +5,22 @@ import {
   type PluginThreadActionRegistration,
 } from "@get-bb/plugin-sdk/app";
 import { strings } from "../../strings.js";
-import { botsRpc, type BotSummary } from "../contract.js";
-import { findBot } from "./thread-bot-row.js";
+import { botsRpc, type Assignment, type BotSummary } from "../contract.js";
+import { assignmentOf } from "./seen.js";
 
 const NO_BOT = "none";
 
 interface AssignData {
   bots: readonly BotSummary[];
-  assign(threadId: string, botId: string | null): Promise<unknown>;
+  assign(threadId: string, botId: string | null, seen: Assignment | null): Promise<unknown>;
 }
 
 function useAssignData(): AssignData {
   const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
-  const assign = useRpcMutation({ contract: botsRpc, method: "bots.v1.assign" });
+  const assign = useRpcMutation({ contract: botsRpc, method: "bots.v2.assign" });
   return {
     bots: list.data?.bots ?? [],
-    assign: (threadId, botId) => assign.mutate({ threadId, botId, place: "last" }),
+    assign: (threadId, botId, seen) => assign.mutate({ threadId, botId, place: "last", seen }),
   };
 }
 
@@ -36,7 +36,8 @@ export const assignToBotAction: PluginThreadActionRegistration<AssignData> = {
     if (data.bots.length === 0 || thread.parentThreadId !== null || thread.archivedAt !== null) {
       return null;
     }
-    const current = findBot(data.bots, thread.id)?.bot.id ?? null;
+    const seen = assignmentOf(data.bots, thread.id);
+    const current = seen?.botId ?? null;
     return {
       label: strings.threadBot.choose,
       icon: "Bot",
@@ -53,7 +54,7 @@ export const assignToBotAction: PluginThreadActionRegistration<AssignData> = {
       },
       run: async ({ value }) => {
         if (value === undefined) return;
-        await data.assign(thread.id, value === NO_BOT ? null : value);
+        await data.assign(thread.id, value === NO_BOT ? null : value, seen);
       },
     };
   },

@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type Database from "better-sqlite3";
 import {
   appearanceSchema,
   chatDefaultsSchema,
   type Appearance,
+  type Assignment,
   type BotDetail,
   type BotSummary,
   type Actor,
@@ -89,6 +91,8 @@ export const MIGRATIONS = [
   `CREATE TABLE thread_assignment_decisions (thread_id TEXT PRIMARY KEY);
    INSERT INTO thread_assignment_decisions SELECT thread_id FROM bot_threads;`,
   `ALTER TABLE pending_starts ADD COLUMN beside TEXT NOT NULL DEFAULT '[]'`,
+  `ALTER TABLE bot_threads ADD COLUMN assignment TEXT NOT NULL DEFAULT '';
+   UPDATE bot_threads SET assignment = lower(hex(randomblob(16)));`,
 ];
 
 interface BotRow {
@@ -112,6 +116,7 @@ interface ThreadRow {
   position: number;
   started_from_bot: number;
   completed_at: number | null;
+  assignment: string;
 }
 
 type ThreadPlace =
@@ -136,6 +141,7 @@ function toThread(row: ThreadRow): BotThread {
     threadId: row.thread_id,
     startedFromBot: row.started_from_bot === 1,
     completed: row.completed_at !== null,
+    assignment: row.assignment,
   };
 }
 
@@ -148,7 +154,6 @@ function parseDefaults(raw: string | null): ChatDefaults | null {
 export class BotStore {
   private changes = 0;
   private readonly reopenings = new Map<string, number>();
-  private readonly assignments = new Map<string, number>();
 
   constructor(
     private readonly db: Database.Database,
@@ -349,15 +354,12 @@ export class BotStore {
     })();
   }
 
-  reorderBots(botIds: readonly string[]): void {
+  reorderBots(botIds: readonly string[], seen: readonly string[]): void {
     this.db.transaction(() => {
-      requireSameSet(
-        botIds,
-        this.db
-          .prepare<[], { id: string }>("SELECT id FROM bots")
-          .all()
-          .map((row) => row.id),
-      );
+      const current = this.list().map((bot) => bot.id);
+      if (!isDeepStrictEqual(current, seen))
+        throw new BotsError("conflict", agentText.botsReordered);
+      requireSameSet(botIds, current);
       botIds.forEach((id, index) => {
         this.requireRow(id);
         this.db.prepare("UPDATE bots SET position = ? WHERE id = ?").run(index, id);
@@ -370,6 +372,13 @@ export class BotStore {
       .prepare<[string], { bot_id: string }>("SELECT bot_id FROM bot_threads WHERE thread_id = ?")
       .get(threadId);
     return row?.bot_id ?? null;
+  }
+
+  assignmentOf(threadId: string): Assignment | null {
+    const row = this.db
+      .prepare<[string], ThreadRow>("SELECT * FROM bot_threads WHERE thread_id = ?")
+      .get(threadId);
+    return row ? { botId: row.bot_id, assignment: row.assignment } : null;
   }
 
   completedAt(threadId: string): number | null {
@@ -400,17 +409,13 @@ export class BotStore {
       order.splice(placeIn(order, options.place), 0, threadId);
       this.db
         .prepare(
-          `INSERT INTO bot_threads (thread_id, bot_id, position, started_from_bot, completed_at, bound_at)
-           VALUES (?, ?, 0, ?, NULL, ?)`,
+          `INSERT INTO bot_threads
+             (thread_id, bot_id, position, started_from_bot, completed_at, bound_at, assignment)
+           VALUES (?, ?, 0, ?, NULL, ?, ?)`,
         )
-        .run(threadId, botId, Number(options.startedFromBot), this.now());
+        .run(threadId, botId, Number(options.startedFromBot), this.now(), randomUUID());
       this.writeOrder(order);
-      this.assignments.set(threadId, this.changes);
     })();
-  }
-
-  assignedSince(threadId: string, generation: number): boolean {
-    return (this.assignments.get(threadId) ?? generation) > generation;
   }
 
   hasAssignmentDecision(threadId: string): boolean {
@@ -430,7 +435,7 @@ export class BotStore {
   }
 
   // A continuation is top-level: it stands before the branch its source is in,
-  // and that branch comes back from Done.
+  // and the bot's conversations in that branch come back from Done.
   bindContinuation(
     threadId: string,
     sourceThreadId: string,
@@ -443,7 +448,7 @@ export class BotStore {
       if (botId === null) return false;
       this.recordAssignmentDecision(threadId);
       this.bind(threadId, botId, { startedFromBot, place: { before: sourceBranch.at(-1) } });
-      this.reopen(sourceBranch);
+      this.reopen(sourceBranch.filter((id) => this.botOfThread(id) === botId));
       return true;
     });
   }
@@ -462,7 +467,6 @@ export class BotStore {
       .prepare("DELETE FROM bot_threads WHERE thread_id = ?")
       .run(threadId);
     this.reopenings.delete(threadId);
-    this.assignments.delete(threadId);
     if (changes > 0) this.noteChange();
   }
 
