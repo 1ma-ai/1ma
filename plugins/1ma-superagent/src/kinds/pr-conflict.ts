@@ -6,7 +6,8 @@ import { freshChat, parseSubject } from "./unlinked-pr.js";
 
 export const CONFLICT_KIND = "pr_conflict";
 const KEEP = "keep";
-const MOVE = "move";
+const MOVE = "move:";
+const MOVE_OPTIONS = 4;
 
 function subject(link: PrLinkRow): string {
   return `${link.repo}#${link.number}`;
@@ -20,38 +21,48 @@ function version(link: PrLinkRow): string {
   return `${link.prState}|${link.linkKind ?? "none"}|${linked(link)}|${link.conflictChat ?? ""}`;
 }
 
-export function conflictCard(link: PrLinkRow, other: string): Card {
+function participants(link: PrLinkRow): string[] {
+  return link.conflictChat === null ? [] : link.conflictChat.split(",");
+}
+
+export function conflictCard(link: PrLinkRow): Card {
   const pr = subject(link);
   const current = linked(link);
+  const others = participants(link);
   return {
     title: strings.conflictTitle(pr),
-    observed: strings.conflictObserved(pr, current, other),
+    observed: strings.conflictObserved(pr, current, others),
     affected: strings.conflictAffected,
     recommendation: strings.conflictRecommendation(current),
     options: [
       { id: KEEP, label: strings.conflictKeep(current), recommended: true },
-      { id: MOVE, label: strings.conflictMove(other), recommended: false },
+      ...others.slice(0, MOVE_OPTIONS).map((other, index) => ({
+        id: `${MOVE}${index}`,
+        label: strings.conflictMove(other),
+        recommended: false,
+      })),
     ],
   };
 }
 
 export function askAboutConflicts(prStore: PrStore, questions: QuestionStore, now: number): void {
+  const waiting = questions.waiting().filter((question) => question.kind === CONFLICT_KIND);
   for (const link of prStore.all()) {
-    const key = `${CONFLICT_KIND}:${subject(link)}:${linked(link)}:${link.conflictChat ?? ""}`;
-    if (link.conflictChat === null || link.linkKind !== "claim" || link.prState !== "open") {
-      for (const question of questions.waiting())
-        if (question.kind === CONFLICT_KIND && question.subject === subject(link))
-          questions.cancel(question.key);
-      continue;
-    }
-    if (questions.latest(key) !== null) continue;
+    const live = link.conflictChat !== null && link.linkKind === "claim" && link.prState === "open";
+    const key = live
+      ? `${CONFLICT_KIND}:${subject(link)}:${linked(link)}:${link.conflictChat}:${link.conflictSince ?? ""}`
+      : null;
+    for (const question of waiting)
+      if (question.subject === subject(link) && question.key !== key)
+        questions.cancel(question.key);
+    if (key === null || questions.latest(key) !== null) continue;
     questions.ask(
       {
         key,
         kind: CONFLICT_KIND,
         subject: subject(link),
         expectedVersion: version(link),
-        card: conflictCard(link, link.conflictChat),
+        card: conflictCard(link),
         priority: 15,
       },
       now,
@@ -75,7 +86,10 @@ export function conflictKind(prStore: PrStore, store: Store): QuestionKind {
         prStore.setManualLink(ref.repo, ref.number, link.deliveryServerId, link.deliveryThreadId);
         return;
       }
-      const chat = freshChat(store, link, link.conflictChat ?? undefined, now);
+      const index = optionId.startsWith(MOVE) ? Number(optionId.slice(MOVE.length)) : Number.NaN;
+      const other = Number.isInteger(index) ? participants(link)[index] : undefined;
+      if (other === undefined) return "stale";
+      const chat = freshChat(store, link, other, now);
       if (chat === null) return "stale";
       prStore.setManualLink(ref.repo, ref.number, chat.serverId, chat.threadId);
     },

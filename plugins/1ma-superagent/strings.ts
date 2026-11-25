@@ -47,8 +47,8 @@ export const strings = {
   unlinkedLink: (chat: string) => `Привязать к ${chat} как адрес замечаний`,
   unlinkedLeave: "Оставить непривязанным",
   conflictTitle: (pr: string) => `Второй чат заявил ${pr}`,
-  conflictObserved: (pr: string, current: string, other: string) =>
-    `${pr} привязан к ${current} по его заявке, но в этом проходе ${current} не прочитан (архивирован или его сервер не ответил). Тот же PR заявил ${other}.`,
+  conflictObserved: (pr: string, current: string, others: readonly string[]) =>
+    `${pr} привязан к ${current} по его заявке. Тот же PR заявили и другие чаты: ${others.join(", ")}.`,
   conflictAffected:
     "Ничего: связь остаётся прежней, пока вы не решите. Связь — только адрес замечаний.",
   conflictRecommendation: (current: string) =>

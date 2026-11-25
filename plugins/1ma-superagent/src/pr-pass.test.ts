@@ -267,7 +267,9 @@ describe("runPrPass", () => {
         expect(question?.kind).toBe("pr_conflict");
         expect(questions.waiting()).toHaveLength(1);
         if (question === undefined) throw new Error("no question");
-        expect(conflictKind(t.prStore, t.store).onAnswer(question, "move", 20_500)).toBeUndefined();
+        expect(
+          conflictKind(t.prStore, t.store).onAnswer(question, "move:0", 20_500),
+        ).toBeUndefined();
         expect(t.prStore.get("example/app", 7)).toMatchObject({
           linkKind: "manual",
           deliveryThreadId: "thr_other",
@@ -445,5 +447,131 @@ describe("runPrPass", () => {
     expect(reads).toContain("pull 7");
     expect(reads).toContain("recent 5000");
     expect(prStore.get("example/app", 7)?.prState).toBe("merged");
+  });
+});
+
+describe("a second claim on a linked PR", () => {
+  const contested = (others: string[]) => {
+    const metadata: Record<string, unknown> = { thr_old: claimsOf(7) };
+    const t = setup({
+      threads: {
+        mac: [],
+        linux: [
+          { id: "thr_old", branch: "feature/7" },
+          ...others.map((id) => ({ id, branch: "feature/7" })),
+        ],
+      },
+      metadata,
+      pulls: [pull(7)],
+    });
+    const questions = new QuestionStore(t.db);
+    const pass = async (now: number, observed: Partial<Record<ServerId, Completeness>> = {}) => {
+      await t.run(now, observed);
+      askAboutConflicts(t.prStore, questions, now);
+    };
+    const conflicts = () =>
+      questions.waiting().filter((question) => question.kind === "pr_conflict");
+    return { ...t, metadata, questions, pass, conflicts };
+  };
+
+  it("keeps the link while the linked chat is read again with its claim, and calls the other a conflict", async () => {
+    const t = contested(["thr_new"]);
+    await t.pass(10_000);
+    t.metadata.thr_new = claimsOf(7);
+    await t.pass(20_000, { linux: "failed" });
+    await t.pass(30_000);
+    expect(t.prStore.get("example/app", 7)).toMatchObject({
+      linkKind: "claim",
+      deliveryThreadId: "thr_old",
+      linkConfirmedAt: 10_000,
+      conflictChat: "linux:thr_new",
+    });
+  });
+
+  it("asks one card over three passes of an unchanged conflict", async () => {
+    const t = contested(["thr_new"]);
+    await t.pass(10_000);
+    t.metadata.thr_new = claimsOf(7);
+    await t.pass(20_000);
+    const [first] = t.conflicts();
+    await t.pass(30_000);
+    await t.pass(40_000);
+    expect(t.conflicts().map((question) => question.id)).toEqual([first?.id]);
+    expect(t.questions.waiting()).toHaveLength(1);
+  });
+
+  it("asks again when the same pair conflicts after the first card was cancelled automatically", async () => {
+    const t = contested(["thr_new"]);
+    await t.pass(10_000);
+    t.metadata.thr_new = claimsOf(7);
+    await t.pass(20_000);
+    const [first] = t.conflicts();
+    if (first === undefined) throw new Error("no conflict card");
+    delete t.metadata.thr_new;
+    await t.pass(30_000);
+    expect(t.questions.get(first.id)?.state).toBe("canceled");
+    expect(t.conflicts()).toEqual([]);
+    t.metadata.thr_new = claimsOf(7);
+    await t.pass(40_000);
+    expect(t.prStore.get("example/app", 7)).toMatchObject({
+      deliveryThreadId: "thr_old",
+      conflictChat: "linux:thr_new",
+    });
+    expect(t.conflicts()).toHaveLength(1);
+    expect(t.conflicts()[0]?.id).not.toBe(first.id);
+  });
+
+  it("does not ask again while the same conflict goes on after the owner closed the card", async () => {
+    const t = contested(["thr_new"]);
+    await t.pass(10_000);
+    t.metadata.thr_new = claimsOf(7);
+    await t.pass(20_000);
+    const [first] = t.conflicts();
+    if (first === undefined) throw new Error("no conflict card");
+    expect(t.questions.markOpen(first.id, "thr_bot", "tok_1", 20_500)).toBe(true);
+    t.questions.closeAs(first.id, "tok_1", "canceled");
+    await t.pass(30_000);
+    await t.pass(40_000);
+    expect(t.conflicts()).toEqual([]);
+  });
+
+  it("cancels the card and asks one new card when the participants change", async () => {
+    const t = contested(["thr_new", "thr_third"]);
+    await t.pass(10_000);
+    t.metadata.thr_new = claimsOf(7);
+    await t.pass(20_000);
+    const [first] = t.conflicts();
+    if (first === undefined) throw new Error("no conflict card");
+    t.metadata.thr_third = claimsOf(7);
+    await t.pass(30_000);
+    expect(t.questions.get(first.id)?.state).toBe("canceled");
+    const now = t.conflicts();
+    expect(now).toHaveLength(1);
+    expect(t.prStore.get("example/app", 7)).toMatchObject({
+      deliveryThreadId: "thr_old",
+      conflictChat: "linux:thr_new,linux:thr_third",
+    });
+    const options = now[0]?.card.options.map((option) => option.id);
+    expect(options).toEqual(["keep", "move:0", "move:1"]);
+  });
+
+  it("moves the link only once the linked chat is read without its claim and one other claimant remains", async () => {
+    const t = contested(["thr_new", "thr_third"]);
+    await t.pass(10_000);
+    t.metadata.thr_new = claimsOf(7);
+    t.metadata.thr_third = claimsOf(7);
+    t.metadata.thr_old = { claims: [] };
+    await t.pass(20_000);
+    expect(t.prStore.get("example/app", 7)).toMatchObject({
+      linkKind: null,
+      claimProblem: "claimed by 2 chats",
+    });
+    delete t.metadata.thr_third;
+    await t.pass(30_000);
+    expect(t.prStore.get("example/app", 7)).toMatchObject({
+      linkKind: "claim",
+      deliveryThreadId: "thr_new",
+      conflictChat: null,
+    });
   });
 });

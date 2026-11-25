@@ -124,4 +124,5 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE pr_links ADD COLUMN conflict_chat TEXT`,
   `ALTER TABLE main_watch ADD COLUMN observed_head TEXT`,
   `UPDATE main_watch SET observed_head = last_head WHERE observed_head IS NULL`,
+  `ALTER TABLE pr_links ADD COLUMN conflict_since INTEGER`,
 ];

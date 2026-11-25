@@ -17,6 +17,7 @@ export interface PrLinkRow {
   linkKind: "claim" | "manual" | null;
   linkConfirmedAt: number | null;
   conflictChat: string | null;
+  conflictSince: number | null;
   claimProblem: string | null;
   branchHint: string | null;
   provenanceGap: boolean;
@@ -38,6 +39,7 @@ interface RawLink {
   link_kind: string | null;
   link_confirmed_at: number | null;
   conflict_chat: string | null;
+  conflict_since: number | null;
   claim_problem: string | null;
   branch_hint: string | null;
   provenance_gap: number;
@@ -73,6 +75,7 @@ function toLink(raw: RawLink): PrLinkRow {
     linkKind: kind,
     linkConfirmedAt: raw.link_confirmed_at,
     conflictChat: raw.conflict_chat,
+    conflictSince: raw.conflict_since,
     claimProblem: raw.claim_problem,
     branchHint: raw.branch_hint,
     provenanceGap: raw.provenance_gap === 1,
@@ -169,16 +172,19 @@ export class PrStore {
     this.#db
       .prepare(
         `INSERT INTO pr_links (repo, number, head_repo, head_ref, head_sha, author, pr_state, pr_updated_at,
-           delivery_server_id, delivery_thread_id, link_kind, link_confirmed_at, conflict_chat, claim_problem,
-           claim_checked_at, branch_hint, observed_at, unlinked_since)
+           delivery_server_id, delivery_thread_id, link_kind, link_confirmed_at, conflict_chat, conflict_since,
+           claim_problem, claim_checked_at, branch_hint, observed_at, unlinked_since)
          VALUES (@repo, @number, @headRepo, @headRef, @headSha, @author, @state, @updatedAt, @server, @thread,
-           @kind, @confirmedAt, @conflict, @problem, @now, @hint, @now,
-           CASE WHEN @thread IS NULL THEN @now ELSE NULL END)
+           @kind, @confirmedAt, @conflict, CASE WHEN @conflict IS NULL THEN NULL ELSE @now END, @problem, @now,
+           @hint, @now, CASE WHEN @thread IS NULL THEN @now ELSE NULL END)
          ON CONFLICT (repo, number) DO UPDATE SET
            head_repo = @headRepo, head_ref = @headRef, head_sha = @headSha, author = @author,
            pr_state = @state, pr_updated_at = @updatedAt, delivery_server_id = @server,
            delivery_thread_id = @thread, link_kind = @kind, link_confirmed_at = @confirmedAt,
-           conflict_chat = @conflict, claim_problem = @problem,
+           conflict_chat = @conflict,
+           conflict_since = CASE WHEN @conflict IS NULL THEN NULL
+             WHEN pr_links.conflict_chat IS @conflict THEN pr_links.conflict_since ELSE @now END,
+           claim_problem = @problem,
            claim_checked_at = @now, branch_hint = @hint, observed_at = @now,
            unlinked_since = CASE WHEN @thread IS NULL THEN COALESCE(pr_links.unlinked_since, @now) ELSE NULL END`,
       )
@@ -206,7 +212,8 @@ export class PrStore {
     const changes = this.#db
       .prepare(
         `UPDATE pr_links SET link_kind = 'manual', delivery_server_id = ?, delivery_thread_id = ?,
-           claim_problem = NULL, conflict_chat = NULL, unlinked_since = NULL WHERE repo = ? AND number = ?`,
+           claim_problem = NULL, conflict_chat = NULL, conflict_since = NULL, unlinked_since = NULL
+           WHERE repo = ? AND number = ?`,
       )
       .run(serverId, threadId, repo, number).changes;
     if (changes === 1) {

@@ -79,27 +79,43 @@ async function collectClaims(
   return { candidates, read };
 }
 
+export interface CurrentLink {
+  readonly chat: string;
+  readonly observed: boolean;
+  readonly unreadParticipants: readonly string[];
+}
+
+const chatKey = (candidate: Candidate) => `${candidate.chat.serverId}:${candidate.chat.threadId}`;
+
 export function decideLink(
   policy: RepoPolicy,
   pull: PullRequest,
   candidates: readonly Candidate[],
+  current: CurrentLink | null,
 ): LinkDecision {
   const verdicts = candidates.map((candidate) => ({
     candidate,
     verdict: checkClaim(policy, candidate.chat, candidate.claim, pull),
   }));
   const valid = verdicts.filter((entry) => entry.verdict.ok);
-  const chats = new Set(
-    valid.map((entry) => `${entry.candidate.chat.serverId}:${entry.candidate.chat.threadId}`),
-  );
-  if (chats.size === 1 && valid[0] !== undefined) {
+  const chats = new Set(valid.map((entry) => chatKey(entry.candidate)));
+  if (current !== null && (!current.observed || chats.has(current.chat))) {
+    const others = [...new Set([...chats, ...current.unreadParticipants])]
+      .filter((chat) => chat !== current.chat)
+      .toSorted();
+    if (others.length > 0) return { kind: "kept", conflict: others.join(",") };
+    if (!current.observed) return { kind: "kept", conflict: null };
+  }
+  const claimants = new Set([...chats, ...(current?.unreadParticipants ?? [])]);
+  const only = valid[0];
+  if (claimants.size === 1 && chats.size === 1 && only !== undefined) {
     return {
       kind: "claim",
-      serverId: valid[0].candidate.chat.serverId,
-      threadId: valid[0].candidate.chat.threadId,
+      serverId: only.candidate.chat.serverId,
+      threadId: only.candidate.chat.threadId,
     };
   }
-  if (chats.size > 1) return { kind: "none", problem: `claimed by ${chats.size} chats` };
+  if (claimants.size > 1) return { kind: "none", problem: `claimed by ${claimants.size} chats` };
   const rejected = verdicts.find((entry) => !entry.verdict.ok);
   return {
     kind: "none",
@@ -174,21 +190,27 @@ export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] 
   if (!deps.admitted()) return { problems };
   const modelReads: Array<Promise<void>> = [];
   for (const pull of pullsByRepo.flat()) {
-    const decided = decideLink(
+    const current = deps.prStore.get(pull.repo, pull.number);
+    const linked =
+      current?.linkKind === "claim" &&
+      current.deliveryServerId !== null &&
+      current.deliveryThreadId !== null
+        ? `${current.deliveryServerId}:${current.deliveryThreadId}`
+        : null;
+    const decision = decideLink(
       deps.policy,
       pull,
       candidates.get(key(pull.repo, pull.number)) ?? [],
+      linked === null
+        ? null
+        : {
+            chat: linked,
+            observed: read.has(linked),
+            unreadParticipants: (current?.conflictChat?.split(",") ?? []).filter(
+              (chat) => !read.has(chat),
+            ),
+          },
     );
-    const current = deps.prStore.get(pull.repo, pull.number);
-    const unobserved =
-      current?.linkKind === "claim" &&
-      current.deliveryThreadId !== null &&
-      !read.has(`${current.deliveryServerId}:${current.deliveryThreadId}`);
-    const decision: LinkDecision = !unobserved
-      ? decided
-      : decided.kind === "claim"
-        ? { kind: "kept", conflict: `${decided.serverId}:${decided.threadId}` }
-        : { kind: "kept", conflict: null };
     deps.prStore.record(pull, decision, branchHint(threads, pull), deps.now);
     const link = deps.prStore.get(pull.repo, pull.number);
     if (link?.linkKind !== "claim" || pull.state !== "open" || link.deliveryServerId === null)
