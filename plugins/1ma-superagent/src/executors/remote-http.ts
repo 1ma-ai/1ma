@@ -77,7 +77,13 @@ export class RemoteHttpError extends Error {
 
 export type Fetch = (
   input: string,
-  init: { signal: AbortSignal; headers: Record<string, string>; method: string; body?: string },
+  init: {
+    signal: AbortSignal;
+    headers: Record<string, string>;
+    method: string;
+    redirect: "error";
+    body?: string;
+  },
 ) => Promise<Response>;
 
 export interface RemoteHttpOptions {
@@ -110,6 +116,7 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
           ? { accept: "application/json" }
           : { accept: "application/json", "content-type": "application/json" },
       method,
+      redirect: "error",
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (!response.ok)
