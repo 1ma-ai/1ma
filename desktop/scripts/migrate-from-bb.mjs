@@ -270,6 +270,16 @@ function within(child, parent) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+// A name under a regular file does not exist either; lstat reports it as ENOTDIR.
+function isLink(file) {
+  try {
+    return lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink() === true;
+  } catch (error) {
+    if (error.code === "ENOTDIR") return false;
+    throw error;
+  }
+}
+
 // A folder that does not exist yet resolves through its nearest existing
 // parent, so both sides of a comparison pass the same symbolic links. A link
 // to a folder that does not exist is followed too: a write under it would
@@ -278,10 +288,10 @@ function real(dir) {
   const missing = [];
   let existing = path.resolve(dir);
   for (let links = 0; !existsSync(existing) && path.dirname(existing) !== existing;) {
-    if (lstatSync(existing, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    if (isLink(existing)) {
       if ((links += 1) > MAX_LINKS)
         throw new Error(`${dir} passes through a loop of symbolic links`);
-      existing = path.resolve(path.dirname(existing), readlinkSync(existing));
+      existing = path.resolve(realpathSync(path.dirname(existing)), readlinkSync(existing));
       continue;
     }
     missing.unshift(path.basename(existing));
@@ -343,6 +353,10 @@ function checkBeforeImport(options) {
   if (overlaps(from, to)) throw new Error(`${from} and ${to} must be two separate folders`);
   if (overlaps(options.piSessions, to))
     throw new Error(`Pi's earlier conversations in ${options.piSessions} must be outside ${to}`);
+  if (isLink(to))
+    throw new Error(
+      `${to} is a symbolic link to ${real(to)}. The import moves and renames the folder it is given, and would do that to the link and not to the data behind it: pass --to ${real(to)}.`,
+    );
   if (!existsSync(path.join(from, "bb.db")) || !existsSync(path.join(from, "host-id")))
     throw new Error(`${from} is not a bb data folder (no bb.db or host-id)`);
   if (!existsSync(options.archive)) throw new Error(`${options.archive} does not exist`);

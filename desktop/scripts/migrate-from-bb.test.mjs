@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -335,6 +336,52 @@ describe("Pi sessions of a bb older than 0.50", () => {
       assert.equal(readFileSync(path.join(to, "earlier.txt"), "utf8"), "earlier 1ma\n");
     });
 
+  test("are not written through a link whose own folder is reached through a link", () => {
+    // The link's text is relative: followed from where the link is named it
+    // stays inside 1ma's folder, followed from where the link is it does not.
+    const home = fresh("home");
+    const given = fresh("pi-given");
+    write(given, "thr_given.jsonl", "given\n");
+    const to = fresh("1ma");
+    write(to, "earlier.txt", "earlier 1ma\n");
+    const outside = fresh("pi-storage");
+    const bridgeData = path.join(outside, "kept/deep/bridge-data");
+    mkdirSync(bridgeData, { recursive: true });
+    symlinkSync("../../../store", path.join(bridgeData, "sessions"));
+    const prepare = (from) => {
+      mkdirSync(path.join(from, "plugins/provider-pi"), { recursive: true });
+      symlinkSync(bridgeData, path.join(from, "plugins/provider-pi/bridge-data"));
+    };
+    assert.throws(
+      () => homeImport(home, { more: ["--pi-sessions", given, "--move-aside"], prepare, to }),
+      (error) => {
+        assert.match(error.message, /would be written outside/);
+        assert.ok(error.message.includes(path.join(outside, "store")), error.message);
+        return true;
+      },
+    );
+    assert.deepEqual(readdirSync(outside), ["kept"]);
+    assert.equal(readFileSync(path.join(to, "earlier.txt"), "utf8"), "earlier 1ma\n");
+  });
+
+  test("a folder given for them that cannot exist brings none, one that leads into 1ma's is refused", () => {
+    const home = fresh("home");
+    const file = fresh("a-file");
+    writeFileSync(file, "not a folder");
+    const underAFile = path.join(file, "sessions");
+    const { record } = homeImport(home, { more: ["--pi-sessions", underAFile] });
+    assert.deepEqual(record.piSessions, { from: underAFile, copied: 0, kept: 0 });
+
+    const to = fresh("1ma");
+    const link = fresh("pi-link");
+    symlinkSync(path.join(to, "not-there-yet"), link);
+    assert.throws(
+      () => homeImport(home, { more: ["--pi-sessions", link], to }),
+      /Pi's earlier conversations in .* must be outside/,
+    );
+    assert.equal(existsSync(to), false);
+  });
+
   test("a linked folder that already has the session is left as it is", () => {
     const home = fresh("home");
     const given = fresh("pi-given");
@@ -441,6 +488,37 @@ describe("importing into 1ma", () => {
     const names = readdirSync(path.dirname(to));
     assert.ok(names.some((name) => name.startsWith(`${path.basename(to)}.failed-`)));
     assert.ok(!names.some((name) => name.startsWith(`${path.basename(to)}.before-migration-`)));
+  });
+
+  test("a 1ma folder that is a symbolic link is refused: the import would move the link, not the data", () => {
+    const from = bbFolder();
+    const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
+    for (const [earlier, more] of [
+      [["earlier.txt"], ["--move-aside"]],
+      [[], []],
+    ]) {
+      const disk = fresh("other-disk");
+      mkdirSync(disk);
+      for (const name of earlier) write(disk, name, "earlier 1ma\n");
+      const to = fresh("1ma");
+      symlinkSync(disk, to);
+      assert.throws(
+        () => importIntoOneMa(importArgs(from, to, cli, more), quiet),
+        (error) => {
+          assert.match(error.message, /is a symbolic link to /);
+          assert.ok(error.message.includes(`pass --to ${disk}`), error.message);
+          return true;
+        },
+      );
+      assert.ok(lstatSync(to).isSymbolicLink());
+      assert.deepEqual(readdirSync(disk), earlier);
+      assert.deepEqual(
+        readdirSync(path.dirname(to)).filter(
+          (name) => name.startsWith(`${path.basename(to)}.`) && name !== path.basename(to),
+        ),
+        [],
+      );
+    }
   });
 
   test("an export older than bb's latest work is refused unless confirmed", () => {
