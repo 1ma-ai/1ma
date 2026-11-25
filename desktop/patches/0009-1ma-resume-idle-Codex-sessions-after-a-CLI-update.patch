@@ -18,13 +18,13 @@ on Linux with @openai/codex 0.168.0 -> 0.169.0: same path and size, new
 inode and mtime). A rebuild whose turn carries no env vars keeps the
 session's own, which bb's signature check already treats as unchanged.
 ---
- .../src/bridge/app-server-connection.ts       |  23 ++++
- .../bridge/bridge.session-signature.test.ts   | 107 +++++++++++++++++-
+ .../src/bridge/app-server-connection.ts       |  21 ++++
+ .../bridge/bridge.session-signature.test.ts   | 104 +++++++++++++++++-
  plugins/provider-codex/src/bridge/bridge.ts   |  18 ++-
- 3 files changed, 146 insertions(+), 2 deletions(-)
+ 3 files changed, 141 insertions(+), 2 deletions(-)
 
 diff --git a/plugins/provider-codex/src/bridge/app-server-connection.ts b/plugins/provider-codex/src/bridge/app-server-connection.ts
-index abe6698..6883612 100644
+index abe6698..c2f55af 100644
 --- a/plugins/provider-codex/src/bridge/app-server-connection.ts
 +++ b/plugins/provider-codex/src/bridge/app-server-connection.ts
 @@ -1,4 +1,6 @@
@@ -69,14 +69,12 @@ index abe6698..6883612 100644
  
    const pending = new Map<number, PendingChildRequest>();
    const stderrChunks: string[] = [];
-@@ -359,6 +375,13 @@ export function createCodexAppServerConnection(
+@@ -359,6 +375,11 @@ export function createCodexAppServerConnection(
        return finalized || stdinFailure !== null;
      },
  
 +    hasUpdatedExecutable() {
 +      if (launchedExecutable === null) return false;
-+      // A file that is gone counts as changed: updates such as Homebrew's
-+      // delete the old version the session was started from.
 +      return executableIdentity(child.spawnfile) !== launchedExecutable;
 +    },
 +
@@ -84,7 +82,7 @@ index abe6698..6883612 100644
        if (finalized || killStarted) {
          return Promise.reject(
 diff --git a/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts b/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts
-index 14a88d4..f3e8674 100644
+index 2e3acef..53a6caa 100644
 --- a/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts
 +++ b/plugins/provider-codex/src/bridge/bridge.session-signature.test.ts
 @@ -1,4 +1,11 @@
@@ -100,7 +98,7 @@ index 14a88d4..f3e8674 100644
  import { tmpdir } from "node:os";
  import { join } from "node:path";
  import { afterEach, beforeEach, expect, it, vi } from "vitest";
-@@ -82,6 +89,104 @@ it("keeps the constructed session for a turn whose options carry no envVars", as
+@@ -82,6 +89,101 @@ it("keeps the constructed session for a turn whose options carry no envVars", as
    ).toEqual([]);
  }, 30_000);
  
@@ -160,9 +158,6 @@ index 14a88d4..f3e8674 100644
 +      writeFileSync(next, wrapper, { mode: 0o700 });
 +      renameSync(next, command);
 +    } else {
-+      // The command now resolves to the new version, and the update removed
-+      // the file the running session was started from, as Homebrew does with
-+      // the old version's folder.
 +      writeFileSync(next, wrapper, { mode: 0o700 });
 +      vi.stubEnv("BB_CODEX_BRIDGE_APP_SERVER_COMMAND", next);
 +      rmSync(first);
@@ -206,10 +201,10 @@ index 14a88d4..f3e8674 100644
    const original = { BB_TEST_SECRET: "original", BB_TEST_REMOVED: "gone" };
    harness.sendRequest(1, "thread/start", {
 diff --git a/plugins/provider-codex/src/bridge/bridge.ts b/plugins/provider-codex/src/bridge/bridge.ts
-index 81357a3..ccda32c 100644
+index ddc0c11..08ffd36 100644
 --- a/plugins/provider-codex/src/bridge/bridge.ts
 +++ b/plugins/provider-codex/src/bridge/bridge.ts
-@@ -477,6 +477,7 @@ interface CodexBridgeSession {
+@@ -479,6 +479,7 @@ interface CodexBridgeSession {
    construction: CodexSessionConstruction;
    constructionSignature: string;
    environmentHash: string;
@@ -217,7 +212,7 @@ index 81357a3..ccda32c 100644
    turnPermissionSettings: ReturnType<typeof toCodexPermissionSettings>;
    openCodexTurnIds: Set<string>;
    responseOpenedTurns: Map<string, ResponseOpenedTurn>;
-@@ -1254,6 +1255,7 @@ async function constructThreadSession(
+@@ -1263,6 +1264,7 @@ async function constructThreadSession(
        envHash,
      ),
      environmentHash: envHash,
@@ -225,7 +220,7 @@ index 81357a3..ccda32c 100644
      turnPermissionSettings: toCodexPermissionSettings({
        additionalWorkspaceWriteRoots: decoded.additionalWorkspaceWriteRoots,
        gitWritableRoots: [],
-@@ -1482,6 +1484,7 @@ function registerResumableSession(session: CodexBridgeSession): void {
+@@ -1492,6 +1494,7 @@ function registerResumableSession(session: CodexBridgeSession): void {
      construction: session.construction,
      constructionSignature: session.constructionSignature,
      environmentHash: session.environmentHash,
@@ -233,7 +228,7 @@ index 81357a3..ccda32c 100644
      turnPermissionSettings: session.turnPermissionSettings,
      openCodexTurnIds: new Set(),
      responseOpenedTurns: new Map(),
-@@ -1520,7 +1523,10 @@ async function rebuildThreadSession(
+@@ -1530,7 +1533,10 @@ async function rebuildThreadSession(
      replacement = await constructThreadSession({
        threadId: session.bbThreadId,
        cwd: session.construction.cwd,
@@ -245,7 +240,7 @@ index 81357a3..ccda32c 100644
        instructionMode: session.construction.instructionMode,
        ...(session.construction.dynamicTools !== undefined
          ? { dynamicTools: session.construction.dynamicTools }
-@@ -1716,6 +1722,16 @@ async function requireLiveSessionForTurn(
+@@ -1726,6 +1732,16 @@ async function requireLiveSessionForTurn(
        params.options,
        "Execution settings changed; the codex session was rebuilt to apply them.",
      );

@@ -7,8 +7,9 @@ Subject: [PATCH] 1ma: ~/.1ma data directory and telemetry off by default
 install without sharing a database, and it sends no usage telemetry unless
 the user sets BB_TELEMETRY=true. The places that name the default data
 directory directly follow it: a server move archives and checks ~/.1ma,
-never bb's ~/.bb; machine enrollment guards ~/.1ma; the Pi provider keeps
-its bridge sessions in ~/.1ma. Tests follow the new defaults.
+never bb's ~/.bb; machine enrollment guards ~/.1ma; the Pi provider carries
+old session files over from ~/.1ma/pi-bridge-sessions, where 1ma kept them,
+and leaves a bb install's files alone. Tests follow the new defaults.
 ---
  .../src/commands/machine-enrollment.test.ts   |  2 +-
  apps/cli/src/commands/machine-enrollment.ts   |  2 +-
@@ -22,8 +23,9 @@ its bridge sessions in ~/.1ma. Tests follow the new defaults.
  packages/scripts/test/reset-bb-data.test.ts   |  2 +-
  packages/scripts/test/run-dev.test.ts         | 12 ++++----
  packages/scripts/test/run-host-daemon.test.ts |  2 +-
+ .../src/bridge/session-paths.test.ts          | 19 ++++++++++--
  .../provider-pi/src/bridge/session-paths.ts   |  2 +-
- 13 files changed, 36 insertions(+), 36 deletions(-)
+ 14 files changed, 53 insertions(+), 38 deletions(-)
 
 diff --git a/apps/cli/src/commands/machine-enrollment.test.ts b/apps/cli/src/commands/machine-enrollment.test.ts
 index 6f5ec80..469c988 100644
@@ -52,7 +54,7 @@ index 1b2d7b4..09a38f4 100644
    )
      throw new Error(
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 58aa52c..59a72bb 100644
+index 8e41d69..926a08b 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
 @@ -651,7 +651,7 @@ const desktopLogger = createDesktopLogger({ logDir: formatLogDirectory() });
@@ -65,10 +67,10 @@ index 58aa52c..59a72bb 100644
    if (rawDataDir === "~") {
      return args.homeDir;
 diff --git a/apps/host-daemon/src/server-move/service.test.ts b/apps/host-daemon/src/server-move/service.test.ts
-index 7433389..382d481 100644
+index 0c36f7f..107f5c3 100644
 --- a/apps/host-daemon/src/server-move/service.test.ts
 +++ b/apps/host-daemon/src/server-move/service.test.ts
-@@ -189,7 +189,7 @@ describe("ServerMoveService.prepare", () => {
+@@ -190,7 +190,7 @@ describe("ServerMoveService.prepare", () => {
        JSON.stringify(originalConfig),
      );
      await writeFileWithDirs(
@@ -77,7 +79,7 @@ index 7433389..382d481 100644
        "standalone server",
      );
      const command = await prepareCommand(fixture, {
-@@ -197,10 +197,10 @@ describe("ServerMoveService.prepare", () => {
+@@ -198,10 +198,10 @@ describe("ServerMoveService.prepare", () => {
      });
  
      const result = await fixture.service.prepare(command);
@@ -90,7 +92,7 @@ index 7433389..382d481 100644
        ),
      ).toBe(true);
  
-@@ -223,7 +223,7 @@ describe("ServerMoveService.prepare", () => {
+@@ -224,7 +224,7 @@ describe("ServerMoveService.prepare", () => {
      expect(await exists(join(fixture.dataDir, "server-move-incoming"))).toBe(
        false,
      );
@@ -99,7 +101,7 @@ index 7433389..382d481 100644
        "standalone server",
      );
      await expect(
-@@ -251,11 +251,11 @@ describe("ServerMoveService.prepare", () => {
+@@ -252,11 +252,11 @@ describe("ServerMoveService.prepare", () => {
    it("refuses to archive ~/.bb while bb is running from it", async () => {
      const fixture = await createFixture();
      await writeFileWithDirs(
@@ -113,7 +115,7 @@ index 7433389..382d481 100644
        serverPort: 38_886,
      });
      const command = await prepareCommand(fixture, {
-@@ -264,10 +264,10 @@ describe("ServerMoveService.prepare", () => {
+@@ -265,10 +265,10 @@ describe("ServerMoveService.prepare", () => {
  
      await expect(fixture.service.prepare(command)).rejects.toMatchObject({
        code: "server_move_rejected",
@@ -126,7 +128,7 @@ index 7433389..382d481 100644
        "standalone server",
      );
  
-@@ -281,11 +281,11 @@ describe("ServerMoveService.prepare", () => {
+@@ -282,11 +282,11 @@ describe("ServerMoveService.prepare", () => {
        },
      });
      await writeFileWithDirs(
@@ -140,7 +142,7 @@ index 7433389..382d481 100644
        serverPort: 38_886,
      });
      await expect(
-@@ -293,7 +293,7 @@ describe("ServerMoveService.prepare", () => {
+@@ -294,7 +294,7 @@ describe("ServerMoveService.prepare", () => {
          await prepareCommand(stopped, { archiveExistingServerData: true }),
        ),
      ).resolves.toMatchObject({ pid: expect.any(Number) });
@@ -149,7 +151,7 @@ index 7433389..382d481 100644
    });
  });
  
-@@ -693,7 +693,7 @@ describe("ServerMoveService own data dir guards", () => {
+@@ -694,7 +694,7 @@ describe("ServerMoveService own data dir guards", () => {
    it("hides ~/.bb when it is this daemon's data dir and refuses to archive it", async () => {
      const fixture = await createFixture();
      await writeFile(join(fixture.dataDir, "bb.db"), "old server");
@@ -158,7 +160,7 @@ index 7433389..382d481 100644
  
      const result = await fixture.service.inspect({
        type: "server_move.inspect",
-@@ -716,7 +716,7 @@ describe("ServerMoveService own data dir guards", () => {
+@@ -717,7 +717,7 @@ describe("ServerMoveService own data dir guards", () => {
      );
      expect(
        (await readdir(fixture.homeDir)).filter((name) =>
@@ -167,7 +169,7 @@ index 7433389..382d481 100644
        ),
      ).toEqual([]);
      expect(await readFile(join(fixture.dataDir, "bb.db"), "utf8")).toBe(
-@@ -807,7 +807,7 @@ describe("ServerMoveService.inspect and probe", () => {
+@@ -808,7 +808,7 @@ describe("ServerMoveService.inspect and probe", () => {
      const fixture = await createFixture({
        env: { BB_SERVER_MOVE_SERVICE_MANAGER: "none", BB_APP_VERSION: "1.2.3" },
      });
@@ -176,7 +178,7 @@ index 7433389..382d481 100644
      await writeFileWithDirs(join(fixture.homeDir, ".codex", "auth.json"), "{}");
      await writeFileWithDirs(join(fixture.homeDir, "tools", "bin", "gh"), "");
  
-@@ -830,7 +830,7 @@ describe("ServerMoveService.inspect and probe", () => {
+@@ -831,7 +831,7 @@ describe("ServerMoveService.inspect and probe", () => {
        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
        bbAppVersion: "1.2.3",
        serverEntryAvailable: true,
@@ -199,10 +201,10 @@ index b19496b..d6c9e93 100644
  const SERVER_MOVE_LOG_FILE_NAME = "server-move.log";
  const INSTALL_DAEMON_PID_FILE_NAME = "install-daemon.pid";
 diff --git a/packages/bb-app/test/index.test.ts b/packages/bb-app/test/index.test.ts
-index 33a3aff..9bd812a 100644
+index f0b2d4c..c3cb58a 100644
 --- a/packages/bb-app/test/index.test.ts
 +++ b/packages/bb-app/test/index.test.ts
-@@ -575,9 +575,9 @@ describe("bb-app launcher", () => {
+@@ -578,9 +578,9 @@ describe("bb-app launcher", () => {
        homeDir: "/home/tester",
      });
  
@@ -216,10 +218,10 @@ index 33a3aff..9bd812a 100644
      expect(context.daemonPort).toBe(38887);
      expect(context.serverUrl).toBe("http://127.0.0.1:38886");
 diff --git a/packages/config/src/env-vars.ts b/packages/config/src/env-vars.ts
-index d845e3b..947b329 100644
+index fa055cc..a1cad14 100644
 --- a/packages/config/src/env-vars.ts
 +++ b/packages/config/src/env-vars.ts
-@@ -445,7 +445,7 @@ export const DEFAULT_BB_SERVER_BIND_HOST: ServerBindHost = BB_LOOPBACK_HOST;
+@@ -430,7 +430,7 @@ export const DEFAULT_BB_SERVER_BIND_HOST: ServerBindHost = BB_LOOPBACK_HOST;
  export const DEFAULT_BB_EXTERNAL_URL = "";
  export const DEFAULT_BB_POSTHOG_API_KEY =
    "phc_tejoYoNLV6vG8QAd5eYXXvcsENFYnP4brpZDGqG7zvpy";
@@ -242,7 +244,7 @@ index 84faefb..fdae9ce 100644
  export const BB_PROD_SERVER_PORT = 38886;
  export const BB_PROD_HOST_DAEMON_PORT = 38887;
 diff --git a/packages/config/test/config.test.ts b/packages/config/test/config.test.ts
-index ba3e72d..1cabc09 100644
+index f12b574..d548f3b 100644
 --- a/packages/config/test/config.test.ts
 +++ b/packages/config/test/config.test.ts
 @@ -78,7 +78,7 @@ describe("common config", () => {
@@ -286,7 +288,7 @@ index 731327f..273fb47 100644
          homeDir: os.homedir(),
          repoRoot,
 diff --git a/packages/scripts/test/run-dev.test.ts b/packages/scripts/test/run-dev.test.ts
-index 448dee7..bfe07a5 100644
+index b6d1578..66c5dcd 100644
 --- a/packages/scripts/test/run-dev.test.ts
 +++ b/packages/scripts/test/run-dev.test.ts
 @@ -139,7 +139,7 @@ describe("run-dev", () => {
@@ -345,16 +347,63 @@ index 02ba6c3..9cfe702 100644
      expect(env.NODE_ENV).toBe("production");
    });
  
+diff --git a/plugins/provider-pi/src/bridge/session-paths.test.ts b/plugins/provider-pi/src/bridge/session-paths.test.ts
+index 1c8e6f0..cefb7bf 100644
+--- a/plugins/provider-pi/src/bridge/session-paths.test.ts
++++ b/plugins/provider-pi/src/bridge/session-paths.test.ts
+@@ -1,4 +1,5 @@
+ import {
++  existsSync,
+   mkdirSync,
+   mkdtempSync,
+   readFileSync,
+@@ -33,7 +34,7 @@ describe("resolvePiSessionFilePath", () => {
+   });
+ 
+   function writeLegacySession(threadId: string, content: string): void {
+-    const legacyDir = join(home, ".bb", "pi-bridge-sessions");
++    const legacyDir = join(home, ".1ma", "pi-bridge-sessions");
+     mkdirSync(legacyDir, { recursive: true });
+     writeFileSync(join(legacyDir, `${threadId}.jsonl`), content);
+   }
+@@ -60,12 +61,26 @@ describe("resolvePiSessionFilePath", () => {
+     expect(readFileSync(sessionFile, "utf8")).toBe("legacy\n");
+     expect(
+       readFileSync(
+-        join(home, ".bb", "pi-bridge-sessions", "pi_existing.jsonl"),
++        join(home, ".1ma", "pi-bridge-sessions", "pi_existing.jsonl"),
+         "utf8",
+       ),
+     ).toBe("legacy\n");
+   });
+ 
++  it("leaves a bb install's session file for the same thread alone", () => {
++    const bbDir = join(home, ".bb", "pi-bridge-sessions");
++    mkdirSync(bbDir, { recursive: true });
++    writeFileSync(join(bbDir, "pi_migrated.jsonl"), "bb\n");
++
++    const sessionFile = resolvePiSessionFilePath({
++      env: process.env,
++      bridgeDataDir,
++      threadId: "pi_migrated",
++    });
++
++    expect(existsSync(sessionFile)).toBe(false);
++  });
++
+   it("never replaces a session file the bridge data directory already has", () => {
+     writeLegacySession("pi_existing", "legacy\n");
+     mkdirSync(join(bridgeDataDir, "sessions"), { recursive: true });
 diff --git a/plugins/provider-pi/src/bridge/session-paths.ts b/plugins/provider-pi/src/bridge/session-paths.ts
-index 371c0f3..7c1b646 100644
+index 1814922..e22134c 100644
 --- a/plugins/provider-pi/src/bridge/session-paths.ts
 +++ b/plugins/provider-pi/src/bridge/session-paths.ts
-@@ -19,7 +19,7 @@ export function resolvePiBridgeSessionDir(
-     return resolve(configuredSessionDir);
+@@ -46,7 +46,7 @@ function adoptLegacySessionFile(
+   sessionFile: string,
+   fileName: string,
+ ): void {
+-  const legacyFile = join(homedir(), ".bb", "pi-bridge-sessions", fileName);
++  const legacyFile = join(homedir(), ".1ma", "pi-bridge-sessions", fileName);
+   if (existsSync(sessionFile) || !existsSync(legacyFile)) {
+     return;
    }
- 
--  return join(homedir(), ".bb", "pi-bridge-sessions");
-+  return join(homedir(), ".1ma", "pi-bridge-sessions");
- }
- 
- export function resolvePiSessionFilePath(

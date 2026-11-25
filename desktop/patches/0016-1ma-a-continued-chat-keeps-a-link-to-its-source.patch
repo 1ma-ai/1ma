@@ -130,10 +130,10 @@ index 2e79e6f..cbae380 100644
        "--source-seq-end <seq>",
        "Fork after the source turn containing this event sequence",
 diff --git a/apps/server/src/services/threads/thread-create.ts b/apps/server/src/services/threads/thread-create.ts
-index 6208083..43faa47 100644
+index 1255def..f1a0f50 100644
 --- a/apps/server/src/services/threads/thread-create.ts
 +++ b/apps/server/src/services/threads/thread-create.ts
-@@ -608,13 +608,6 @@ export async function createThreadFromRequest(
+@@ -642,13 +642,6 @@ export async function createThreadFromRequest(
          parentThreadId: hierarchyParentThreadId,
        })
      : null;
@@ -147,7 +147,7 @@ index 6208083..43faa47 100644
    if (originKind === null && requestInput.sourceSeqEnd !== undefined) {
      throw new ApiError(
        400,
-@@ -699,7 +692,9 @@ export async function createThreadFromRequest(
+@@ -733,7 +726,9 @@ export async function createThreadFromRequest(
      parentThread:
        forkSourceEnvironmentId !== undefined
          ? null
@@ -209,7 +209,7 @@ index 835da47..9592364 100644
      "archives all descendants once and preserves their parents (archived intermediary: %s)",
      async (archivedIntermediary) => {
 diff --git a/apps/server/test/threads/thread-create-seed-without-run.test.ts b/apps/server/test/threads/thread-create-seed-without-run.test.ts
-index 7b59c11..c76dcd9 100644
+index 03cb9de..191ea93 100644
 --- a/apps/server/test/threads/thread-create-seed-without-run.test.ts
 +++ b/apps/server/test/threads/thread-create-seed-without-run.test.ts
 @@ -541,6 +541,61 @@ describe("thread creation child-thread boundary validation", () => {
@@ -275,10 +275,10 @@ index 7b59c11..c76dcd9 100644
      await withChildBoundaryHarness(
        "started-on-behalf-no-origin",
 diff --git a/packages/client-core/src/prompt/thread-handoff-request.ts b/packages/client-core/src/prompt/thread-handoff-request.ts
-index 079b4f6..929b78f 100644
+index 02aed0f..27f6686 100644
 --- a/packages/client-core/src/prompt/thread-handoff-request.ts
 +++ b/packages/client-core/src/prompt/thread-handoff-request.ts
-@@ -160,6 +160,7 @@ export function buildThreadHandoffCreateRequest({
+@@ -161,6 +161,7 @@ export function buildThreadHandoffCreateRequest({
        ? { serviceTier: execution.serviceTier }
        : {}),
      ...(sendAt === undefined ? {} : { sendAt }),
@@ -287,10 +287,10 @@ index 079b4f6..929b78f 100644
    };
  }
 diff --git a/packages/client-core/test/thread-handoff-request.test.ts b/packages/client-core/test/thread-handoff-request.test.ts
-index f335354..cc5bd9b 100644
+index 5160c1e..a1bf477 100644
 --- a/packages/client-core/test/thread-handoff-request.test.ts
 +++ b/packages/client-core/test/thread-handoff-request.test.ts
-@@ -188,10 +188,22 @@ describe("buildThreadHandoffCreateRequest", () => {
+@@ -190,10 +190,22 @@ describe("buildThreadHandoffCreateRequest", () => {
        providerId: "claude-code",
        reasoningLevel: "high",
        serviceTier: "fast",
@@ -314,10 +314,10 @@ index f335354..cc5bd9b 100644
      const request = buildThreadHandoffCreateRequest({
        draft: { text: "Keep going", mentions: [], attachments: [] },
 diff --git a/packages/db/src/data/threads.ts b/packages/db/src/data/threads.ts
-index ad589bd..dc118e9 100644
+index 48dc05f..3dd54d9 100644
 --- a/packages/db/src/data/threads.ts
 +++ b/packages/db/src/data/threads.ts
-@@ -1550,6 +1550,7 @@ export function listNonDeletedHiddenSourceThreads(
+@@ -1573,6 +1573,7 @@ export function listNonDeletedHiddenSourceThreads(
      nonDeletedThreads(
        eq(threads.sourceThreadId, args.sourceThreadId),
        eq(threads.visibility, "hidden"),
@@ -326,10 +326,10 @@ index ad589bd..dc118e9 100644
    );
  }
 diff --git a/packages/plugin-sdk/src/app-contract.ts b/packages/plugin-sdk/src/app-contract.ts
-index 543f65f..895221f 100644
+index fdb1838..153abb3 100644
 --- a/packages/plugin-sdk/src/app-contract.ts
 +++ b/packages/plugin-sdk/src/app-contract.ts
-@@ -1399,7 +1399,10 @@ export interface PluginSidebarThread {
+@@ -1439,7 +1439,10 @@ export interface PluginSidebarThread {
     * "stuck" (failures, interruptions, and blockers), or "off".
     */
    parentNotifications: ThreadParentNotifications;
@@ -342,7 +342,7 @@ index 543f65f..895221f 100644
    sectionId: string | null;
    /** How this thread came to exist under its parent; null for root threads. */
 diff --git a/packages/templates/src/templates/bb-guide-threads.md b/packages/templates/src/templates/bb-guide-threads.md
-index d7b21ff..2faf0df 100644
+index 61d0ad6..a7fac78 100644
 --- a/packages/templates/src/templates/bb-guide-threads.md
 +++ b/packages/templates/src/templates/bb-guide-threads.md
 @@ -75,7 +75,7 @@ Spawning:

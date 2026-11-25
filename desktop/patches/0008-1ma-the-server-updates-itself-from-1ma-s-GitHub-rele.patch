@@ -15,8 +15,8 @@ can wrap the npm install, for hosts that run installs under a resource limit.
  .../bb-app/src/app-update/npm-revision.ts     | 106 +++++++++++++++--
  .../app-update-launcher-controller.test.ts    |  21 +++-
  .../test/app-update-npm-revision.test.ts      | 107 +++++++++++++++++-
- packages/config/src/app-update.ts             |  29 +++++
- 6 files changed, 276 insertions(+), 28 deletions(-)
+ packages/config/src/app-update.ts             |  27 +++++
+ 6 files changed, 274 insertions(+), 28 deletions(-)
 
 diff --git a/apps/server/src/services/system/app-version.ts b/apps/server/src/services/system/app-version.ts
 index 01f7dec..cada9ba 100644
@@ -544,15 +544,13 @@ index 2857f57..7248a07 100644
      await expect(
        installNpmRevision({
 diff --git a/packages/config/src/app-update.ts b/packages/config/src/app-update.ts
-index 3ab0c26..c52f934 100644
+index 3ab0c26..545db7c 100644
 --- a/packages/config/src/app-update.ts
 +++ b/packages/config/src/app-update.ts
-@@ -169,6 +169,35 @@ export function isNightlyAppVersion(version: string): boolean {
+@@ -169,6 +169,33 @@ export function isNightlyAppVersion(version: string): boolean {
    return /-nightly\.\d+\.\d+$/u.test(version);
  }
  
-+// 1ma publishes its server package and version feeds as GitHub release
-+// assets; on npm, bb-app is bb's own package.
 +export const SERVER_RELEASES_DOWNLOAD_URL =
 +  "https://github.com/1ma-ai/1ma/releases/download";
 +
