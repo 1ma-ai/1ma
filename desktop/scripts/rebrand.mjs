@@ -681,17 +681,23 @@ export function createIndex(rules) {
 // for an overlap of three words or more, sources treated like the test's own
 // package (renamed or left alone); then a source the test repeats in full, over
 // one that merely contains the same characters (a label "bb update" beside a
-// command line "bb updates app …"); a remaining tie keeps bb. A keep rule that
-// decides a bb of a test counts as used. A bb the rules
+// command line "bb updates app …"); a remaining tie keeps bb. A keep rule
+// counts as used when the result without it would differ. A bb the rules
 // would keep in the test itself (a command, code, an identifier, a bb cloud
 // service) is never changed (veto). The relaxed mode, used only to flag
-// suspicious negative assertions, accepts two-word partial overlaps and lets a
-// renamed source win a tie.
-export function propagate(
-  text,
-  index,
-  { regex = false, scope = null, veto = null, keep = [], rebranded = true, relaxed = false } = {},
-) {
+// suspicious negative assertions, accepts two-word partial overlaps, puts a
+// renamed source the test repeats in full before the test's own kind, and lets
+// a renamed source win a tie.
+export function propagate(text, index, options = {}) {
+  const {
+    regex = false,
+    scope = null,
+    veto = null,
+    keep = [],
+    rebranded = true,
+    relaxed = false,
+    without = null,
+  } = options;
   const haystack = lowered(text);
   const marks = occurrences(haystack);
   const evidence = new Map();
@@ -699,6 +705,7 @@ export function propagate(
   const rank = (found) => [
     found.explicit ? 1 : 0,
     found.length,
+    relaxed && found.repeated && found.kind === "product" && found.rebranded ? 1 : 0,
     found.explicit || (found.words >= 3 && found.rebranded === rebranded) ? 1 : 0,
     found.repeated ? 1 : 0,
     (found.kind === "kept") !== relaxed ? 1 : 0,
@@ -723,7 +730,8 @@ export function propagate(
   const visible = (entry) => entry.scope === null || scope === null || scope.has(entry.scope);
   const candidates = new Set();
   for (const key of anchorKeys(haystack))
-    for (const entry of index.byKey.get(key) ?? []) if (visible(entry)) candidates.add(entry);
+    for (const entry of index.byKey.get(key) ?? [])
+      if (visible(entry) && (without === null || entry.rule !== without)) candidates.add(entry);
   for (const entry of index.replaces) {
     if (!visible(entry)) continue;
     for (const form of entry.forms) {
@@ -806,8 +814,12 @@ export function propagate(
     if (veto?.(text, offset)) continue;
     decisions.push({ index: offset, kind: "product" });
   }
-  for (const found of evidence.values()) if (found.rule) index.used?.add(found.rule);
-  return { result: compose(text, decisions, index.replacement), decisions };
+  const result = compose(text, decisions, index.replacement);
+  if (without === null)
+    for (const rule of new Set([...evidence.values()].map((found) => found.rule)))
+      if (rule && propagate(text, index, { ...options, without: rule }).result !== result)
+        index.used?.add(rule);
+  return { result, decisions };
 }
 
 // A template part aligned on a bb of the test string, with the template parts
