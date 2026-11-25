@@ -13,8 +13,8 @@ import { isDeepStrictEqual } from "node:util";
 //   address;
 // - what the REST answer for the branch leaves out, read through GraphQL and
 //   only read: `required_deployment_environments`, the deployments the classic
-//   rules that match the branch require before a merge;
-//   `bypass_force_push_allowances`, who those rules let force push although
+//   rule GitHub applies to the branch requires before a merge;
+//   `bypass_force_push_allowances`, who that rule lets force push although
 //   force pushes are off; `merge_queue`, whether merges into the branch go
 //   through a merge queue;
 // - `rules`: what the repository's rulesets add for the branch. They are only
@@ -31,28 +31,55 @@ export class GitHubError extends Error {
 }
 
 const command = (method, address, body) => {
-  const args = ["api", "-X", method, address];
+  const args = ["api", "--include", "-X", method, address];
   return body === undefined ? args : [...args, "--input", "-"];
 };
 
-// gh names the HTTP status of an answer it got as "(HTTP 404)"; status 0 means
-// no answer came.
-function refusal(method, address, done) {
-  let message = (done.stderr ?? "").trim();
+// With --include gh prints the status line of the answer, its headers and an
+// empty line before the body, for errors too. Status 0: no answer arrived.
+function answerOf(done) {
+  const text = done.stdout ?? "";
+  const status = /^HTTP\/\S+ (?<status>\d{3})\b/u.exec(text)?.groups.status;
+  if (status === undefined) return { status: 0, body: "" };
+  const end = /\r?\n\r?\n/u.exec(text);
+  return {
+    status: Number(status),
+    body: end === null ? "" : text.slice(end.index + end[0].length),
+  };
+}
+
+const succeeded = (status) => status >= 200 && status < 300;
+
+function refusal(method, address, done, { status, body }) {
+  if (status === 0)
+    return new GitHubError(
+      `${method} ${address}: no answer (${(done.stderr ?? "").trim() || "gh printed nothing"})`,
+      0,
+    );
+  let message;
   try {
-    message = JSON.parse(done.stdout).message ?? message;
+    ({ message } = JSON.parse(body));
   } catch {
-    // gh printed no response body: its own message stands.
+    // The body is not GitHub's JSON: the status says it all.
   }
-  const status = Number(/\(HTTP (?<status>\d+)\)/u.exec(done.stderr ?? "")?.groups.status ?? 0);
-  return new GitHubError(`${method} ${address}: ${message}`, status);
+  const said = typeof message === "string" ? `${message} ` : "";
+  return new GitHubError(`${method} ${address}: ${said}(HTTP ${status})`, status);
 }
 
 function client(gh) {
   return (method, address, body) => {
     const done = gh(command(method, address, body), JSON.stringify(body));
-    if (done.status === 0) return done.stdout.trim() === "" ? null : JSON.parse(done.stdout);
-    throw refusal(method, address, done);
+    const answer = answerOf(done);
+    if (!succeeded(answer.status)) throw refusal(method, address, done, answer);
+    if (answer.body.trim() === "") return null;
+    try {
+      return JSON.parse(answer.body);
+    } catch {
+      throw new GitHubError(
+        `${method} ${address}: the answer could not be read (HTTP ${answer.status})`,
+        answer.status,
+      );
+    }
   };
 }
 
@@ -67,26 +94,26 @@ function attempt(gh, { method, address, body }) {
   } catch (error) {
     return { outcome: "unknown", message: error.message };
   }
-  if (done.status === 0) return { outcome: "written" };
-  const error = refusal(method, address, done);
-  const refused = error.status >= 400 && error.status < 500;
-  return { outcome: refused ? "refused" : "unknown", message: error.message };
+  const answer = answerOf(done);
+  if (succeeded(answer.status)) return { outcome: "written" };
+  const refused = answer.status >= 400 && answer.status < 500;
+  return {
+    outcome: refused ? "refused" : "unknown",
+    message: refusal(method, address, done, answer).message,
+  };
 }
 
-const OUTSIDE_REST = `query($owner: String!, $name: String!, $branch: String!) {
+const OUTSIDE_REST = `query($owner: String!, $name: String!, $branch: String!, $ref: String!) {
   repository(owner: $owner, name: $name) {
     mergeQueue(branch: $branch) { id }
-    branchProtectionRules(first: 100) {
-      pageInfo { hasNextPage }
-      nodes {
-        pattern
+    ref(qualifiedName: $ref) {
+      branchProtectionRule {
         requiresDeployments
         requiredDeploymentEnvironments
         bypassForcePushAllowances(first: 100) {
           pageInfo { hasNextPage }
           nodes { actor { kind: __typename ... on App { slug } ... on Team { combinedSlug } ... on User { login } } }
         }
-        matchingRefs(query: $branch, first: 100) { pageInfo { hasNextPage } nodes { name } }
       }
     }
   }
@@ -98,41 +125,35 @@ const actorName = (actor) =>
   `${actor?.kind ?? "Actor"}:${actor?.login ?? actor?.combinedSlug ?? actor?.slug ?? "unknown"}`;
 
 // What the REST answer for the branch leaves out, in the shape of the file.
-// `matchingRefs` is GitHub's own matching of a rule's pattern; its query only
-// narrows the refs by name, so the branch is looked for among them.
+// GitHub applies one classic rule to a branch, the one its ref names.
 function outsideRest(api, { repository, branch }) {
   const [owner, name] = repository.split("/");
   const answer = api("POST", "graphql", {
     query: OUTSIDE_REST,
-    variables: { owner, name, branch },
+    variables: { owner, name, branch, ref: `refs/heads/${branch}` },
   });
   const unreadable = () =>
-    new Error(`GraphQL: the branch protection rules of ${repository} could not be read`);
+    new Error(`GraphQL: the branch protection rule of ${branch} could not be read`);
   const found = answer?.data?.repository;
-  const rules = found?.branchProtectionRules;
-  if (
-    answer?.errors !== undefined ||
-    found?.mergeQueue === undefined ||
-    !Array.isArray(rules?.nodes) ||
-    rules.pageInfo?.hasNextPage
-  )
+  if (answer?.errors !== undefined || found?.mergeQueue === undefined || found.ref === undefined)
     throw unreadable();
-  const environments = new Set();
-  const actors = new Set();
-  for (const rule of rules.nodes) {
-    const refs = rule?.matchingRefs;
-    if (!Array.isArray(refs?.nodes) || refs.pageInfo?.hasNextPage) throw unreadable();
-    if (!refs.nodes.some((ref) => ref?.name === branch)) continue;
+  if (found.ref === null) throw new Error(`GraphQL: ${repository} has no branch ${branch}`);
+  const rule = found.ref.branchProtectionRule;
+  if (rule === undefined) throw unreadable();
+  const environments = [];
+  const actors = [];
+  if (rule !== null) {
     const allowances = rule.bypassForcePushAllowances;
     if (!Array.isArray(allowances?.nodes) || allowances.pageInfo?.hasNextPage) throw unreadable();
-    for (const allowance of allowances.nodes) actors.add(actorName(allowance?.actor));
-    if (rule.requiresDeployments !== true) continue;
-    if (!Array.isArray(rule.requiredDeploymentEnvironments)) throw unreadable();
-    for (const environment of rule.requiredDeploymentEnvironments) environments.add(environment);
+    actors.push(...allowances.nodes.map((allowance) => actorName(allowance?.actor)));
+    if (rule.requiresDeployments === true) {
+      if (!Array.isArray(rule.requiredDeploymentEnvironments)) throw unreadable();
+      environments.push(...rule.requiredDeploymentEnvironments);
+    }
   }
   return {
-    required_deployment_environments: [...environments].toSorted(),
-    bypass_force_push_allowances: [...actors].toSorted(),
+    required_deployment_environments: environments.toSorted(),
+    bypass_force_push_allowances: actors.toSorted(),
     merge_queue: found.mergeQueue !== null,
   };
 }

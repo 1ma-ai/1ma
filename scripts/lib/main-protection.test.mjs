@@ -7,6 +7,29 @@ const text = readFileSync(new URL("../../.github/main-protection.json", import.m
 const wanted = JSON.parse(text);
 const REPOSITORY = "repos/1ma-ai/1ma";
 const PROTECTION = `${REPOSITORY}/branches/main/protection`;
+const ACTIONS = `${REPOSITORY}/actions/permissions`;
+
+// An answer as gh --include prints it: the status line, the headers, an empty
+// line, the body.
+const HEADER = "X-Github-Request-Id: 0A1B:2C3D:4E5F";
+const included = (status, body = "") =>
+  `HTTP/2.0 ${status} ${status < 300 ? "OK" : "Error"}\n` +
+  `Content-Type: application/json; charset=utf-8\r\n${HEADER}\r\n\r\n${body}`;
+const bodyOf = (stdout) => stdout.slice(stdout.indexOf("\r\n\r\n") + 4);
+const empty = () => ({ status: 0, stdout: included(204), stderr: "" });
+
+// The classic rule of the branch as GraphQL gives it.
+function ruleOf(classic) {
+  if (classic === null) return null;
+  const { bypass, ...rest } = classic;
+  return {
+    ...rest,
+    bypassForcePushAllowances: {
+      pageInfo: { hasNextPage: false },
+      nodes: bypass.map((actor) => ({ actor })),
+    },
+  };
+}
 
 // GitHub as the script sees it through gh: what it answers and what was asked.
 function github(change = () => {}) {
@@ -32,15 +55,8 @@ function github(change = () => {}) {
       allow_fork_syncing: { enabled: false },
     },
     rules: [],
-    classic: [
-      {
-        pattern: "main",
-        requiresDeployments: false,
-        requiredDeploymentEnvironments: [],
-        bypass: [],
-        refs: ["main", "maintenance"],
-      },
-    ],
+    branch: true,
+    classic: { requiresDeployments: false, requiredDeploymentEnvironments: [], bypass: [] },
     queue: null,
     file: text,
     fails: {},
@@ -51,12 +67,18 @@ function github(change = () => {}) {
   const asked = [];
   const refuse = (message, status) => ({
     status: 1,
-    stdout: JSON.stringify({ message, status: String(status) }),
+    stdout: included(status, JSON.stringify({ message, status: String(status) })),
     stderr: `gh: ${message} (HTTP ${status})\n`,
   });
-  const answer = (value) => ({ status: 0, stdout: JSON.stringify(value), stderr: "" });
+  const answer = (value) => ({
+    status: 0,
+    stdout: included(200, JSON.stringify(value)),
+    stderr: "",
+  });
   const gh = (args, input) => {
-    const [, , method, address] = args;
+    if (!args.includes("--include")) throw new Error(`gh ${args.join(" ")}: no status line asked`);
+    const at = args.indexOf("-X");
+    const [method, address] = args.slice(at + 1, at + 3);
     const body = args.includes("--input") ? JSON.parse(input) : undefined;
     asked.push({ method, address, body });
     const key = `${method} ${address}`;
@@ -82,31 +104,18 @@ function github(change = () => {}) {
           : answer({ content: Buffer.from(state.file).toString("base64"), encoding: "base64" });
     }
     if (method === "POST" && address === "graphql") {
-      // GitHub narrows the refs by the query as a part of their name.
-      const { branch } = body.variables;
-      const nodes = state.classic.map(({ refs, bypass = [], ...rule }) => ({
-        ...rule,
-        bypassForcePushAllowances: {
-          pageInfo: { hasNextPage: false },
-          nodes: bypass.map((actor) => ({ actor })),
-        },
-        matchingRefs: {
-          pageInfo: { hasNextPage: false },
-          nodes: refs.filter((ref) => ref.includes(branch)).map((name) => ({ name })),
-        },
-      }));
       return answer({
         data: {
           repository: {
             mergeQueue: state.queue,
-            branchProtectionRules: { pageInfo: { hasNextPage: false }, nodes },
+            ref: state.branch ? { branchProtectionRule: ruleOf(state.classic) } : null,
           },
         },
       });
     }
-    if (method === "PUT" && address === `${REPOSITORY}/actions/permissions`) {
+    if (method === "PUT" && address === ACTIONS) {
       state.actions = { ...state.actions, ...body };
-      return { status: 0, stdout: "", stderr: "" };
+      return empty();
     }
     if (method === "PUT" && address === PROTECTION) {
       const { required_status_checks: checks, ...rest } = body;
@@ -127,7 +136,7 @@ function github(change = () => {}) {
     }
     if (address === `${PROTECTION}/required_signatures` && method !== "GET") {
       state.protection.required_signatures = on(method === "POST");
-      return method === "POST" ? answer(on(true)) : { status: 0, stdout: "", stderr: "" };
+      return method === "POST" ? answer(on(true)) : empty();
     }
     throw new Error(`the test's GitHub has no answer for ${method} ${address}`);
   };
@@ -140,9 +149,9 @@ function github(change = () => {}) {
 
 // GitHub's answer to the GraphQL question with one part of it changed.
 const partly = (change) => (_, read) => {
-  const answer = JSON.parse(read().stdout);
+  const answer = JSON.parse(bodyOf(read().stdout));
   change(answer.data.repository);
-  return { status: 0, stdout: JSON.stringify(answer), stderr: "" };
+  return { status: 0, stdout: included(200, JSON.stringify(answer)), stderr: "" };
 };
 
 describe("comparing GitHub with the file", () => {
@@ -225,6 +234,16 @@ describe("comparing GitHub with the file", () => {
       state.fails[`GET ${PROTECTION}`] = ["Branch not found", 404];
     });
     assert.throws(() => missing.call(), /Branch not found/u);
+    for (const [given, error] of [
+      [{ status: 0, stdout: included(200, '{"enabled":'), stderr: "" }, /could not be read/u],
+      [{ status: 1, stdout: "", stderr: "gh: connection refused\n" }, /no answer/u],
+    ]) {
+      const hub = github((state) => {
+        state.answers[`GET ${ACTIONS}`] = () => given;
+      });
+      assert.throws(() => hub.call(), error);
+      assert.deepEqual(hub.output, []);
+    }
   });
 
   test("asks only about the repository the file names", () => {
@@ -233,14 +252,19 @@ describe("comparing GitHub with the file", () => {
     assert.ok(hub.asked.length >= 4);
     for (const { address, body } of hub.asked)
       if (address === "graphql")
-        assert.deepEqual(body.variables, { owner: "1ma-ai", name: "1ma", branch: "main" });
+        assert.deepEqual(body.variables, {
+          owner: "1ma-ai",
+          name: "1ma",
+          branch: "main",
+          ref: "refs/heads/main",
+        });
       else assert.ok(address.startsWith(`${REPOSITORY}/`), address);
   });
 
   test("names a deployment a classic rule for the branch requires, which the REST answer leaves out", () => {
     const hub = github((state) => {
-      state.classic[0].requiresDeployments = true;
-      state.classic[0].requiredDeploymentEnvironments = ["production"];
+      state.classic.requiresDeployments = true;
+      state.classic.requiredDeploymentEnvironments = ["production"];
     });
     assert.equal(hub.call(), 1);
     assert.deepEqual(hub.output.slice(1), [
@@ -248,33 +272,21 @@ describe("comparing GitHub with the file", () => {
     ]);
   });
 
-  test("takes only the classic rules whose pattern GitHub matches to the branch", () => {
-    const hub = github((state) => {
-      state.classic.push(
-        {
-          pattern: "maint*",
-          requiresDeployments: true,
-          requiredDeploymentEnvironments: ["staging"],
-          bypass: [{ kind: "User", login: "somebody" }],
-          refs: ["maintenance"],
-        },
-        {
-          pattern: "*",
-          requiresDeployments: true,
-          requiredDeploymentEnvironments: ["production"],
-          refs: ["main", "maintenance", "release"],
-        },
-      );
+  test("agrees when no classic rule applies to the branch, and refuses a branch GitHub does not have", () => {
+    const bare = github((state) => {
+      state.classic = null;
     });
-    assert.equal(hub.call(), 1);
-    assert.deepEqual(hub.output.slice(1), [
-      '- required_deployment_environments: GitHub has ["production"], the file says []',
-    ]);
+    assert.equal(bare.call(), 0);
+    const gone = github((state) => {
+      state.branch = false;
+    });
+    assert.throws(() => gone.call(), /1ma-ai\/1ma has no branch main/u);
+    assert.deepEqual(gone.output, []);
   });
 
   test("names who may force push past the protection, which the REST answer leaves out", () => {
     const hub = github((state) => {
-      state.classic[0].bypass = [
+      state.classic.bypass = [
         { kind: "User", login: "somebody" },
         { kind: "Team", combinedSlug: "1ma-ai/release" },
         { kind: "App", slug: "a-bot" },
@@ -302,26 +314,21 @@ describe("comparing GitHub with the file", () => {
         delete repository.mergeQueue;
       }),
       partly((repository) => {
-        repository.branchProtectionRules.nodes[0].bypassForcePushAllowances.pageInfo.hasNextPage = true;
+        delete repository.ref;
       }),
       partly((repository) => {
-        delete repository.branchProtectionRules.nodes[0].bypassForcePushAllowances;
+        delete repository.ref.branchProtectionRule;
       }),
-      () => ({ status: 0, stdout: JSON.stringify({ data: { repository: null } }), stderr: "" }),
-      () => ({
-        status: 0,
-        stdout: JSON.stringify({
-          data: {
-            repository: {
-              branchProtectionRules: { pageInfo: { hasNextPage: true }, nodes: [] },
-            },
-          },
-        }),
-        stderr: "",
+      partly((repository) => {
+        repository.ref.branchProtectionRule.bypassForcePushAllowances.pageInfo.hasNextPage = true;
       }),
+      partly((repository) => {
+        delete repository.ref.branchProtectionRule.bypassForcePushAllowances;
+      }),
+      () => ({ status: 0, stdout: included(200, '{"data":{"repository":null}}'), stderr: "" }),
       () => ({
         status: 1,
-        stdout: JSON.stringify({ errors: [{ message: "Something went wrong" }] }),
+        stdout: included(200, JSON.stringify({ errors: [{ message: "Something went wrong" }] })),
         stderr: "gh: Something went wrong\n",
       }),
     ];
@@ -329,7 +336,7 @@ describe("comparing GitHub with the file", () => {
       const hub = github((state) => {
         state.answers["POST graphql"] = given;
       });
-      assert.throws(() => hub.call(), /branch protection rules|Something went wrong/u);
+      assert.throws(() => hub.call(), /branch protection rule of main could not be read/u);
       assert.deepEqual(hub.output, []);
     }
   });
@@ -448,7 +455,10 @@ describe("applying the file", () => {
     const hub = github((state) => {
       state.protection = null;
       state.actions.sha_pinning_required = false;
-      state.answers[`PUT ${PROTECTION}`] = (_, write) => ({ ...write(), stdout: "{" });
+      state.answers[`PUT ${PROTECTION}`] = (_, write) => ({
+        ...write(),
+        stdout: included(200, "{"),
+      });
     });
     assert.equal(hub.call(true), 0);
     const output = hub.output.join("\n");
@@ -509,7 +519,7 @@ describe("applying the file", () => {
         write();
         return {
           status: 1,
-          stdout: JSON.stringify({ message: "Server Error" }),
+          stdout: included(502, JSON.stringify({ message: "Server Error" })),
           stderr: "gh: Server Error (HTTP 502)\n",
         };
       };
@@ -524,14 +534,76 @@ describe("applying the file", () => {
     assert.doesNotMatch(after, /actions\./u);
   });
 
+  test("takes the status of a write from the answer, not from a code its message holds", () => {
+    for (const address of [ACTIONS, PROTECTION]) {
+      const hub = github((state) => {
+        if (address === ACTIONS) state.actions.sha_pinning_required = false;
+        else state.protection = null;
+        state.answers[`PUT ${address}`] = (_, write) => {
+          write();
+          return {
+            status: 1,
+            stdout: included(502, JSON.stringify({ message: "upstream failed (HTTP 422)" })),
+            stderr: "gh: upstream failed (HTTP 422) (HTTP 502)\n",
+          };
+        };
+      });
+      assert.equal(hub.call(true), 1, address);
+      const output = hub.output.join("\n");
+      assert.doesNotMatch(output, /Nothing was written|failed:/u, address);
+      assert.match(
+        output,
+        /no answer says whether it succeeded \(PUT .*: upstream failed \(HTTP 422\) \(HTTP 502\)\)/u,
+        address,
+      );
+      assert.match(hub.output.at(-1), /is now protected as the file says/u, address);
+      assert.equal(hub.asked.at(-1).address, "graphql", address);
+      assert.doesNotMatch(output, new RegExp(HEADER, "u"), address);
+    }
+  });
+
+  test("refuses a write by its status whether the body is GitHub's JSON or text", () => {
+    for (const [stdout, stderr] of [
+      [
+        included(429, JSON.stringify({ message: "API rate limit exceeded" })),
+        "gh: API rate limit exceeded (HTTP 429)\n",
+      ],
+      [included(429, "Too many requests\n"), "gh: HTTP 429\n"],
+    ]) {
+      const hub = github((state) => {
+        state.actions.sha_pinning_required = false;
+        state.answers[`PUT ${ACTIONS}`] = () => ({ status: 1, stdout, stderr });
+      });
+      assert.equal(hub.call(true), 1);
+      const output = hub.output.join("\n");
+      assert.match(output, /Writing actions failed: PUT .*\(HTTP 429\)\nNothing was written\./u);
+      assert.doesNotMatch(output, new RegExp(HEADER, "u"));
+    }
+  });
+
+  test("takes a write whose gh timed out for one that may be done", () => {
+    const hub = github((state) => {
+      state.actions.sha_pinning_required = false;
+      state.answers[`PUT ${ACTIONS}`] = (_, write) => {
+        write();
+        throw Object.assign(new Error("spawnSync gh ETIMEDOUT"), { code: "ETIMEDOUT" });
+      };
+    });
+    assert.equal(hub.call(true), 1);
+    const output = hub.output.join("\n");
+    assert.doesNotMatch(output, /Nothing was written/u);
+    assert.match(output, /Writing actions: .*ETIMEDOUT.*unknown whether it was written/u);
+    assert.match(hub.output.at(-1), /is now protected as the file says/u);
+  });
+
   test("cannot change what only the classic rules hold, and says so", () => {
     const outside = {
       required_deployment_environments: (state) => {
-        state.classic[0].requiresDeployments = true;
-        state.classic[0].requiredDeploymentEnvironments = ["production"];
+        state.classic.requiresDeployments = true;
+        state.classic.requiredDeploymentEnvironments = ["production"];
       },
       bypass_force_push_allowances: (state) => {
-        state.classic[0].bypass = [{ kind: "User", login: "somebody" }];
+        state.classic.bypass = [{ kind: "User", login: "somebody" }];
       },
       merge_queue: (state) => {
         state.queue = { id: "MQ_1" };

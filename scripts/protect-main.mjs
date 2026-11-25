@@ -13,8 +13,9 @@ if (args.some((arg) => arg !== "--apply")) {
   console.error("usage: node scripts/protect-main.mjs [--apply]");
   process.exit(2);
 }
+// A gh that does not finish within a minute gave no answer.
 const gh = (ghArgs, input) => {
-  const done = spawnSync("gh", ghArgs, { encoding: "utf8", input });
+  const done = spawnSync("gh", ghArgs, { encoding: "utf8", input, timeout: 60_000 });
   if (done.error) throw done.error;
   return done;
 };

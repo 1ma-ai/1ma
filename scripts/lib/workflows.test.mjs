@@ -8,19 +8,25 @@ import { pathspecs } from "./changed-paths.mjs";
 
 const directory = new URL("../../.github/workflows/", import.meta.url);
 const root = fileURLToPath(new URL("../../", import.meta.url));
-const workflows = readdirSync(directory)
-  .filter((name) => /\.ya?ml$/u.test(name))
-  .map((file) => ({ name: file, ...parse(readFileSync(new URL(file, directory), "utf8")), file }));
-const protection = JSON.parse(
-  readFileSync(new URL("../../.github/main-protection.json", import.meta.url), "utf8"),
-);
-const required = protection.protection.required_status_checks.checks;
+const repository = {
+  workflows: readdirSync(directory)
+    .filter((name) => /\.ya?ml$/u.test(name))
+    .map((file) => ({
+      name: file,
+      ...parse(readFileSync(new URL(file, directory), "utf8")),
+      file,
+    })),
+  required: JSON.parse(
+    readFileSync(new URL("../../.github/main-protection.json", import.meta.url), "utf8"),
+  ).protection.required_status_checks.checks,
+};
 
 const jobsOf = (workflow) => Object.entries(workflow.jobs);
 const needsOf = (job) => [job.needs ?? []].flat();
-const onPullRequests = (workflow) => Object.hasOwn(workflow.on, "pull_request");
+const eventsOf = ({ on }) =>
+  typeof on === "string" ? [on] : Array.isArray(on) ? on : Object.keys(on);
+const onPullRequests = (workflow) => eventsOf(workflow).includes("pull_request");
 const isGated = (workflow) => workflow.jobs.changes !== undefined;
-const gated = workflows.filter(isGated);
 const asking = (workflow) => workflow.jobs.changes.steps.find((step) => step.env?.PATHS);
 const asked = (workflow) =>
   asking(workflow)
@@ -32,10 +38,18 @@ const VERDICT = "scripts/lib/workflow-result.mjs";
 const scriptOf = (step) =>
   /^node (?<script>scripts\/lib\/[\w-]+\.mjs)$/u.exec(step.run ?? "")?.groups.script;
 const isCheckout = (step) => step.uses?.startsWith("actions/checkout@") ?? false;
-const tracked = (...specs) =>
-  execFileSync("git", ["-C", root, "ls-files", "--", ...specs], { encoding: "utf8" })
-    .split("\n")
-    .filter((line) => line !== "");
+const listings = new Map();
+const tracked = (...specs) => {
+  const key = JSON.stringify(specs);
+  if (!listings.has(key))
+    listings.set(
+      key,
+      execFileSync("git", ["-C", root, "ls-files", "--", ...specs], { encoding: "utf8" })
+        .split("\n")
+        .filter((line) => line !== ""),
+    );
+  return listings.get(key);
+};
 
 // A result job is what gives a gated workflow its verdict. While a required
 // check is renamed a workflow has two.
@@ -43,6 +57,11 @@ const isResult = (job) => (job.steps ?? []).some((step) => scriptOf(step) === VE
 const resultsOf = (workflow) => jobsOf(workflow).filter(([, job]) => isResult(job));
 const workOf = (workflow) =>
   Object.keys(workflow.jobs).filter((id) => id !== "changes" && !isResult(workflow.jobs[id]));
+const verdictOf = (job) => job.steps.find((step) => scriptOf(step) === VERDICT);
+const requiredOf = (workflow, required) =>
+  jobsOf(workflow).filter(([id, job]) =>
+    required.some((check) => check.context === (job.name ?? id)),
+  );
 
 // Jobs of gated workflows that do not run for pull requests, and why.
 const KEPT_OFF_PULL_REQUESTS = {
@@ -71,6 +90,88 @@ const CONDITIONAL_STEPS = {
   ],
 };
 
+// The steps of gated workflows that are the work their required check stands
+// for: what each has to run, and why a green result means little without it.
+// Steps the later ones cannot do without (checkout, installs, preparing the
+// tree) are not listed: without them the job fails anyway.
+const WORK_STEPS = {
+  "bots-e2e.yml e2e Run the end-to-end tests": [
+    ["e2e/bots/bots.test.mjs"],
+    "the end-to-end tests are what the check reports",
+  ],
+  "desktop.yml patches Test the rebrand rules": [
+    ["--filter 1ma-desktop-tooling run test"],
+    "the tests of the tooling that applies the patches and the rebrand",
+  ],
+  "desktop.yml patches Run bb's own source checks on the patched tree": [
+    [
+      "scripts/check-source-nul.mjs",
+      "scripts/check-provider-literal-ratchet.mjs",
+      "scripts/check-test-process-identity.mjs",
+      "scripts/check-branch-ref-owner.mjs",
+    ],
+    "bb's checks of its own sources, on the patched tree",
+  ],
+  "desktop.yml patches Check the embedded 1ma plugins for literal NUL bytes, as bb checks its own sources":
+    [["desktop/scripts/check-plugin-nul.mjs"], "bb's own NUL check does not read the 1ma plugins"],
+  "desktop.yml linux-server Typecheck the server and the plugins the 1ma patches touch, as bb's CI does":
+    [["turbo run typecheck"], "the patched server is typechecked before it is packed"],
+  "desktop.yml linux-server Build the server package and smoke-test its tarball, as bb does before publishing":
+    [["smoke:tarball"], "the server package starts from its tarball"],
+  "desktop.yml linux-server Start the packed server from an empty folder and check the built-in 1ma plugins over HTTP":
+    [["desktop/scripts/smoke-builtin-plugins.mjs"], "the packed server serves the 1ma plugins"],
+  "desktop.yml linux-server A change to an embedded 1ma plugin alone reaches the server package without --force":
+    [['grep -q "$marker"'], "a change of a plugin is not lost to turbo's cache"],
+  "desktop.yml macos Typecheck desktop, launcher and config": [
+    ["turbo run typecheck"],
+    "the patched app is typechecked before it is packaged",
+  ],
+  "desktop.yml macos Test desktop, launcher and config": [
+    ["turbo run test"],
+    "bb's tests of the app, on macOS",
+  ],
+  "desktop.yml macos Verify the ad-hoc signature of the app in the DMG and the ZIP": [
+    ["codesign --verify"],
+    "an unsigned app does not open on Apple Silicon",
+  ],
+  "desktop.yml macos Smoke test the packaged app": [["smoke:packaged"], "the packaged app starts"],
+  "desktop-tests.yml plan Plan the shards with bb's own CI planner at the pinned commit": [
+    ["scripts/plan-ci.mjs --full", "desktop/scripts/shard-matrix.mjs"],
+    "every shard of bb's suite, not the ones a diff selects",
+  ],
+  "desktop-tests.yml static Put the 1ma plugins in as built-in plugins": [
+    ["desktop/scripts/embed-plugins.mjs"],
+    "bb's checks pass without the plugins 1ma embeds",
+  ],
+  "desktop-tests.yml static Lint and typecheck, as bb's CI does": [
+    ["turbo run lint lint:type-aware typecheck"],
+    "bb's static checks are what the job reports",
+  ],
+  "desktop-tests.yml tests Put the 1ma plugins in as built-in plugins": [
+    ["desktop/scripts/embed-plugins.mjs"],
+    "bb's tests pass without the plugins 1ma embeds",
+  ],
+  "desktop-tests.yml tests Test": [
+    ["turbo run test", "desktop/scripts/known-test-failures.mjs"],
+    "bb's tests; after set +e the script gives the step its status",
+  ],
+  "desktop-tests.yml tests Test native browser address interactions": [
+    ["smoke:browser-address"],
+    "the desktop shard's smoke test, which turbo run test does not run",
+  ],
+};
+
+// The events a workflow with a required check starts on. The check has to
+// report for the commit of a pull request: pull_request_target runs the code
+// of the base, merge_group comes only from a merge queue, which main does not
+// use, and workflow_call and workflow_run start the workflow from another one.
+const TRIGGERS = {
+  "ci.yml": ["push", "pull_request", "schedule", "workflow_dispatch"],
+  "bots-e2e.yml": ["pull_request", "workflow_dispatch"],
+  "desktop.yml": ["push", "pull_request", "workflow_dispatch"],
+  "desktop-tests.yml": ["push", "pull_request", "workflow_dispatch"],
+};
+
 // pnpm reads these at the root of the checkout when it installs there, and
 // corepack takes pnpm's version from package.json.
 const INSTALL_INPUTS = [
@@ -83,7 +184,7 @@ const INSTALL_INPUTS = [
 ];
 const installsAtRoot = (job, step) =>
   /\bpnpm install\b/u.test(step.run ?? "") &&
-  [undefined, "${{ github.workspace }}"].includes(
+  [undefined, ".", "./", "${{ github.workspace }}"].includes(
     step["working-directory"] ?? job.defaults?.run?.["working-directory"],
   );
 
@@ -118,7 +219,7 @@ function resultJobsJudgeEveryJob(workflow) {
     const where = `${workflow.name} ${id}`;
     assert.equal(job.if, "always()", where);
     assert.deepEqual(needsOf(job).toSorted(), ["changes", ...work].toSorted(), where);
-    const step = job.steps.find((entry) => scriptOf(entry) === VERDICT);
+    const step = verdictOf(job);
     const checkout = job.steps.findIndex(isCheckout);
     assert.ok(
       checkout !== -1 && checkout < job.steps.indexOf(step),
@@ -160,6 +261,24 @@ function nothingMasksAFailure(workflow) {
   }
 }
 
+const workStepOf = (key) => {
+  const [file, job, ...words] = key.split(" ");
+  return { file, job, name: words.join(" "), runs: WORK_STEPS[key][0] };
+};
+
+function doesItsWork(workflow) {
+  for (const { file, job, name, runs } of Object.keys(WORK_STEPS).map(workStepOf)) {
+    if (file !== workflow.file) continue;
+    const step = (workflow.jobs[job]?.steps ?? []).find((entry) => entry.name === name);
+    assert.ok(step !== undefined, `${workflow.name} ${job} lacks "${name}"`);
+    for (const run of runs)
+      assert.ok(
+        (step.run ?? "").includes(run),
+        `${workflow.name} ${job} "${name}" does not run ${run}`,
+      );
+  }
+}
+
 function readsWhatItDecidesBy(workflow) {
   const steps = jobsOf(workflow).flatMap(([, job]) =>
     (job.steps ?? []).map((step) => ({ job, step })),
@@ -194,14 +313,23 @@ function startsOnPullRequestsIntoMain(workflow) {
       assert.ok(trigger.types.includes(type), `${workflow.name}: pull_request.types lacks ${type}`);
 }
 
-const SHAPE = [
-  waitsForTheAnswer,
-  resultJobsJudgeEveryJob,
-  nothingMasksAFailure,
-  readsWhatItDecidesBy,
-];
-const shapeOf = (workflow) => {
-  for (const check of SHAPE) check(workflow);
+function startsOnlyOnListedEvents(workflow) {
+  const events = TRIGGERS[workflow.file];
+  assert.ok(events !== undefined, `${workflow.name}: this test lists no events for it`);
+  for (const event of eventsOf(workflow))
+    assert.ok(
+      events.includes(event),
+      `${workflow.name} starts on ${event}, which this test does not list for it`,
+    );
+}
+
+const GATED_SHAPE = [waitsForTheAnswer, resultJobsJudgeEveryJob, doesItsWork, readsWhatItDecidesBy];
+const shapeOf = (workflow, required) => {
+  if (requiredOf(workflow, required).length > 0) {
+    nothingMasksAFailure(workflow);
+    startsOnlyOnListedEvents(workflow);
+  }
+  if (isGated(workflow)) for (const check of GATED_SHAPE) check(workflow);
   startsOnPullRequestsIntoMain(workflow);
 };
 
@@ -217,264 +345,405 @@ function requiredChecksReport(all, checks) {
     if (isGated(workflow)) assert.ok(isResult(job), `${context}: only a result job always reports`);
     else assert.equal(job.if, undefined, context);
   }
-  const wanted = new Set(checks.map((check) => check.context));
-  for (const workflow of all) {
-    if (!onPullRequests(workflow)) continue;
-    const own = jobsOf(workflow).filter(([id, job]) => wanted.has(job.name ?? id));
-    assert.ok(own.length > 0, `${workflow.name}: nothing of it is required`);
-  }
+  for (const workflow of all.filter(onPullRequests))
+    assert.ok(
+      requiredOf(workflow, checks).length > 0,
+      `${workflow.name}: nothing of it is required`,
+    );
 }
 
 // desktop-release.yml publishes a Desktop build of main only with a green push
-// run of desktop-tests.yml for the same commit.
+// run of desktop-tests.yml on main for the same commit.
+function startsOnPushesToMain(workflow) {
+  const push = workflow.on.push ?? {};
+  assert.equal(push["branches-ignore"], undefined, `${workflow.name}: push.branches-ignore`);
+  assert.ok(
+    Array.isArray(push.branches) &&
+      push.branches.includes("main") &&
+      !push.branches.some((branch) => branch.startsWith("!")),
+    `${workflow.name}: push.branches leaves out main`,
+  );
+}
 const includes = (paths) => paths.filter((path) => !path.startsWith("!"));
 const excludes = (paths) => paths.filter((path) => path.startsWith("!"));
 function testsFollowBuilds(build, tests) {
-  for (const path of includes(build)) assert.ok(tests.includes(path), `bb tests skip ${path}`);
-  for (const path of excludes(tests)) assert.ok(build.includes(path), `bb tests leave out ${path}`);
+  for (const workflow of [build, tests]) startsOnPushesToMain(workflow);
+  const [built, tested] = [build, tests].map((workflow) => workflow.on.push.paths);
+  for (const path of includes(built)) assert.ok(tested.includes(path), `bb tests skip ${path}`);
+  for (const path of excludes(tested))
+    assert.ok(built.includes(path), `bb tests leave out ${path}`);
 }
 
-const copyOf = (file, change = () => {}) => {
-  const workflow = structuredClone(workflows.find((entry) => entry.file === file));
-  change(workflow);
-  return workflow;
-};
 const stepOf = (workflow, job, name) => workflow.jobs[job].steps.find((step) => step.name === name);
 
-describe("workflows", () => {
-  test("every action is pinned to a commit, not to a tag its owner can move", () => {
-    const loose = [];
-    for (const workflow of workflows)
-      for (const [id, job] of jobsOf(workflow))
-        for (const uses of [job.uses, ...(job.steps ?? []).map((step) => step.uses)])
-          if (uses !== undefined && !uses.startsWith("./") && !/@[0-9a-f]{40}$/u.test(uses))
-            loose.push(`${workflow.name} ${id}: ${uses}`);
-    assert.deepEqual(loose, []);
-  });
-
-  test("every workflow starts on every pull request into main: its required check has to report", () => {
-    for (const workflow of workflows.filter(onPullRequests)) startsOnPullRequestsIntoMain(workflow);
-  });
-
-  test("a workflow that starts on main only for some paths asks pull requests about the same paths", () => {
-    for (const workflow of workflows) {
-      const paths = workflow.on.push?.paths;
-      if (paths === undefined) continue;
-      assert.notEqual(workflow.jobs.changes, undefined, `${workflow.name} has no changes job`);
-      assert.deepEqual(asked(workflow), paths, workflow.name);
-    }
-  });
-
-  test("the paths a pull request is asked about are ones git reads as the filter would", () => {
-    assert.ok(gated.length > 0);
-    for (const workflow of gated) assert.doesNotThrow(() => pathspecs(asked(workflow)));
-  });
-
-  test("every job of such a workflow waits for the answer", () => {
-    for (const workflow of gated) waitsForTheAnswer(workflow);
-  });
-
-  test("every result job waits for every job and gives the verdict script all of them", () => {
-    for (const workflow of gated) resultJobsJudgeEveryJob(workflow);
-  });
-
-  test("no job of such a workflow passes when its work fails or is left out", () => {
-    for (const workflow of gated) nothingMasksAFailure(workflow);
-  });
-
-  test("the answer the jobs wait for is the one the script writes", () => {
-    for (const workflow of gated) {
-      const { changes } = workflow.jobs;
-      const checkout = changes.steps.find(isCheckout);
-      assert.equal(checkout.with["fetch-depth"], 2, `${workflow.name}: the merge needs its parent`);
-      const step = asking(workflow);
-      assert.equal(scriptOf(step), "scripts/lib/changed-paths.mjs", workflow.name);
-      assert.deepEqual(
-        changes.outputs,
-        { changed: `\${{ steps.${step.id}.outputs.changed }}` },
-        workflow.name,
-      );
-    }
-  });
-
-  test("a pull request that changes only what a workflow reads to decide or to install still runs it", () => {
-    for (const workflow of gated) readsWhatItDecidesBy(workflow);
-  });
-
-  test("every push to main that builds Desktop also runs bb's tests on its commit", () => {
-    const [build, tests] = ["desktop.yml", "desktop-tests.yml"].map(
-      (file) => copyOf(file).on.push.paths,
-    );
-    testsFollowBuilds(build, tests);
-    assert.throws(() => testsFollowBuilds([...build, "docs/**"], tests), /bb tests skip docs/u);
+// Every test of this file, on one state of the workflows and the required checks.
+function register({ workflows, required }) {
+  const gated = workflows.filter(isGated);
+  const carrying = workflows.filter((workflow) => requiredOf(workflow, required).length > 0);
+  const copyOf = (file, change = () => {}) => {
+    const workflow = structuredClone(workflows.find((entry) => entry.file === file));
+    change(workflow);
+    return workflow;
+  };
+  const firstResultOf = (file) => resultsOf(copyOf(file))[0][0];
+  const desktopPair = () => ["desktop.yml", "desktop-tests.yml"].map((file) => copyOf(file));
+  const breaks = (workflow, expected) =>
     assert.throws(
-      () => testsFollowBuilds(build, [...tests, "!brand/**"]),
-      /bb tests leave out !brand/u,
+      () => shapeOf(workflow, required),
+      typeof expected === "string" ? (error) => error.message.includes(expected) : expected,
     );
-  });
-});
 
-const breaks = (workflow, message) => assert.throws(() => shapeOf(workflow), message);
+  describe("workflows", () => {
+    test("every action is pinned to a commit, not to a tag its owner can move", () => {
+      const loose = [];
+      for (const workflow of workflows)
+        for (const [id, job] of jobsOf(workflow))
+          for (const uses of [job.uses, ...(job.steps ?? []).map((step) => step.uses)])
+            if (uses !== undefined && !uses.startsWith("./") && !/@[0-9a-f]{40}$/u.test(uses))
+              loose.push(`${workflow.name} ${id}: ${uses}`);
+      assert.deepEqual(loose, []);
+    });
 
-describe("the shape tests catch", () => {
-  test("a job or a step that may fail and still pass", () => {
-    breaks(
-      copyOf("bots-e2e.yml", (w) => {
-        w.jobs.e2e["continue-on-error"] = true;
-      }),
-      /e2e may fail and pass/u,
-    );
-    breaks(
-      copyOf("desktop-tests.yml", (w) => {
-        w.jobs.tests["continue-on-error"] = true;
-      }),
-      /tests may fail and pass/u,
-    );
-    breaks(
-      copyOf("bots-e2e.yml", (w) => {
-        stepOf(w, "e2e", "Run the end-to-end tests")["continue-on-error"] = true;
-      }),
-      /"Run the end-to-end tests" may fail and pass/u,
-    );
-  });
+    test("every workflow starts on every pull request into main: its required check has to report", () => {
+      for (const workflow of workflows.filter(onPullRequests))
+        startsOnPullRequestsIntoMain(workflow);
+    });
 
-  test("a step that is skipped on a condition nobody listed", () => {
-    breaks(
-      copyOf("bots-e2e.yml", (w) => {
-        stepOf(w, "e2e", "Run the end-to-end tests").if = "${{ false }}";
-      }),
-      /"Run the end-to-end tests" runs on a condition/u,
-    );
-    breaks(
-      copyOf("desktop-tests.yml", (w) => {
-        stepOf(w, "tests", "Test native browser address interactions").if = "${{ false }}";
-      }),
-      /"Test native browser address interactions" runs on a condition/u,
-    );
-  });
+    test("a workflow with a required check starts only on the events this test lists for it", () => {
+      assert.ok(carrying.length > 0);
+      for (const workflow of carrying) startsOnlyOnListedEvents(workflow);
+    });
 
-  test("a job whose work runs in another workflow", () => {
-    breaks(
-      copyOf("bots-e2e.yml", (w) => {
-        const { needs, if: when, name } = w.jobs.e2e;
-        w.jobs.e2e = { name, needs, if: when, uses: "./.github/workflows/e2e-call.yml" };
-      }),
-      /e2e runs another workflow/u,
-    );
-  });
+    test("a workflow that starts on main only for some paths asks pull requests about the same paths", () => {
+      for (const workflow of workflows) {
+        const paths = workflow.on.push?.paths;
+        if (paths === undefined) continue;
+        assert.notEqual(workflow.jobs.changes, undefined, `${workflow.name} has no changes job`);
+        assert.deepEqual(asked(workflow), paths, workflow.name);
+      }
+    });
 
-  test("a job kept off pull requests without a reason", () => {
-    breaks(
-      copyOf("desktop-tests.yml", (w) => {
-        w.jobs.tests.if = OFF_PULL_REQUESTS;
-        stepOf(
-          w,
-          "result",
-          "Every job the event calls for passed, or the paths are untouched",
-        ).env.OFF_PULL_REQUESTS = "tests";
-      }),
-      /tests is kept off pull requests without a reason/u,
-    );
-  });
+    test("the paths a pull request is asked about are ones git reads as the filter would", () => {
+      assert.ok(gated.length > 0);
+      for (const workflow of gated) assert.doesNotThrow(() => pathspecs(asked(workflow)));
+    });
 
-  test("a result job that does not check the verdict script out first", () => {
-    breaks(
-      copyOf("bots-e2e.yml", (w) => {
-        w.jobs.result.steps = w.jobs.result.steps.filter((step) => !isCheckout(step));
-      }),
-      /result: the script is not checked out/u,
-    );
-    breaks(
-      copyOf("bots-e2e.yml", (w) => {
-        w.jobs.result.steps.reverse();
-      }),
-      /result: the script is not checked out/u,
-    );
-  });
+    test("every job of such a workflow waits for the answer", () => {
+      for (const workflow of gated) waitsForTheAnswer(workflow);
+    });
 
-  test("a result job that does not wait for every job, or is not run after a failure", () => {
-    breaks(
-      copyOf("desktop-tests.yml", (w) => {
-        w.jobs.result.needs = ["changes", "plan", "static"];
-      }),
-      /Desktop bb tests result/u,
-    );
-    breaks(
-      copyOf("bots-e2e.yml", (w) => {
-        delete w.jobs.result.if;
-      }),
-      /Bots end-to-end result/u,
-    );
+    test("every result job waits for every job and gives the verdict script all of them", () => {
+      for (const workflow of gated) resultJobsJudgeEveryJob(workflow);
+    });
+
+    test("no job of a workflow with a required check passes when its work fails or is left out", () => {
+      for (const workflow of carrying) nothingMasksAFailure(workflow);
+    });
+
+    test("every step that is the work of a required check is there and runs that work", () => {
+      for (const { file } of Object.keys(WORK_STEPS).map(workStepOf))
+        assert.ok(
+          gated.some((workflow) => workflow.file === file),
+          `${file} is not a gated workflow`,
+        );
+      for (const workflow of gated) doesItsWork(workflow);
+    });
+
+    test("the answer the jobs wait for is the one the script writes", () => {
+      for (const workflow of gated) {
+        const { changes } = workflow.jobs;
+        const checkout = changes.steps.find(isCheckout);
+        assert.equal(
+          checkout.with["fetch-depth"],
+          2,
+          `${workflow.name}: the merge needs its parent`,
+        );
+        const step = asking(workflow);
+        assert.equal(scriptOf(step), "scripts/lib/changed-paths.mjs", workflow.name);
+        assert.deepEqual(
+          changes.outputs,
+          { changed: `\${{ steps.${step.id}.outputs.changed }}` },
+          workflow.name,
+        );
+      }
+    });
+
+    test("a pull request that changes only what a workflow reads to decide or to install still runs it", () => {
+      for (const workflow of gated) readsWhatItDecidesBy(workflow);
+    });
+
+    test("every push to main that builds Desktop also runs bb's tests on its commit", () => {
+      testsFollowBuilds(...desktopPair());
+      const [wider, tests] = desktopPair();
+      wider.on.push.paths.push("docs/**");
+      assert.throws(() => testsFollowBuilds(wider, tests), /bb tests skip docs/u);
+      const [build, narrower] = desktopPair();
+      narrower.on.push.paths.push("!brand/**");
+      assert.throws(() => testsFollowBuilds(build, narrower), /bb tests leave out !brand/u);
+    });
   });
 
-  test("a pull request into main the workflow does not start on", () => {
-    for (const trigger of [
-      { branches: ["release-only"] },
-      { branches: ["main", "!main"] },
-      { "branches-ignore": ["main"] },
-      { paths: ["plugins/**"] },
-      { types: ["opened"] },
-    ])
+  describe("the shape tests catch", () => {
+    test("a job or a step that may fail and still pass", () => {
       breaks(
         copyOf("bots-e2e.yml", (w) => {
-          w.on.pull_request = trigger;
+          w.jobs.e2e["continue-on-error"] = true;
         }),
-        /pull_request\./u,
+        /e2e may fail and pass/u,
       );
-    assert.doesNotThrow(() =>
-      shapeOf(
-        copyOf("bots-e2e.yml", (w) => {
-          w.on.pull_request = { branches: ["main"], types: ["opened", "synchronize", "reopened"] };
+      breaks(
+        copyOf("desktop-tests.yml", (w) => {
+          w.jobs.tests["continue-on-error"] = true;
         }),
-      ),
-    );
-  });
+        /tests may fail and pass/u,
+      );
+      breaks(
+        copyOf("bots-e2e.yml", (w) => {
+          stepOf(w, "e2e", "Run the end-to-end tests")["continue-on-error"] = true;
+        }),
+        /"Run the end-to-end tests" may fail and pass/u,
+      );
+      breaks(
+        copyOf("ci.yml", (w) => {
+          const [[, job]] = requiredOf(w, required);
+          job["continue-on-error"] = true;
+        }),
+        /CI \S+ may fail and pass/u,
+      );
+    });
 
-  test("a workflow that a change of how pnpm installs does not run", () => {
-    for (const { file: workflow } of gated)
-      for (const file of ["package.json", "pnpm-workspace.yaml", "pnpm-lock.yaml"])
+    test("a step that is skipped on a condition nobody listed", () => {
+      breaks(
+        copyOf("bots-e2e.yml", (w) => {
+          stepOf(w, "e2e", "Run the end-to-end tests").if = "${{ false }}";
+        }),
+        /"Run the end-to-end tests" runs on a condition/u,
+      );
+      breaks(
+        copyOf("desktop-tests.yml", (w) => {
+          stepOf(w, "tests", "Test native browser address interactions").if = "${{ false }}";
+        }),
+        /"Test native browser address interactions" runs on a condition/u,
+      );
+    });
+
+    test("a step that is the work of a required check, removed or made to do nothing", () => {
+      breaks(
+        copyOf("desktop-tests.yml", (w) => {
+          w.jobs.tests.steps = w.jobs.tests.steps.filter(
+            (step) => step.name !== "Test native browser address interactions",
+          );
+        }),
+        /tests lacks "Test native browser address interactions"/u,
+      );
+      for (const { file, job, name } of Object.keys(WORK_STEPS).map(workStepOf)) {
         breaks(
-          copyOf(workflow, (w) => {
-            const step = asking(w);
-            step.env.PATHS = asked(w)
-              .filter((path) => path !== file)
-              .join("\n");
+          copyOf(file, (w) => {
+            stepOf(w, job, name).run = "true";
           }),
-          new RegExp(`does not ask about ${file.replace(".", "\\.")}`, "u"),
+          `${job} "${name}" does not run`,
         );
-  });
-});
-
-describe("protection of main", () => {
-  test("every required check is a job that reports on every pull request, and every such workflow has one", () => {
-    requiredChecksReport(workflows, required);
-  });
-
-  test("a required check can be renamed in the three steps the runbook gives", () => {
-    const OLD = "Bots end-to-end result";
-    const NEW = "Bots end-to-end verdict";
-    const both = copyOf("bots-e2e.yml", (w) => {
-      w.jobs.verdict = { ...structuredClone(w.jobs.result), name: NEW };
+        breaks(
+          copyOf(file, (w) => {
+            w.jobs[job].steps = w.jobs[job].steps.filter((step) => step.name !== name);
+          }),
+          `${job} lacks "${name}"`,
+        );
+      }
     });
-    const only = copyOf("bots-e2e.yml", (w) => {
-      w.jobs.verdict = { ...w.jobs.result, name: NEW };
-      delete w.jobs.result;
+
+    test("a job whose work runs in another workflow", () => {
+      breaks(
+        copyOf("bots-e2e.yml", (w) => {
+          const { needs, if: when, name } = w.jobs.e2e;
+          w.jobs.e2e = { name, needs, if: when, uses: "./.github/workflows/e2e-call.yml" };
+        }),
+        /e2e runs another workflow/u,
+      );
     });
-    const renamed = required.map((check) =>
-      check.context === OLD ? { ...check, context: NEW } : check,
-    );
-    const others = workflows.filter((workflow) => workflow.file !== "bots-e2e.yml");
-    for (const [workflow, checks] of [
-      [both, required],
-      [both, renamed],
-      [only, renamed],
-    ]) {
-      shapeOf(workflow);
-      requiredChecksReport([...others, workflow], checks);
-    }
-    const short = structuredClone(both);
-    short.jobs.verdict.needs = ["changes"];
-    assert.throws(() => shapeOf(short), /Bots end-to-end verdict/u);
-    assert.throws(() => requiredChecksReport([...others, only], required), /0 jobs carry/u);
+
+    test("a job kept off pull requests without a reason", () => {
+      breaks(
+        copyOf("desktop-tests.yml", (w) => {
+          w.jobs.tests.if = OFF_PULL_REQUESTS;
+          for (const [, job] of resultsOf(w)) verdictOf(job).env.OFF_PULL_REQUESTS = "tests";
+        }),
+        /tests is kept off pull requests without a reason/u,
+      );
+    });
+
+    test("a result job that does not check the verdict script out first", () => {
+      const id = firstResultOf("bots-e2e.yml");
+      breaks(
+        copyOf("bots-e2e.yml", (w) => {
+          w.jobs[id].steps = w.jobs[id].steps.filter((step) => !isCheckout(step));
+        }),
+        `${id}: the script is not checked out`,
+      );
+      breaks(
+        copyOf("bots-e2e.yml", (w) => {
+          w.jobs[id].steps.reverse();
+        }),
+        `${id}: the script is not checked out`,
+      );
+    });
+
+    test("a result job that does not wait for every job, or is not run after a failure", () => {
+      const tests = firstResultOf("desktop-tests.yml");
+      breaks(
+        copyOf("desktop-tests.yml", (w) => {
+          w.jobs[tests].needs = ["changes", "plan", "static"];
+        }),
+        `Desktop bb tests ${tests}`,
+      );
+      const bots = firstResultOf("bots-e2e.yml");
+      breaks(
+        copyOf("bots-e2e.yml", (w) => {
+          delete w.jobs[bots].if;
+        }),
+        `Bots end-to-end ${bots}`,
+      );
+    });
+
+    test("a pull request into main the workflow does not start on", () => {
+      for (const trigger of [
+        { branches: ["release-only"] },
+        { branches: ["main", "!main"] },
+        { "branches-ignore": ["main"] },
+        { paths: ["plugins/**"] },
+        { types: ["opened"] },
+      ])
+        breaks(
+          copyOf("bots-e2e.yml", (w) => {
+            w.on.pull_request = trigger;
+          }),
+          /pull_request\./u,
+        );
+      assert.doesNotThrow(() =>
+        shapeOf(
+          copyOf("bots-e2e.yml", (w) => {
+            w.on.pull_request = {
+              branches: ["main"],
+              types: ["opened", "synchronize", "reopened"],
+            };
+          }),
+          required,
+        ),
+      );
+    });
+
+    test("a workflow with a required check that also starts on an event this test does not list", () => {
+      for (const { file } of carrying)
+        for (const event of ["pull_request_target", "merge_group", "workflow_call", "workflow_run"])
+          breaks(
+            copyOf(file, (w) => {
+              w.on[event] = null;
+            }),
+            `starts on ${event}, which this test does not list`,
+          );
+    });
+
+    test("a workflow that a change of how pnpm installs does not run", () => {
+      for (const { file: workflow } of gated)
+        for (const file of ["package.json", "pnpm-workspace.yaml", "pnpm-lock.yaml"])
+          breaks(
+            copyOf(workflow, (w) => {
+              const step = asking(w);
+              step.env.PATHS = asked(w)
+                .filter((path) => path !== file)
+                .join("\n");
+            }),
+            `does not ask about ${file}`,
+          );
+      for (const folder of [".", "./", "${{ github.workspace }}"])
+        for (const where of ["step", "job default"])
+          breaks(
+            copyOf("bots-e2e.yml", (w) => {
+              const { e2e } = w.jobs;
+              const install = e2e.steps.find((step) => installsAtRoot(e2e, step));
+              if (where === "step") install["working-directory"] = folder;
+              else e2e.defaults = { run: { "working-directory": folder } };
+              asking(w).env.PATHS = asked(w)
+                .filter((path) => path !== "package.json")
+                .join("\n");
+            }),
+            "does not ask about package.json",
+          );
+    });
+
+    test("a Desktop workflow that does not start on pushes to main", () => {
+      for (const push of [
+        { branches: ["release-only"] },
+        { branches: ["main", "!main"] },
+        { branches: ["main"], "branches-ignore": ["release-only"] },
+        { tags: ["desktop/v*"] },
+      ])
+        for (const index of [0, 1]) {
+          const pair = desktopPair();
+          pair[index].on.push = { ...push, paths: pair[index].on.push.paths };
+          assert.throws(() => testsFollowBuilds(...pair), /push\.branches/u);
+        }
+    });
   });
-});
+
+  describe("protection of main", () => {
+    test("every required check is a job that reports on every pull request, and every such workflow has one", () => {
+      requiredChecksReport(workflows, required);
+    });
+
+    test("a second result job judges every job, and a required name has a job until it is no longer required", () => {
+      for (const workflow of gated) {
+        const [[id, job]] = requiredOf(workflow, required);
+        const spare = { ...structuredClone(job), name: `${job.name ?? id} spare` };
+        breaks(
+          copyOf(workflow.file, (w) => {
+            w.jobs.spare_result = { ...spare, needs: ["changes"] };
+          }),
+          `${workflow.name} spare_result`,
+        );
+        const only = copyOf(workflow.file, (w) => {
+          for (const [result] of resultsOf(w)) delete w.jobs[result];
+          w.jobs.spare_result = spare;
+        });
+        assert.throws(
+          () =>
+            requiredChecksReport(
+              workflows.map((entry) => (entry.file === workflow.file ? only : entry)),
+              required,
+            ),
+          /0 jobs carry/u,
+        );
+      }
+    });
+  });
+}
+
+// docs/runbooks/github-main-protection.md renames a required check in three
+// pull requests; each of them has to pass this file.
+const RENAME_STEPS = [
+  "both result jobs, the old name required",
+  "both result jobs, the new name required",
+  "only the new result job, the new name required",
+];
+function renamed({ workflows, required }, file, step) {
+  const workflow = structuredClone(workflows.find((entry) => entry.file === file));
+  const [[id, job]] = requiredOf(workflow, required);
+  const old = job.name ?? id;
+  const name = `${old} after a rename`;
+  workflow.jobs.renamed_result = { ...structuredClone(job), name };
+  if (step === 2) delete workflow.jobs[id];
+  return {
+    workflows: workflows.map((entry) => (entry.file === file ? workflow : entry)),
+    required:
+      step === 0
+        ? required
+        : required.map((check) => (check.context === old ? { ...check, context: name } : check)),
+  };
+}
+
+register(repository);
+for (const { file, name } of repository.workflows.filter(isGated))
+  for (const [step, state] of RENAME_STEPS.entries())
+    describe(`${name} with its required check renamed, ${state}`, () => {
+      register(renamed(repository, file, step));
+    });
