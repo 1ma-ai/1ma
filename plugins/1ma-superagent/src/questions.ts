@@ -6,6 +6,7 @@ export { answerSchema, cardSchema, questionPayloadSchema } from "./card.js";
 export type { AnswerOutcome, Card, QuestionPayload } from "./card.js";
 export const QUESTION_RENDERER = "question";
 export const QUESTION_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000;
+export const UNRECORDED_RETRY_MS = [30 * 1000, 2 * 60 * 1000, 10 * 60 * 1000] as const;
 
 export type QuestionState = "queued" | "open" | "answered" | "stale" | "expired" | "canceled";
 
@@ -72,7 +73,7 @@ function toRow(raw: RawQuestion): QuestionRow {
     remindAt: raw.remind_at,
     createdAt: raw.created_at,
     expiresAt: raw.expires_at ?? raw.created_at + QUESTION_TIMEOUT_MS,
-    unrecordedAnswer: raw.unrecorded_answer === 1,
+    unrecordedAnswer: raw.unrecorded_answer > 0,
   };
 }
 
@@ -193,13 +194,15 @@ export class QuestionStore {
       .run(remindAt, id, token);
   }
 
-  requeueUnrecorded(id: string, token: string): void {
+  requeueUnrecorded(id: string, token: string, now: number): void {
+    const [first, second, later] = UNRECORDED_RETRY_MS;
     this.#db
       .prepare(
-        `UPDATE questions SET state = 'queued', token = NULL, remind_at = NULL, unrecorded_answer = 1
-         WHERE id = ? AND token = ? AND state = 'open'`,
+        `UPDATE questions SET state = 'queued', token = NULL, unrecorded_answer = unrecorded_answer + 1,
+           remind_at = @now + CASE unrecorded_answer WHEN 0 THEN @first WHEN 1 THEN @second ELSE @later END
+         WHERE id = @id AND token = @token AND state = 'open'`,
       )
-      .run(id, token);
+      .run({ id, token, now, first, second, later });
   }
 
   closeAs(id: string, token: string, state: "canceled" | "expired"): void {

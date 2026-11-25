@@ -649,6 +649,7 @@ describe("1ma-superagent bot actions with a model turn", () => {
     const shown = await waitCard(
       "the question shown again after the crash",
       (data) => data.questionId === questionId,
+      2 * PASS,
     );
     assert.notEqual(shown.id, again.id);
     await new Promise((resolve) => setTimeout(resolve, 70_000));

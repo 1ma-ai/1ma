@@ -1,11 +1,11 @@
 import type { PluginUi } from "@get-bb/plugin-sdk";
+import { strings } from "../strings.js";
 import type { Background } from "./background.js";
 import {
   QUESTION_RENDERER,
   QUESTION_TIMEOUT_MS,
   type QuestionPayload,
   type QuestionStore,
-  answerSchema,
   newToken,
 } from "./questions.js";
 
@@ -85,14 +85,18 @@ export class QuestionDispatcher {
             presentation: {
               label: { pending: question.card.title, completed: question.card.title },
             },
-            describeSubmission: (value) => {
-              const parsed = answerSchema.safeParse(value);
-              const option = question.card.options.find(
-                (candidate) => parsed.success && candidate.id === parsed.data.optionId,
-              );
-              return option === undefined
-                ? {}
-                : { title: `${question.card.title}: ${option.label}` };
+            describeSubmission: () => {
+              const recorded = this.#deps.store.get(question.id);
+              const option =
+                recorded?.state === "answered" && recorded.token === token
+                  ? question.card.options.find((candidate) => candidate.id === recorded.answer)
+                  : undefined;
+              return {
+                title:
+                  option === undefined
+                    ? strings.cardClosedUnrecorded(question.card.title)
+                    : strings.cardClosedDecided(question.card.title, option.label),
+              };
             },
           },
           { signal: AbortSignal.any([this.#deps.signal, live.close.signal]) },
@@ -105,7 +109,7 @@ export class QuestionDispatcher {
           if (result.outcome === "submitted") {
             const recorded = this.#deps.store.get(question.id);
             if (recorded?.state === "open" && recorded.token === token)
-              this.#deps.store.requeueUnrecorded(question.id, token);
+              this.#deps.store.requeueUnrecorded(question.id, token, this.#deps.now());
           } else if (result.reason === "user") {
             this.#deps.store.closeAs(question.id, token, "canceled");
           } else if (result.reason === "timeout") {

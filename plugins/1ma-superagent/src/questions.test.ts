@@ -11,6 +11,7 @@ import {
   questionPayloadSchema,
 } from "./questions.js";
 import { MIGRATIONS } from "./schema.js";
+import { strings } from "../strings.js";
 
 const CHAT = "thr_bot";
 
@@ -45,6 +46,10 @@ function setup() {
   };
   const kinds = new Map([["test", kind]]);
   const { bb, harness } = createFakePluginHost({ pluginId: "1ma-superagent" });
+  let clock = 1_000;
+  const advance = (ms: number) => {
+    clock += ms;
+  };
   const makeDispatcher = (signal = new AbortController().signal, closeGraceMs?: number) =>
     new QuestionDispatcher({
       requestInput: (request, requestOptions) => bb.ui.requestInput(request, requestOptions),
@@ -52,7 +57,7 @@ function setup() {
       background: inPlace,
       store,
       chat: () => CHAT,
-      now: () => 1_000,
+      now: () => clock,
       signal,
       ...(closeGraceMs === undefined ? {} : { closeGraceMs }),
     });
@@ -77,6 +82,7 @@ function setup() {
     ask,
     pending,
     harness,
+    advance,
     settle: settleTimers,
   };
 }
@@ -148,10 +154,11 @@ describe("question dispatcher", () => {
   });
 
   it("does not take an answer that closed the card without a recorded decision, and asks again with a note", async () => {
-    const { makeDispatcher, ask, pending, harness, answers, store, settle } = setup();
+    const { makeDispatcher, ask, pending, harness, answers, store, advance, settle } = setup();
     const id = ask("first");
     if (id === null) throw new Error("not asked");
-    makeDispatcher().dispatch();
+    const dispatcher = makeDispatcher();
+    dispatcher.dispatch();
     const first = pending()[0];
     if (first === undefined) throw new Error("no card");
     expect(payloadOf(first).unrecorded).toBe(false);
@@ -161,10 +168,100 @@ describe("question dispatcher", () => {
     });
     await settle();
     expect(answers).toEqual([]);
+    advance(30_000);
+    dispatcher.dispatch();
     expect(store.get(id)?.state).toBe("open");
     const again = pending().at(-1);
     if (again === undefined || again.id === first.id) throw new Error("not asked again");
     expect(payloadOf(again)).toMatchObject({ questionId: id, unrecorded: true });
+  });
+
+  it("lets the other waiting questions through while a card is answered past decide, and shows it a bounded number of times", async () => {
+    const { makeDispatcher, ask, pending, harness, answers, settle } = setup();
+    const firstId = ask("first");
+    const secondId = ask("second");
+    makeDispatcher().dispatch();
+    const shown: string[] = [];
+    for (let n = 0; n < 5; n += 1) {
+      const request = pending()[0];
+      if (request === undefined) break;
+      const payload = payloadOf(request);
+      shown.push(payload.questionId);
+      harness.behavior.submitInteraction(request.id, { token: payload.token, optionId: "yes" });
+      await settle();
+    }
+    expect(answers).toEqual([]);
+    expect(shown).toEqual([firstId, secondId]);
+  });
+
+  it("asks again after an answer past decide only after 30 seconds, then 2 minutes, then every 10 minutes, until the original deadline", async () => {
+    const { makeDispatcher, ask, pending, harness, answers, store, advance, settle } = setup();
+    const id = ask("first");
+    if (id === null) throw new Error("not asked");
+    const deadline = store.get(id)?.expiresAt;
+    const dispatcher = makeDispatcher();
+    dispatcher.dispatch();
+    const bypass = async () => {
+      const request = pending()[0];
+      if (request === undefined) throw new Error("no card");
+      harness.behavior.submitInteraction(request.id, {
+        token: payloadOf(request).token,
+        optionId: "yes",
+      });
+      await settle();
+    };
+    const shownAfter = (ms: number) => {
+      advance(ms);
+      dispatcher.dispatch();
+      return pending().length === 1;
+    };
+    await bypass();
+    expect(shownAfter(29_999)).toBe(false);
+    expect(shownAfter(1)).toBe(true);
+    await bypass();
+    expect(shownAfter(119_999)).toBe(false);
+    expect(shownAfter(1)).toBe(true);
+    await bypass();
+    expect(shownAfter(599_999)).toBe(false);
+    expect(shownAfter(1)).toBe(true);
+    await bypass();
+    expect(shownAfter(599_999)).toBe(false);
+    expect(shownAfter(1)).toBe(true);
+    expect(store.get(id)?.expiresAt).toBe(deadline);
+    await bypass();
+    advance(QUESTION_TIMEOUT_MS);
+    dispatcher.dispatch();
+    expect(pending()).toHaveLength(0);
+    expect(store.get(id)?.state).toBe("expired");
+    expect(answers).toEqual([]);
+  });
+
+  it("does not name an option in the closed card's title when no decision was recorded", () => {
+    const { makeDispatcher, ask, pending } = setup();
+    ask("first");
+    makeDispatcher().dispatch();
+    const request = pending()[0];
+    if (request?.describeSubmission === undefined) throw new Error("no card");
+    const described = request.describeSubmission({
+      token: payloadOf(request).token,
+      optionId: "yes",
+    });
+    expect(described).toEqual({ title: strings.cardClosedUnrecorded("first") });
+    expect(JSON.stringify(described)).not.toContain("Yes");
+  });
+
+  it("titles the closed card with the recorded decision, not with the option the closing answer carries", () => {
+    const { makeDispatcher, ask, pending, decide } = setup();
+    ask("first");
+    makeDispatcher().dispatch();
+    const request = pending()[0];
+    if (request?.describeSubmission === undefined) throw new Error("no card");
+    expect(decide(request, "yes")).toBe("applied");
+    const described = request.describeSubmission({
+      token: payloadOf(request).token,
+      optionId: "no",
+    });
+    expect(described).toEqual({ title: strings.cardClosedDecided("first", "Yes") });
   });
 
   it("keeps the recorded decision when the closing answer carries another option", async () => {

@@ -70,6 +70,8 @@ export const strings = {
   cardAnswerNotTaken:
     "Прошлый ответ пришёл мимо кнопок карточки и не записан. Выберите вариант кнопкой.",
   cardDecided: (label: string) => `Решение уже записано: ${label}`,
+  cardClosedDecided: (title: string, label: string) => `${title}: ${label}`,
+  cardClosedUnrecorded: (title: string) => `${title}: решение не записано`,
   cardCloseFailed: "Решение записано, но карточка не закрылась.",
   cardRetryClose: (label: string) => `Закрыть карточку с ответом «${label}»`,
   cardOutdatedStale:
