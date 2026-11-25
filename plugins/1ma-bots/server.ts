@@ -15,8 +15,9 @@ import {
   chatDefaultsSchema,
   type Actor,
   type ChatDefaults,
+  type MoveThreadsInput,
 } from "./src/contract.js";
-import { branchOf } from "./src/branch.js";
+import { branchOf, keepsOpen } from "./src/branch.js";
 import { BotsError } from "./src/errors.js";
 import { botInstructions } from "./src/instructions.js";
 import { acceptDelivery, letterTokens, resolveBot, routeLetter } from "./src/letters.js";
@@ -29,7 +30,7 @@ import {
   MEMORY_MAX,
 } from "./src/limits.js";
 import { appendFact, checkMemorySize, forgetFact, memoryChangeSchema } from "./src/memory.js";
-import { BotStore, MIGRATIONS, sha256, type MoveTarget } from "./src/store.js";
+import { BotStore, MIGRATIONS, sha256 } from "./src/store.js";
 
 export const AUTO_COMPLETE_SCHEDULE = "auto-complete";
 const START_TOKEN = "startToken";
@@ -48,9 +49,8 @@ const SPAWN_FIELDS = [
 ] as const;
 // bb's limit of ids in one call.
 const THREAD_IDS_MAX = 200;
-// How often marking done looks at a branch again when something happened in
-// some conversation meanwhile.
-const DONE_CHECKS_MAX = 5;
+// How often a decision is read again when something it may rest on changed meanwhile.
+const DECISION_READS_MAX = 5;
 const TOOLS = ["bot_read", "bot_memory_update", "bot_update_identity", "bot_message"] as const;
 
 const positiveCount = (fallback: number) => z.number().int().min(1).max(1000).catch(fallback);
@@ -140,11 +140,20 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     return botId;
   };
 
-  const reopen = (threadId: string) => store.setCompleted(threadId, false);
-
   const showForWork = (threadId: string) => {
     const botId = store.botOfThread(threadId);
     return botId !== null && store.setHidden(botId, false, { kind: "system", id: null });
+  };
+
+  // Acts on a reading that nothing observable changed under: acting awaits
+  // nothing, so no change fits between the comparison and the act.
+  const decide = async <T, R>(read: () => Promise<T>, act: (value: T) => R): Promise<R> => {
+    for (let reading = 1; reading <= DECISION_READS_MAX; reading += 1) {
+      const seen = store.generation;
+      const value = await read();
+      if (store.generation === seen) return act(value);
+    }
+    throw new BotsError("conflict", agentText.keepsChanging);
   };
 
   type ThreadRow = Awaited<ReturnType<typeof bb.sdk.threads.list>>[number];
@@ -212,13 +221,8 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   };
 
   // The first open conversation at the top of the bot's tree, in its order; the
-  // first done one when all are done. A conversation marked done is open while
-  // something in its branch works or waits for the owner, as the sidebar shows it.
+  // first done one when all are done.
   const mainThread = async (botId: string): Promise<{ threadId: string; open: boolean } | null> => {
-    const keepsOpen = (row: ThreadRow) =>
-      ["starting", "active", "stopping", "error"].includes(row.status) ||
-      row.hasPendingInteraction ||
-      row.queuedWork === "failed";
     let firstDone: string | null = null;
     for (const page of pages(store.get(botId).threads.map((member) => member.threadId))) {
       const rows = await shownRows(page);
@@ -238,51 +242,56 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   };
 
   const reopenBranch = async (threadId: string) => {
-    if (reopen(threadId)) changed();
-    if ((await membersAbove(threadId)).map(reopen).includes(true)) changed();
+    if (store.reopen([threadId])) changed();
+    if (store.reopen(await membersAbove(threadId))) changed();
   };
 
-  // Counts the events after which a branch may wait for the owner or work
-  // again. A check that reads a branch before writing its done mark compares
-  // this count, so an event during the reads is never written over.
-  let workEvents = 0;
-
   // Puts conversations beside another one of the same bot, under its parent in
-  // the bot's tree: all of it, or nothing.
-  const moveThreads = async (botId: string, threadIds: readonly string[], target: MoveTarget) => {
-    const rows = await shownRows(threadIds);
+  // the bot's tree when the caller saw that level: all of it, or nothing.
+  const moveThreads = async ({ botId, threadIds, target, levelShown }: MoveThreadsInput) => {
+    store.orderAfterMove(botId, threadIds, target);
+    const shown = await shownRows([...threadIds, target.threadId]);
     const branches = await branchesOf([...threadIds, target.threadId]);
     const parentOf = (threadId: string) => branches.get(threadId)?.threadIds[1] ?? null;
-    const parentThreadId = parentOf(target.threadId);
-    store.orderAfterMove(botId, threadIds, target);
-    if (threadIds.some((id) => !rows.has(id)))
-      throw new BotsError("not_found", agentText.noSuchThread);
-    const moved: ThreadRow[] = [];
+    const { parentThreadId } = target;
+    const rows = threadIds.flatMap((id) => shown.get(id) ?? []);
+    if (
+      rows.length < threadIds.length ||
+      !shown.has(target.threadId) ||
+      parentOf(target.threadId) !== parentThreadId
+    )
+      throw new BotsError("conflict", agentText.treeChanged);
+    const started: ThreadRow[] = [];
+    // A failed update may have been written all the same, so every row this
+    // move touched is read again; what somebody else wrote since stays.
+    const isBack = async (row: ThreadRow) => {
+      const current = await bb.sdk.threads.get({ threadId: row.id });
+      if (current.sectionId !== row.sectionId) return false;
+      if (current.parentThreadId === row.parentThreadId) return true;
+      if (current.parentThreadId !== parentThreadId) return false;
+      await bb.sdk.threads.update({
+        threadId: row.id,
+        parentThreadId: row.parentThreadId,
+        sectionId: row.sectionId,
+      });
+      return true;
+    };
     try {
-      for (const row of rows.values()) {
-        if (parentOf(row.id) === parentThreadId) continue;
+      for (const row of rows) {
+        if (!levelShown || parentOf(row.id) === parentThreadId) continue;
+        started.push(row);
         await bb.sdk.threads.update({
           threadId: row.id,
           parentThreadId,
           // Without it bb gives a conversation that leaves its parent the parent's section.
           ...(parentThreadId === null && { sectionId: row.sectionId }),
         });
-        moved.push(row);
       }
       store.moveThreads(botId, threadIds, target);
     } catch (error) {
       const stuck: ThreadRow[] = [];
-      for (const row of moved.toReversed()) {
-        try {
-          await bb.sdk.threads.update({
-            threadId: row.id,
-            parentThreadId: row.parentThreadId,
-            sectionId: row.sectionId,
-          });
-        } catch {
-          stuck.push(row);
-        }
-      }
+      for (const row of started.toReversed())
+        if (!(await isBack(row).catch(() => false))) stuck.push(row);
       if (stuck.length === 0) throw error;
       throw new BotsError(
         "conflict",
@@ -292,6 +301,17 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         ),
       );
     }
+  };
+
+  // The end of each bot's latest move, its undoing included; the next one waits for it.
+  const moveEnds = new Map<string, Promise<void>>();
+  const moveInTurn = async (input: MoveThreadsInput) => {
+    const move = (moveEnds.get(input.botId) ?? Promise.resolve()).then(() => moveThreads(input));
+    const end = move.catch(() => undefined);
+    moveEnds.set(input.botId, end);
+    await end;
+    if (moveEnds.get(input.botId) === end) moveEnds.delete(input.botId);
+    return move;
   };
 
   bb.agents.configure((ctx) => {
@@ -401,18 +421,19 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       const agent = { kind: "agent" as const, id: ctx.threadId };
       let route: ReturnType<typeof routeLetter>;
       try {
-        route = routeLetter(
-          store,
-          {
-            fromThreadId: ctx.threadId,
-            to: input.to,
-            toThreadId:
-              input.threadId || ((await mainThread(resolveBot(store, input.to)))?.threadId ?? null),
-            now: now(),
-            ownerTurn: await ownerTurnOf(ctx.threadId),
-          },
-          limits,
-        );
+        const ownerTurn = await ownerTurnOf(ctx.threadId);
+        const routeTo = (toThreadId: string | null) =>
+          routeLetter(
+            store,
+            { fromThreadId: ctx.threadId, to: input.to, toThreadId, now: now(), ownerTurn },
+            limits,
+          );
+        route = input.threadId
+          ? routeTo(input.threadId)
+          : await decide(
+              () => mainThread(resolveBot(store, input.to)),
+              (main) => routeTo(main?.threadId ?? null),
+            );
       } catch (error) {
         const fromBotId = store.botOfThread(ctx.threadId);
         if (fromBotId !== null) {
@@ -531,7 +552,6 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   // the request, and the provider may refuse it. Done covers the branch, so
   // work in a sub-thread clears the marks above it too.
   const reopenIfTurnStarted = async (threadId: string) => {
-    workEvents += 1;
     const done = (await membersAbove(threadId)).filter((id) => store.completedAt(id) !== null);
     if (done.length === 0) return;
     const [latest] = await bb.sdk.threads.events.list({
@@ -542,9 +562,9 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     });
     if (latest === undefined) return;
     const reopened = done.filter(
-      (id) => latest.createdAt > (store.completedAt(id) ?? latest.createdAt) && reopen(id),
+      (id) => latest.createdAt > (store.completedAt(id) ?? latest.createdAt),
     );
-    if (reopened.length > 0) changed();
+    if (store.reopen(reopened)) changed();
   };
   const textsOf = (blocks: ReadonlyArray<{ type: string; text?: string }>) =>
     blocks.flatMap((block) =>
@@ -564,7 +584,10 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     const branch = await membersAbove(sourceThreadId);
     if (store.bindContinuation(thread.id, sourceThreadId, branch, false)) changed();
   };
-  bb.events.on("thread.created", ({ thread }) => inheritBot(thread));
+  bb.events.on("thread.created", ({ thread }) => {
+    store.noteChange();
+    return inheritBot(thread);
+  });
   bb.experimental_hooks.on("message.dispatch", async ({ thread }) => {
     try {
       if (thread.status === "pending") await inheritBot(thread);
@@ -578,27 +601,33 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   bb.events.on("message.dispatched", ({ entry }) =>
     accepted({ threadId: entry.threadId, texts: textsOf(entry.content) }),
   );
-  bb.events.on("thread.idle", ({ thread }) => reopenIfTurnStarted(thread.id));
-
+  bb.events.on("thread.archived", () => store.noteChange());
+  bb.events.on("thread.unarchived", () => store.noteChange());
+  bb.events.on("experimental_thread.parentChanged", () => store.noteChange());
+  bb.events.on("thread.idle", ({ thread }) => {
+    store.noteChange();
+    return reopenIfTurnStarted(thread.id);
+  });
   bb.events.on("thread.active", ({ thread }) => {
-    workEvents += 1;
+    store.noteChange();
     if (showForWork(thread.id)) changed();
   });
   bb.events.on("interaction.pending", async ({ thread }) => {
-    workEvents += 1;
+    store.noteChange();
     const updated = store.transaction(() => {
       const shown = showForWork(thread.id);
-      const reopened = reopen(thread.id);
+      const reopened = store.reopen([thread.id]);
       return shown || reopened;
     });
     if (updated) changed();
     await reopenBranch(thread.id);
   });
   bb.events.on("thread.failed", ({ thread }) => {
-    workEvents += 1;
+    store.noteChange();
     return reopenBranch(thread.id);
   });
   bb.events.on("thread.deleted", ({ thread }) => {
+    store.noteChange();
     store.forgetThread(thread.id);
     changed();
   });
@@ -611,18 +640,20 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       .parse((await settings.get()).autoCompleteHours);
     if (hours <= 0) return;
     const cutoff = now() - hours * HOUR_MS;
-    for (const bot of store.list()) {
+    for (const { id: botId } of store.list()) {
+      let seen = store.generation;
+      const bot = store.find(botId);
+      if (bot === null) continue;
       let main: string | undefined;
       try {
-        main = (await mainThread(bot.id))?.threadId;
+        main = (await mainThread(botId))?.threadId;
       } catch (error) {
-        bb.log.warn(`auto-complete skipped ${bot.id}: ${messageOf(error)}`);
+        bb.log.warn(`auto-complete skipped ${botId}: ${messageOf(error)}`);
         continue;
       }
       for (const { threadId, completed } of bot.threads) {
         if (completed || threadId === main) continue;
         try {
-          const workEventsBefore = workEvents;
           const below = (await treesBelow([threadId])).get(threadId) ?? [];
           const busy = below.some(
             (thread) =>
@@ -636,16 +667,19 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
           const pending = await bb.sdk.threads.interactions.list({ threadId });
           if (pending.length > 0) continue;
           const thread = await bb.sdk.threads.get({ threadId });
+          // Another conversation may be the main one now: the rest of this bot
+          // waits for the next pass. The writes below never change the main one.
+          if (store.generation !== seen) break;
           if (thread.deletedAt !== null) {
             store.forgetThread(threadId);
             changed();
+            seen = store.generation;
             continue;
           }
           if (thread.pinnedAt !== null || thread.status !== "idle") continue;
           if (thread.queuedMessageCount > 0 || thread.updatedAt > cutoff) continue;
-          // Nothing awaits between this comparison and the write.
-          if (workEvents !== workEventsBefore) continue;
-          if (store.setCompleted(threadId, true)) changed();
+          if (store.complete(threadId)) changed();
+          seen = store.generation;
         } catch (error) {
           bb.log.warn(`auto-complete skipped ${threadId}: ${messageOf(error)}`);
         }
@@ -765,12 +799,13 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       changed();
       return { botId, startedFromBot };
     },
-    "bots.v1.main": async ({ botId }) => {
-      const main = await mainThread(botId);
-      return { threadId: main?.open ? main.threadId : null };
-    },
-    "bots.v1.moveThreads": async ({ botId, threadIds, target }) => {
-      await moveThreads(botId, threadIds, target);
+    "bots.v1.main": ({ botId }) =>
+      decide(
+        () => mainThread(botId),
+        (main) => ({ threadId: main?.open ? main.threadId : null }),
+      ),
+    "bots.v1.moveThreads": async (input) => {
+      await moveInTurn(input);
       changed();
       return { ok: true as const };
     },
@@ -779,25 +814,27 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         throw new BotsError("not_found", agentText.notABot);
       }
       if (completed) {
-        for (let check = 1, seen = -1; seen !== workEvents; check += 1) {
-          if (check > DONE_CHECKS_MAX) throw new BotsError("conflict", agentText.keepsChanging);
-          seen = workEvents;
-          const branch = [
+        const asked = store.generation;
+        await decide(
+          async () => [
             ...((await treesBelow([threadId])).get(threadId) ?? []),
             ...(await bb.sdk.threads.list({ threadIds: [threadId] })),
-          ];
-          const waits = branch.some(
-            (thread) =>
-              thread.hasPendingInteraction ||
-              thread.status === "error" ||
-              thread.queuedWork === "failed",
-          );
-          if (waits) throw new BotsError("conflict", agentText.needsOwner);
-        }
-        // Nothing awaits between the last comparison and this write.
-        store.setCompleted(threadId, true);
+          ],
+          (branch) => {
+            const waits = branch.some(
+              (thread) =>
+                thread.hasPendingInteraction ||
+                thread.status === "error" ||
+                thread.queuedWork === "failed",
+            );
+            if (waits) throw new BotsError("conflict", agentText.needsOwner);
+            if (store.reopenedSince(threadId, asked))
+              throw new BotsError("conflict", agentText.broughtBack);
+            store.complete(threadId);
+          },
+        );
       } else {
-        (await membersAbove(threadId)).forEach(reopen);
+        store.reopen(await membersAbove(threadId));
       }
       changed();
       return { ok: true as const };

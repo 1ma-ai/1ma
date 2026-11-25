@@ -197,42 +197,84 @@ describe("bot conversation menu", () => {
     parentThreadId,
     isArchived: false,
     isHidden: false,
+    status: "idle",
+    hasPendingInteraction: false,
+    queuedWork: "none",
     ...state,
   });
-  async function moveToTop(threads: ReturnType<typeof row>[], threadId = thread.id) {
+  async function moveToTop(
+    threads: ReturnType<typeof row>[],
+    threadId = thread.id,
+    of: readonly BotSummary[] = bots,
+  ) {
     const app = await loadPluginApp(() => import("./app.js"));
     const move = { mutate: vi.fn() };
     const item = app.threadActions
       .find((action) => action.id === "move-to-top")!
-      .item({ thread: { ...thread, id: threadId }, data: { bots, move, threads } } as never);
+      .item({ thread: { ...thread, id: threadId }, data: { bots: of, move, threads } } as never);
     return { item, move };
   }
-  const placeBefore = (threadId: string, target: string) => ({
+  const placeBefore = (threadId: string, target: string, parentThreadId: string | null = null) => ({
     botId: "bot_a",
     threadIds: [threadId],
-    target: { threadId: target, placement: "before" },
+    target: { threadId: target, placement: "before", parentThreadId },
+    levelShown: false,
   });
-  it("moves the selected conversation ahead of the others without changing completion", async () => {
-    const { item, move } = await moveToTop([row("thr_a"), row("thr_b"), row("thr_c")]);
+  it("moves the selected conversation ahead of the others", async () => {
+    const { item, move } = await moveToTop([row("thr_a"), row("thr_b"), row("thr_c")], "thr_c");
     await item!.run({} as never);
-    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_b", "thr_a"));
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_c", "thr_a"));
     expect((await moveToTop([row("thr_project")], "thr_project")).item).toBeNull();
   });
   it("offers Move to top among the conversations under the same parent", async () => {
+    const threads = ["thr_a", "thr_b", "thr_c"].map((threadId) => ({
+      threadId,
+      completed: false,
+      startedFromBot: true,
+    }));
     const tree = [row("thr_a"), row("thr_b", "thr_a"), row("thr_c", "thr_a")];
-    expect((await moveToTop(tree, "thr_b")).item!.disabled).toBe(true);
-    const { item, move } = await moveToTop(tree, "thr_c");
-    expect(item!.disabled).toBe(false);
+    const open = [bot("bot_a", "Editor", threads)];
+    expect((await moveToTop(tree, "thr_b", open)).item).toBeNull();
+    const { item, move } = await moveToTop(tree, "thr_c", open);
+    await item!.run({} as never);
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_c", "thr_b", "thr_a"));
+    expect((await moveToTop(tree, "thr_a", open)).item).toBeNull();
+  });
+  it("offers Move to top only when it changes the place in its group of the tree", async () => {
+    const tree = [row("thr_a"), row("thr_b"), row("thr_c")];
+    // thr_b is the only done one and stands first in Done.
+    expect((await moveToTop(tree, "thr_b")).item).toBeNull();
+    const threads = ["thr_b", "thr_a", "thr_c"].map((threadId) => ({
+      threadId,
+      completed: threadId !== "thr_a",
+      startedFromBot: true,
+    }));
+    const doneFirst = [bot("bot_a", "Editor", threads)];
+    expect((await moveToTop(tree, "thr_a", doneFirst)).item).toBeNull();
+    const { item, move } = await moveToTop(tree, "thr_c", doneFirst);
     await item!.run({} as never);
     expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_c", "thr_b"));
-    expect((await moveToTop(tree, "thr_a")).item!.disabled).toBe(true);
+  });
+  it("counts a done conversation kept open by its sub-thread among the open ones", async () => {
+    const tree = [row("thr_a"), row("thr_b"), row("thr_c"), row("thr_low", "thr_b")];
+    expect((await moveToTop(tree, "thr_b")).item).toBeNull();
+    const working = [...tree.slice(0, 3), row("thr_low", "thr_b", { status: "active" })];
+    const { item, move } = await moveToTop(working, "thr_b");
+    await item!.run({} as never);
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_b", "thr_a"));
   });
   it.each([{ isArchived: true }, { isHidden: true }])(
     "does not count a conversation the list does not show (%o) as the top",
     async (state) => {
       const tree = [row("thr_a", null, state), row("thr_b", "thr_a"), row("thr_c")];
-      expect((await moveToTop(tree, "thr_b")).item!.disabled).toBe(true);
-      const { item, move } = await moveToTop(tree, "thr_c");
+      const threads = ["thr_a", "thr_b", "thr_c"].map((threadId) => ({
+        threadId,
+        completed: false,
+        startedFromBot: true,
+      }));
+      const open = [bot("bot_a", "Editor", threads)];
+      expect((await moveToTop(tree, "thr_b", open)).item).toBeNull();
+      const { item, move } = await moveToTop(tree, "thr_c", open);
       await item!.run({} as never);
       expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_c", "thr_b"));
     },

@@ -207,6 +207,32 @@ describe("buildProjectThreadGroups", () => {
     expect(summarizeItems(rootItems)).toEqual(["orphan-child", "root-thread"]);
   });
 
+  it("nests by the caller's parent when it names one", () => {
+    const rootItems = buildProjectThreadGroups(
+      [
+        createThread({ id: "guest", createdAt: 5 }),
+        createThread({ id: "archived", isArchived: true, createdAt: 30 }),
+        createThread({
+          id: "restored",
+          parentThreadId: "archived",
+          createdAt: 20,
+        }),
+        createThread({ id: "child", parentThreadId: "restored", createdAt: 10 }),
+      ],
+      compareByCreatedAtDescending,
+      false,
+      ({ id, parentThreadId }) => {
+        if (id === "restored") return null;
+        return id === "guest" ? "restored" : parentThreadId;
+      },
+    );
+
+    expect(summarizeItems(rootItems)).toEqual([
+      "archived",
+      { id: "restored", children: ["child", "guest"] },
+    ]);
+  });
+
   it("cuts cycles without duplicating or dropping every cycle member", () => {
     const rootItems = buildProjectThreadGroups([
       createThread({

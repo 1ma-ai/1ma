@@ -350,6 +350,8 @@ interface BotConversations {
   done: PluginSidebarThread[];
   doneCount: number;
   compare: ThreadComparator;
+  // The conversation above this one in its bot's tree.
+  parentOf: (threadId: string) => string | null;
 }
 
 function useBotConversations(bots: readonly SidebarBot[]) {
@@ -359,6 +361,7 @@ function useBotConversations(bots: readonly SidebarBot[]) {
     const byId = new Map(threads.map((thread) => [thread.id, thread]));
     const branches = botBranches(bots, threads);
     const branchOf = (threadId: string) => branches.get(threadId)?.threadIds ?? [];
+    const parentOf = (threadId: string) => branchOf(threadId)[1] ?? null;
     const byBot = new Map<string, BotConversations>();
     for (const bot of bots) {
       const order = new Map(bot.threads.map((thread, index) => [thread.threadId, index]));
@@ -382,10 +385,9 @@ function useBotConversations(bots: readonly SidebarBot[]) {
       byBot.set(bot.id, {
         open,
         done,
-        doneCount: done.filter(
-          ({ parentThreadId }) => parentThreadId === null || !doneIds.has(parentThreadId),
-        ).length,
+        doneCount: done.filter(({ id }) => !doneIds.has(parentOf(id) ?? "")).length,
         compare,
+        parentOf,
       });
     }
     const empty: BotConversations = {
@@ -393,6 +395,7 @@ function useBotConversations(bots: readonly SidebarBot[]) {
       done: [],
       doneCount: 0,
       compare: () => 0,
+      parentOf,
     };
     return {
       of: (bot: SidebarBot) => byBot.get(bot.id) ?? empty,
@@ -405,9 +408,9 @@ function useBotConversations(bots: readonly SidebarBot[]) {
 // change it, so it is read again when the bot's rows do.
 export function useMainThread(
   bot: SidebarBot,
-  { open, done }: BotConversations,
+  { open, done }: Pick<BotConversations, "open" | "done">,
 ): PluginSidebarThread | null {
-  const { data, refetch } = useRpcQuery({
+  const { data, isLoading, refetch } = useRpcQuery({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
     method: "bots.v1.main",
@@ -418,12 +421,13 @@ export function useMainThread(
     [thread.id, thread.parentThreadId, thread.isArchived, keepsOpen(thread)].join(":"),
   );
   const seen = state.sort().join();
-  const lastSeen = useRef(seen);
+  // Asking again during the first reading would only join it.
+  const asked = useRef(seen);
   useEffect(() => {
-    if (lastSeen.current === seen) return;
-    lastSeen.current = seen;
+    if (isLoading || asked.current === seen) return;
+    asked.current = seen;
     void refetch();
-  }, [refetch, seen]);
+  }, [isLoading, refetch, seen]);
   return rows.find((thread) => thread.id === data?.threadId) ?? null;
 }
 
@@ -548,7 +552,7 @@ function BotRow({
   const [showDone, setShowDone] = useState(false);
   const [composing, setComposing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const { open, done, doneCount, compare } = conversations;
+  const { open, done, doneCount, compare, parentOf } = conversations;
   const main = useRpcMutation({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
@@ -588,6 +592,7 @@ function BotRow({
   };
   const treeProps = {
     compareThreads: compare,
+    parentOf,
     selectedThreadId,
     onProjectSelect,
     depthOffset: 1,

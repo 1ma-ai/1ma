@@ -4,6 +4,20 @@ export interface BotBranch {
   threadIds: readonly string[];
 }
 
+// A conversation marked done is open, as the sidebar shows it, while something
+// in its branch works or waits for the owner.
+export function keepsOpen(row: {
+  status: string;
+  hasPendingInteraction: boolean;
+  queuedWork: string;
+}): boolean {
+  return (
+    ["starting", "active", "stopping", "error"].includes(row.status) ||
+    row.hasPendingInteraction ||
+    row.queuedWork === "failed"
+  );
+}
+
 // chain: a conversation and everything above it in bb, nearest first. A
 // conversation the bot's tree does not show (archived, deleted, hidden) and
 // another bot's conversation end the branch. A sub-thread without its own place

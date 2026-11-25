@@ -56,7 +56,12 @@ export const botsRpc = {
     input: z.object({
       botId: z.string(),
       threadIds: z.array(z.string()).min(1),
-      target: z.object({ threadId: z.string(), placement: z.enum(["before", "after"]) }),
+      target: z.object({
+        threadId: z.string(),
+        placement: z.enum(["before", "after"]),
+        parentThreadId: z.string().nullable(),
+      }),
+      levelShown: z.boolean(),
     }),
     output: ok,
   },

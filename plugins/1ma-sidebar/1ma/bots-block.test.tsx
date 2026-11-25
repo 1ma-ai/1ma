@@ -320,12 +320,7 @@ describe("a click on a bot", () => {
     function Probe() {
       const [status, setStatus] = useState<"idle" | "active">("idle");
       const open = [THREADS[0]!, { ...THREADS[2]!, status }];
-      const thread = useMainThread(marketer(), {
-        open,
-        done: [],
-        doneCount: 0,
-        compare: () => 0,
-      });
+      const thread = useMainThread(marketer(), { open, done: [] });
       return <button onClick={() => setStatus("active")}>{thread?.id ?? "none"}</button>;
     }
     renderSlot({ component: Probe as never }, {} as never, {
@@ -335,6 +330,38 @@ describe("a click on a bot", () => {
     main = "thr_plain";
     fireEvent.click(button);
     await screen.findByText("thr_plain");
+  });
+
+  it("the avatar's main conversation is read again when a conversation changes during the first reading", async () => {
+    let answerFirst = () => {};
+    let reads = 0;
+    function Probe() {
+      const [status, setStatus] = useState<"idle" | "active">("idle");
+      const open = [THREADS[0]!, { ...THREADS[2]!, status }];
+      const thread = useMainThread(marketer(), { open, done: [] });
+      return (
+        <button onClick={() => setStatus("active")}>
+          {status}: {thread?.id ?? "none"}
+        </button>
+      );
+    }
+    renderSlot({ component: Probe as never }, {} as never, {
+      rpc: {
+        "bots.v1.main": async () => {
+          reads += 1;
+          if (reads > 1) return { threadId: "thr_plain" };
+          await new Promise<void>((resolve) => (answerFirst = resolve));
+          return { threadId: "thr_bot" };
+        },
+      },
+    });
+    const button = screen.getByRole("button");
+    await waitFor(() => expect(reads).toBe(1));
+    fireEvent.click(button);
+    await waitFor(() => expect(button.textContent).toBe("active: none"));
+    answerFirst();
+    await waitFor(() => expect(button.textContent).toBe("active: thr_plain"));
+    expect(reads).toBe(2);
   });
 });
 
@@ -419,6 +446,22 @@ describe("nested conversations of a bot", () => {
     );
     expect(open).toEqual(["thr_main", "thr_parent", "thr_second", "thr_spawned"]);
     expect(count).toBe(strings.done(1));
+  });
+
+  it("a restored sub-thread stands at the top beside its archived parent", async () => {
+    const threads = [
+      ...changed("thr_parent", { isArchived: true }),
+      nested("thr_low", "thr_first"),
+    ];
+    render({
+      bots: () => ({ bots: [withDone(["thr_parent", "thr_first"])] }),
+      threads,
+    });
+    await screen.findByText("Marketer");
+    // The tree ends at the archived parent: its mark is not thr_second's, and
+    // thr_first counts beside it.
+    expect(threadIdsIn(botElement("bot_m"))).toContain("thr_second");
+    expect(screen.getByText(/^Done: /u).textContent).toBe(strings.done(2));
   });
 
   it("a hidden helper thread neither counts nor keeps its branch open", async () => {

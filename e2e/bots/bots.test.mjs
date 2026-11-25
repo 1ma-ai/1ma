@@ -560,7 +560,7 @@ describe("1ma-sidebar with the bots block", () => {
     }
   });
 
-  it("leaves conversations where they are when dragged between the open list and Done", async () => {
+  it("leaves conversations where they are when dragged between the open list and Done, and their parents when dragged inside Done", async () => {
     const bot = await createBot("Order Bot");
     const ids = [];
     for (const name of ["one", "two", "three", "four"]) {
@@ -571,12 +571,16 @@ describe("1ma-sidebar with the bots block", () => {
       await waitStatus(id, "idle");
     }
     const members = async () => (await rpc("bots.v1.get", { botId: bot.id })).threads;
-    const parents = () =>
-      Promise.all(ids.map(async (id) => (await thread(id)).parentThreadId ?? null));
     const [open1, open2, done1, done2] = (await members()).map((member) => member.threadId);
+    const parents = () =>
+      Promise.all(
+        [open1, open2, done1, done2].map(async (id) => (await thread(id)).parentThreadId ?? null),
+      );
     for (const threadId of [done1, done2]) {
       await rpc("bots.v1.setCompleted", { threadId, completed: true });
     }
+    // Its parent is open, so Done draws it at the top level.
+    await server.api("PATCH", `/threads/${done1}`, { parentThreadId: open1 });
     const before = await members();
     const { context, page } = await openApp(browser, "light");
     try {
@@ -632,14 +636,29 @@ describe("1ma-sidebar with the bots block", () => {
       );
       const [first, second, ...rest] = before;
       assert.deepEqual(await members(), [second, first, ...rest]);
-      assert.deepEqual(await parents(), [null, null, null, null]);
+      assert.deepEqual(await parents(), [null, null, open1, null]);
+      await drag(done2, done1, places.top, async () => {
+        await group.locator('[data-sidebar-reorder-placement="before"]').waitFor();
+        await screenshot(page, "bot-conversation-order-in-done");
+      });
+      await waitFor(
+        "the drag inside Done is saved",
+        30 * SECOND,
+        async () => (await members())[2].threadId === done2,
+      );
+      assert.deepEqual(await members(), [second, first, rest[1], rest[0]]);
+      assert.deepEqual(await parents(), [null, null, open1, null]);
       assert.equal(
         await group.getByRole("button", { name: "Done: 2", exact: true }).count(),
         1,
         "both done conversations are still there",
       );
+      await rpc("bots.v1.setCompleted", { threadId: done2, completed: false });
+      await group.getByRole("button", { name: "Done: 1", exact: true }).waitFor();
+      assert.deepEqual(await parents(), [null, null, open1, null]);
     } finally {
       await context.close();
+      await server.api("PATCH", `/threads/${done1}`, { parentThreadId: null });
       await rpc("bots.v1.remove", { botId: bot.id });
       for (const id of ids) server.bb(["thread", "archive", id]);
     }

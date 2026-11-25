@@ -20,6 +20,7 @@ export function BotThreadTree({
   bot,
   threads,
   compareThreads,
+  parentOf,
   ...tree
 }: Omit<
   ComponentProps<typeof SectionThreadTreeItems>,
@@ -28,10 +29,13 @@ export function BotThreadTree({
   bot: SidebarBot;
   threads: SidebarThread[];
   compareThreads: ThreadComparator;
+  // The conversation above this one in the bot's tree; it is drawn there when
+  // these threads have it.
+  parentOf: (threadId: string) => string | null;
 }) {
   const rootItems = useMemo(
-    () => buildProjectThreadGroups(threads, compareThreads, false),
-    [threads, compareThreads],
+    () => buildProjectThreadGroups(threads, compareThreads, false, ({ id }) => parentOf(id)),
+    [threads, compareThreads, parentOf],
   );
   const move = useRpcMutation({
     contract: botsRpc,
@@ -39,6 +43,7 @@ export function BotThreadTree({
     method: "bots.v1.moveThreads",
   });
   const order = bot.threads.map((member) => member.threadId);
+  const drawn = new Map(threads.map((thread) => [thread.id, thread]));
   const dnd = useSectionThreadDnd({
     containerId: bot.id,
     enabled: true,
@@ -53,14 +58,23 @@ export function BotThreadTree({
       if (tree.collapsedThreadIds.has(id)) tree.onToggleThreadCollapsed(id);
     },
     botReorder: {
-      // Only the bot's own conversations have a place in its order.
-      accepts: (ids, targetId) => [...ids, targetId].every((id) => order.includes(id)),
+      // Only the bot's own conversations have a place in its order, and an
+      // archived one keeps the place it has.
+      accepts: (ids, targetId) =>
+        [...ids, targetId].every((id) => order.includes(id) && !drawn.get(id)?.isArchived),
       async drop(ids, target) {
         try {
           await move.mutate({
             botId: bot.id,
             threadIds: [...ids],
-            target: { threadId: target.threadId, placement: target.placement },
+            target: {
+              threadId: target.threadId,
+              placement: target.placement,
+              parentThreadId: parentOf(target.threadId),
+            },
+            levelShown: [...ids, target.threadId]
+              .map(parentOf)
+              .every((parent) => parent === null || drawn.has(parent)),
           });
         } catch (error) {
           toast.error(getMutationErrorMessage({ error, fallbackMessage: strings.reorderFailed }));

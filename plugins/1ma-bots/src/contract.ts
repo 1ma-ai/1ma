@@ -122,6 +122,21 @@ export const startThreadInput = z.object({
   request: z.record(z.string(), z.unknown()),
 });
 
+export const moveThreadsInput = z.object({
+  botId: z.string(),
+  threadIds: z.array(z.string()).min(1),
+  target: z.object({
+    threadId: z.string(),
+    placement: z.enum(["before", "after"]),
+    // The conversation above the target in the bot's tree, as the caller knows it.
+    parentThreadId: z.string().nullable(),
+  }),
+  // Whether the moved conversations and the target were drawn under their real
+  // parents. Otherwise only the order changes.
+  levelShown: z.boolean(),
+});
+export type MoveThreadsInput = z.infer<typeof moveThreadsInput>;
+
 export const botsRpc = {
   "bots.v1.list": {
     input: z.object({}),
@@ -153,14 +168,7 @@ export const botsRpc = {
     input: botId,
     output: z.object({ threadId: z.string().nullable() }),
   },
-  "bots.v1.moveThreads": {
-    input: z.object({
-      botId: z.string(),
-      threadIds: z.array(z.string()).min(1),
-      target: z.object({ threadId: z.string(), placement: z.enum(["before", "after"]) }),
-    }),
-    output: ok,
-  },
+  "bots.v1.moveThreads": { input: moveThreadsInput, output: ok },
   "bots.v1.setCompleted": {
     input: z.object({ threadId: z.string(), completed: z.boolean() }),
     output: ok,

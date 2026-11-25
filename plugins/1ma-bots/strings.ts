@@ -134,8 +134,10 @@ export const agentText = {
     "Only a top-level conversation that is not archived can be assigned to a bot; its child conversations follow it.",
   needsOwner:
     "This conversation is waiting for the owner (a question or an error), so it cannot be marked done.",
-  keepsChanging: "Something keeps happening in this conversation. Mark it done again in a moment.",
+  keepsChanging: "Something keeps happening in the bots' conversations. Try again in a moment.",
+  broughtBack: "This conversation was brought back meanwhile, so it was not marked done.",
   moveElsewhere: "These conversations are not in this bot any more, so nothing was moved.",
+  treeChanged: "The tree changed since it was drawn, so nothing was moved.",
   moveNotUndone: (reason: string, titles: readonly string[]) =>
-    `${reason}. Could not be put back, so these stay where they were moved: ${titles.join(", ")}`,
+    `${reason}. These may not be where they were: ${titles.join(", ")}`,
 } as const;

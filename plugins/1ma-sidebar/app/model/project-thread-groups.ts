@@ -282,14 +282,17 @@ function buildThreadNode({
   };
 }
 
+type ParentOf = (thread: SidebarThread) => string | null;
+
+const ownParent: ParentOf = (thread) => thread.parentThreadId;
+
 function isRootThread(
   thread: SidebarThread,
   projectThreadIds: ReadonlySet<string>,
+  parentOf: ParentOf,
 ): boolean {
-  return (
-    thread.parentThreadId === null ||
-    !projectThreadIds.has(thread.parentThreadId)
-  );
+  const parentThreadId = parentOf(thread);
+  return parentThreadId === null || !projectThreadIds.has(parentThreadId);
 }
 
 export function createSidebarProjectIdResolver(
@@ -338,11 +341,14 @@ export function buildProjectThreadGroups(
   allProjectThreads: readonly SidebarThread[],
   compareThreads: ThreadComparator = compareStandardThreads,
   groupEnvironmentThreads = true,
+  parentOf: ParentOf = ownParent,
 ): ProjectThreadItem[] {
   return buildThreadTreeItems(
     allProjectThreads,
     compareThreads,
     groupEnvironmentThreads,
+    false,
+    parentOf,
   );
 }
 
@@ -351,20 +357,22 @@ function buildThreadTreeItems(
   compareThreads: ThreadComparator,
   groupEnvironmentThreads: boolean,
   respectSections = false,
+  parentOf: ParentOf = ownParent,
 ): ProjectThreadItem[] {
   const projectThreads = allThreads.filter(isSidebarProjectThread);
   const projectThreadIds = new Set(projectThreads.map((thread) => thread.id));
   const childrenByParentId = new Map<string, SidebarThread[]>();
 
   for (const thread of projectThreads) {
-    if (thread.parentThreadId === null) continue;
-    if (!projectThreadIds.has(thread.parentThreadId)) continue;
+    const parentThreadId = parentOf(thread);
+    if (parentThreadId === null) continue;
+    if (!projectThreadIds.has(parentThreadId)) continue;
 
-    const children = childrenByParentId.get(thread.parentThreadId);
+    const children = childrenByParentId.get(parentThreadId);
     if (children) {
       children.push(thread);
     } else {
-      childrenByParentId.set(thread.parentThreadId, [thread]);
+      childrenByParentId.set(parentThreadId, [thread]);
     }
   }
 
@@ -372,7 +380,7 @@ function buildThreadTreeItems(
   const rootNodes: ProjectThreadNode[] = [];
 
   for (const thread of projectThreads) {
-    if (!isRootThread(thread, projectThreadIds)) continue;
+    if (!isRootThread(thread, projectThreadIds, parentOf)) continue;
     if (visitedThreadIds.has(thread.id)) continue;
 
     rootNodes.push(

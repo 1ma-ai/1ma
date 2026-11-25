@@ -146,10 +146,25 @@ function parseDefaults(raw: string | null): ChatDefaults | null {
 }
 
 export class BotStore {
+  private changes = 0;
+  private readonly reopenings = new Map<string, number>();
+
   constructor(
     private readonly db: Database.Database,
     private readonly now: () => number = Date.now,
   ) {}
+
+  // Moves on with everything a decision reads that this plugin can observe: the
+  // bots' conversations, their order and done marks, and what bb tells about
+  // its threads. A decision takes it before its first read and compares it
+  // right before it acts, with no await in between.
+  get generation(): number {
+    return this.changes;
+  }
+
+  noteChange(): void {
+    this.changes += 1;
+  }
 
   private row(botId: string): BotRow | undefined {
     return this.db.prepare<[string], BotRow>("SELECT * FROM bots WHERE id = ?").get(botId);
@@ -328,6 +343,7 @@ export class BotStore {
     this.requireRow(botId);
     this.db.transaction(() => {
       this.db.prepare("DELETE FROM bot_threads WHERE bot_id = ?").run(botId);
+      this.noteChange();
       this.db.prepare("DELETE FROM bots WHERE id = ?").run(botId);
     })();
   }
@@ -421,7 +437,7 @@ export class BotStore {
       if (botId === null) return false;
       this.recordAssignmentDecision(threadId);
       this.bind(threadId, botId, { startedFromBot, place: { before: sourceBranch.at(-1) } });
-      for (const id of sourceBranch) this.setCompleted(id, false);
+      this.reopen(sourceBranch);
       return true;
     });
   }
@@ -436,7 +452,11 @@ export class BotStore {
   }
 
   unbind(threadId: string): void {
-    this.db.prepare("DELETE FROM bot_threads WHERE thread_id = ?").run(threadId);
+    const { changes } = this.db
+      .prepare("DELETE FROM bot_threads WHERE thread_id = ?")
+      .run(threadId);
+    this.reopenings.delete(threadId);
+    if (changes > 0) this.noteChange();
   }
 
   // The bot's order with these conversations beside the target, computed from
@@ -465,17 +485,37 @@ export class BotStore {
   private writeOrder(threadIds: readonly string[]): void {
     const write = this.db.prepare("UPDATE bot_threads SET position = ? WHERE thread_id = ?");
     threadIds.forEach((threadId, index) => write.run(index, threadId));
+    this.noteChange();
   }
 
-  setCompleted(threadId: string, completed: boolean): boolean {
-    const result = this.db
+  complete(threadId: string): boolean {
+    const { changes } = this.db
       .prepare(
-        completed
-          ? "UPDATE bot_threads SET completed_at = ? WHERE thread_id = ? AND completed_at IS NULL"
-          : "UPDATE bot_threads SET completed_at = NULL WHERE thread_id = ? AND completed_at IS NOT NULL",
+        "UPDATE bot_threads SET completed_at = ? WHERE thread_id = ? AND completed_at IS NULL",
       )
-      .run(...(completed ? [this.now(), threadId] : [threadId]));
-    return result.changes > 0;
+      .run(this.now(), threadId);
+    if (changes > 0) this.noteChange();
+    return changes > 0;
+  }
+
+  // Bringing back a conversation that is not marked counts too: whoever is
+  // about to mark it must see that.
+  reopen(threadIds: readonly string[]): boolean {
+    const clear = this.db.prepare(
+      "UPDATE bot_threads SET completed_at = NULL WHERE thread_id = ? AND completed_at IS NOT NULL",
+    );
+    return threadIds
+      .filter((threadId) => this.botOfThread(threadId) !== null)
+      .map((threadId) => {
+        this.noteChange();
+        this.reopenings.set(threadId, this.changes);
+        return clear.run(threadId).changes > 0;
+      })
+      .includes(true);
+  }
+
+  reopenedSince(threadId: string, generation: number): boolean {
+    return (this.reopenings.get(threadId) ?? generation) > generation;
   }
 
   canReach(fromBotId: string, toBotId: string): boolean {

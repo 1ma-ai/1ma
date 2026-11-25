@@ -18,7 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { strings } from "../../strings.js";
-import { branchOf } from "../branch.js";
+import { branchOf, keepsOpen } from "../branch.js";
 import { botsRpc, type BotSummary, type BotThread } from "../contract.js";
 
 export function findBot(
@@ -32,7 +32,16 @@ export function findBot(
   return null;
 }
 
-type TreeRow = Pick<PluginSidebarThread, "id" | "parentThreadId" | "isArchived" | "isHidden">;
+type TreeRow = Pick<
+  PluginSidebarThread,
+  | "id"
+  | "parentThreadId"
+  | "isArchived"
+  | "isHidden"
+  | "status"
+  | "hasPendingInteraction"
+  | "queuedWork"
+>;
 
 function isShown(threads: readonly TreeRow[], threadId: string): boolean {
   const row = threads.find((thread) => thread.id === threadId);
@@ -64,18 +73,31 @@ export function isDone(
   return branchIn(bots, threads, threadId).some((id) => findBot(bots, id)?.thread.completed);
 }
 
-// The bot's own conversations shown under the same parent, in its order.
-export function shownSiblings(
+// What "first under its own parent" puts the conversation before; null when
+// that changes nothing in its group (open or done) of the bot's tree.
+export function topTarget(
   bot: BotSummary,
   bots: readonly BotSummary[],
   threads: readonly TreeRow[],
   threadId: string,
-): string[] {
-  const parentOf = (id: string) => branchIn(bots, threads, id)[1];
-  const parentId = parentOf(threadId);
-  return bot.threads
+): { threadId: string; placement: "before"; parentThreadId: string | null } | null {
+  const parentOf = (id: string) => branchIn(bots, threads, id)[1] ?? null;
+  const keptOpen = new Set(
+    threads.filter(keepsOpen).flatMap((row) => branchIn(bots, threads, row.id)),
+  );
+  const shownDone = (id: string) =>
+    branchIn(bots, threads, id).some(
+      (above) => !keptOpen.has(above) && findBot(bots, above)?.thread.completed,
+    );
+  const parentThreadId = parentOf(threadId);
+  const siblings = bot.threads
     .map((member) => member.threadId)
-    .filter((id) => isShown(threads, id) && parentOf(id) === parentId);
+    .filter((id) => isShown(threads, id) && parentOf(id) === parentThreadId);
+  const [first] = siblings;
+  const done = shownDone(threadId);
+  if (first === undefined || siblings.find((id) => shownDone(id) === done) === threadId)
+    return null;
+  return { threadId: first, placement: "before", parentThreadId };
 }
 
 function InstructionPreview({ bot, bots }: { bot: BotSummary; bots: readonly BotSummary[] }) {
