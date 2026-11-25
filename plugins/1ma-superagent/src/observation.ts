@@ -55,8 +55,8 @@ export interface SpawnedThread extends ThreadMetadataRow {
 
 const RUNNING = new Set(["pending", "starting", "active", "stopping"]);
 
-export function isLive(thread: Pick<SpawnedThread, "status" | "queuedWork">): boolean {
-  return RUNNING.has(thread.status) || thread.queuedWork !== "none";
+export function isRunningStatus(status: string): boolean {
+  return RUNNING.has(status);
 }
 
 export interface Executor {

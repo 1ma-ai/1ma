@@ -6,9 +6,10 @@ import { repoFromRemoteUrl } from "./github/names.js";
 import {
   type Completeness,
   DefiniteSpawnFailure,
+  type Executor,
   type ServerId,
   type SpawnedThread,
-  isLive,
+  isRunningStatus,
 } from "./observation.js";
 import type { Card, QuestionKind, QuestionStore } from "./questions.js";
 import { isExcludedRepo } from "./repos.js";
@@ -220,6 +221,19 @@ function matchingRows(rows: readonly SpawnedThread[], action: ActionRow): Spawne
   });
 }
 
+async function withQueue(
+  executor: Executor,
+  rows: readonly SpawnedThread[],
+  signal: AbortSignal,
+): Promise<SpawnedThread[]> {
+  const read = await Promise.all(
+    rows.map(async (row) =>
+      (await executor.queuedWaits(row.threadId, signal)).length > 0 ? [row] : [],
+    ),
+  );
+  return read.flat();
+}
+
 function isLate(action: ActionRow, now: number): boolean {
   return (
     action.state === "canceled" &&
@@ -335,41 +349,56 @@ export async function runActions(deps: ActionDeps): Promise<void> {
       const matching = matchingRows(rows, action);
       const first = matching[0]?.threadId;
       if (first === undefined) return;
-      const live = matching.filter(isLive);
       const chats = (list: readonly SpawnedThread[]) =>
         list.map((row) => chatRef(action.serverId, row.threadId)).join(", ");
       const position = { states: ["canceled"], result: action.result } as const;
       const stillAsRead = () => admit() && deps.actions.isAt(action.id, position);
-      if (live.length === 0 && action.result === STOPPED_LATE) return;
-      if (live.length === 0 && action.result === STOPPING_LATE) {
-        if (
-          !admit() ||
-          !deps.actions.transition(action.id, position, "canceled", deps.now(), {
-            threadId: first,
-            result: STOPPED_LATE,
-          })
-        )
+      const running = matching.filter((row) => isRunningStatus(row.status));
+      const seenStopped = action.result === STOPPED_LATE;
+      let targets: readonly SpawnedThread[] = matching;
+      if (seenStopped || action.result === STOPPING_LATE) {
+        let queued: SpawnedThread[];
+        try {
+          queued = await withQueue(
+            executor,
+            matching.filter((row) => !isRunningStatus(row.status)),
+            deps.signal,
+          );
+        } catch (error) {
+          deps.warn(`reading the queues of late chats of ${action.id}: ${describeError(error)}`);
           return;
-        deps.questions.ask(
-          {
-            key: `${NOTICE_KIND}:late:${action.id}`,
-            kind: NOTICE_KIND,
-            subject: action.id,
-            expectedVersion: "1",
-            card: ackCard(
-              strings.lateTitle,
-              strings.lateObserved(chats(matching)),
-              strings.lateAffected,
-              strings.lateRecommendation,
-            ),
-            priority: 40,
-          },
-          deps.now(),
-        );
-        return;
+        }
+        if (deps.signal.aborted) return;
+        targets = [...running, ...queued];
+        if (targets.length === 0) {
+          if (
+            seenStopped ||
+            !admit() ||
+            !deps.actions.transition(action.id, position, "canceled", deps.now(), {
+              threadId: first,
+              result: STOPPED_LATE,
+            })
+          )
+            return;
+          deps.questions.ask(
+            {
+              key: `${NOTICE_KIND}:late:${action.id}`,
+              kind: NOTICE_KIND,
+              subject: action.id,
+              expectedVersion: "1",
+              card: ackCard(
+                strings.lateTitle,
+                strings.lateObserved(chats(matching)),
+                strings.lateAffected,
+                strings.lateRecommendation,
+              ),
+              priority: 40,
+            },
+            deps.now(),
+          );
+          return;
+        }
       }
-      const revived = action.result === STOPPED_LATE;
-      const targets = revived || action.result === STOPPING_LATE ? live : matching;
       const requested = await Promise.all(
         targets.map(async (row) => {
           try {
@@ -384,37 +413,42 @@ export async function runActions(deps: ActionDeps): Promise<void> {
           }
         }),
       );
-      if (
-        requested.includes(null) ||
-        !admit() ||
-        !deps.actions.transition(action.id, position, "canceled", deps.now(), {
-          threadId: first,
-          result: STOPPING_LATE,
-        })
-      )
-        return;
-      if (revived)
-        deps.questions.ask(
-          {
-            key: `${REVIVED_KIND}:${action.id}`,
-            kind: REVIVED_KIND,
-            subject: action.id,
-            expectedVersion: "1",
-            card: {
-              title: strings.revivedTitle,
-              observed: strings.revivedObserved(chats(live)),
-              affected: strings.lateAffected,
-              recommendation: strings.revivedRecommendation,
-              options: [
-                { id: "ok", label: strings.acknowledge, recommended: true },
-                { id: "keep", label: strings.revivedKeep, recommended: false },
-              ],
+      if (requested.includes(null)) return;
+      const revived = seenStopped && running.length > 0;
+      if (requested.every(Boolean)) {
+        if (seenStopped && !revived) return;
+        if (
+          !admit() ||
+          !deps.actions.transition(action.id, position, "canceled", deps.now(), {
+            threadId: first,
+            result: STOPPING_LATE,
+          })
+        )
+          return;
+        if (revived)
+          deps.questions.ask(
+            {
+              key: `${REVIVED_KIND}:${action.id}`,
+              kind: REVIVED_KIND,
+              subject: action.id,
+              expectedVersion: "1",
+              card: {
+                title: strings.revivedTitle,
+                observed: strings.revivedObserved(chats(running)),
+                affected: strings.lateAffected,
+                recommendation: strings.revivedRecommendation,
+                options: [
+                  { id: "ok", label: strings.acknowledge, recommended: true },
+                  { id: "keep", label: strings.revivedKeep, recommended: false },
+                ],
+              },
+              priority: 40,
             },
-            priority: 40,
-          },
-          deps.now(),
-        );
-      if (!requested.every(Boolean))
+            deps.now(),
+          );
+        return;
+      }
+      if (stillAsRead())
         deps.questions.ask(
           {
             key: `${NOTICE_KIND}:stopping:${action.id}`,

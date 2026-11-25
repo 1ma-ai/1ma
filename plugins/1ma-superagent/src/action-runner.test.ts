@@ -43,6 +43,7 @@ function setup() {
   const existing: Array<ThreadMetadataRow & Partial<SpawnedThread>> = [];
   const stopped: string[] = [];
   const stopping = { failures: 0 };
+  const queues = new Map<string, number>();
   const target = { remote: "https://github.com/example/app.git", excluded: [] as string[] };
   let spawnBehavior: (request: SpawnRequest) => Promise<{ threadId: string }> = async (request) => {
     const threadId = `thr_${spawned.length}`;
@@ -69,9 +70,11 @@ function setup() {
         throw new TypeError("fetch failed");
       }
       stopped.push(threadId);
+      queues.delete(threadId);
       return true;
     },
-    queuedWaits: async () => [],
+    queuedWaits: async (threadId) =>
+      Array.from({ length: queues.get(threadId) ?? 0 }, () => ({ retry: false, waitingOn: null })),
   });
   const settingsOf = (active: boolean): PluginSettings => ({
     generation: 0,
@@ -112,6 +115,7 @@ function setup() {
     existing,
     stopped,
     stopping,
+    queues,
     target,
     advance: (ms: number) => {
       clock += ms;
@@ -375,7 +379,7 @@ describe("spawn actions", () => {
     t.stopping.failures = 1;
     await t.run();
     expect(t.stopped).toEqual([]);
-    expect(t.actions.get(id)).toMatchObject({ threadId: "thr_late", result: "stopping late" });
+    expect(t.actions.get(id)).toMatchObject({ threadId: null, result: "replaced" });
     expect(titles(t)).toEqual(["Отменённый чат создан, остановить пока не удалось"]);
     await t.run();
     expect(t.stopped).toEqual(["thr_late"]);
@@ -403,12 +407,11 @@ describe("spawn actions", () => {
     expect(titles(t)).toEqual(["Остановленный чат отменённого запуска снова ожил"]);
 
     chat.status = "idle";
-    chat.queuedWork = "waiting";
+    t.queues.set("thr_late", 1);
     await t.run();
     expect(t.stopped).toEqual(["thr_late", "thr_late", "thr_late"]);
     expect(titles(t)).toEqual(["Остановленный чат отменённого запуска снова ожил"]);
 
-    chat.queuedWork = "none";
     await t.run();
     await t.run();
     expect(t.stopped).toEqual(["thr_late", "thr_late", "thr_late"]);
@@ -445,11 +448,54 @@ describe("spawn actions", () => {
     await t.run();
     await t.run();
     chat.status = "idle";
-    chat.queuedWork = "waiting";
+    t.queues.set("thr_late", 1);
     await t.run();
     expect(t.stopped).toHaveLength(before);
     expect(t.actions.get(id)?.result).toBe("kept by the owner");
     expect(t.questions.waiting().filter((item) => item.kind === REVIVED_KIND)).toEqual([]);
+  });
+
+  it("confirms no stop from an empty queue summary while the full queue still holds a message", async () => {
+    const t = setup();
+    const { id } = await lateChat(t);
+    await t.run();
+    expect(t.actions.get(id)?.result).toBe("stopping late");
+    t.queues.set("thr_late", 1);
+    await t.run();
+    expect(t.actions.get(id)?.result).toBe("stopping late");
+    expect(t.stopped).toEqual(["thr_late", "thr_late"]);
+    expect(titles(t)).toEqual([]);
+    await t.run();
+    expect(t.actions.get(id)?.result).toBe("stopped late");
+    expect(titles(t)).toEqual(["Отменённый чат всё-таки создан"]);
+  });
+
+  it("confirms no stop that was never sent after the first attempt failed", async () => {
+    const t = setup();
+    const { id } = await lateChat(t);
+    t.stopping.failures = 1;
+    await t.run();
+    expect(t.stopped).toEqual([]);
+    await t.run();
+    expect(t.stopped).toEqual(["thr_late"]);
+    expect(t.actions.get(id)?.result).toBe("stopping late");
+    await t.run();
+    expect(t.actions.get(id)?.result).toBe("stopped late");
+  });
+
+  it("clears a stopped chat's new queue without saying it came back while it is not running", async () => {
+    const t = setup();
+    const { id, chat } = await lateChat(t);
+    await t.run();
+    await t.run();
+    expect(t.actions.get(id)?.result).toBe("stopped late");
+    for (const question of t.questions.waiting()) t.questions.cancel(question.key);
+    chat.queuedWork = "waiting";
+    t.queues.set("thr_late", 1);
+    await t.run();
+    expect(t.stopped).toEqual(["thr_late", "thr_late"]);
+    expect(t.actions.get(id)?.result).toBe("stopped late");
+    expect(t.questions.waiting()).toEqual([]);
   });
 
   it("stops a revived chat again when the owner only acknowledges the card", async () => {
