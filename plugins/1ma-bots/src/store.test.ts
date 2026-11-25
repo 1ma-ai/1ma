@@ -88,8 +88,9 @@ describe("a database of an earlier version", () => {
     `);
   }
 
-  it.each([1, 4])("keeps its data, less what removed bots left (%i migrations)", (count) => {
+  it.each([1, 3, 4])("keeps its data, less what removed bots left (%i migrations)", (count) => {
     const t = open(MIGRATIONS.slice(0, count));
+    const assignment = expect.any(String);
     fill(t);
     t.migrate();
     expect(t.store.list().map(({ id, hidden }) => [id, hidden])).toEqual([
@@ -102,10 +103,12 @@ describe("a database of an earlier version", () => {
       conversations: 3,
     });
     expect(t.store.threads("bot_a", { from: "first", after: null, limit: 10 }).threads).toEqual([
-      { threadId: "thr_3", startedFromBot: false, completed: false, position: 1 },
-      { threadId: "thr_2", startedFromBot: true, completed: true, position: 2 },
-      { threadId: "thr_1", startedFromBot: false, completed: false, position: 3 },
+      { threadId: "thr_3", startedFromBot: false, completed: false, position: 1, assignment },
+      { threadId: "thr_2", startedFromBot: true, completed: true, position: 2, assignment },
+      { threadId: "thr_1", startedFromBot: false, completed: false, position: 3, assignment },
     ]);
+    const ids = ["thr_1", "thr_2", "thr_3", "thr_4"];
+    expect(new Set(ids.map((id) => t.store.assignmentOf(id)!.assignment)).size).toBe(ids.length);
     expect(
       t.store.memberPage("", 10).map(({ threadId, hiddenAt }) => [threadId, hiddenAt]),
     ).toEqual([
@@ -234,7 +237,7 @@ describe("two owners in one database", () => {
     expect(theirs.claimPendingStart("thr_9", token, null)).toBeNull();
     theirs.dropHistory(Number.MAX_SAFE_INTEGER);
     theirs.saveDefaults(bot.id, { projectId: "proj_theirs" });
-    theirs.reorderBots([]);
+    theirs.reorderBots([], []);
     for (const refused of [
       () => theirs.remove(bot.id),
       () => theirs.setHidden(bot.id, true, { kind: "owner", id: null }),
@@ -379,7 +382,11 @@ describe("what a write tells", () => {
       ["bot:A", "bots", "conversations:A", "events:A", "members:A"],
     ],
     ["a deleted conversation of no bot", ({ store }) => store.forgetThread("thr_free"), []],
-    ["a new place among the bots", ({ store }, a, b) => store.reorderBots([b, a]), ["bots"]],
+    [
+      "a new place among the bots",
+      ({ store }, a, b) => store.reorderBots([b, a], [a, b]),
+      ["bots"],
+    ],
   ])("%s", (_name, write, expected) => {
     const t = open();
     const a = botWith(t.store, "Alpha", ["thr_1", "thr_2"]);

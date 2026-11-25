@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   createFakePluginHost,
@@ -6,9 +7,17 @@ import {
   makeQueueEntry,
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
-import type { BotDetail, BotSummary, BotThread } from "./src/contract.js";
+import { keepsOpen } from "./src/branch.js";
+import {
+  botsReads,
+  botsWrites,
+  type BotDetail,
+  type BotSummary,
+  type BotThread,
+} from "./src/contract.js";
 import { RETENTION_DAYS_DEFAULT } from "./src/limits.js";
 import { BotStore } from "./src/store.js";
+import { assignmentOf, seenThread, topMove, type TreeRow } from "./src/ui/seen.js";
 import botsPlugin, {
   AUTO_COMPLETE_SCHEDULE,
   RECONCILE_SERVICE,
@@ -24,33 +33,71 @@ interface SentLetter {
   input: Array<{ type: string; text: string }>;
 }
 
+interface TurnExtra {
+  accepted?: boolean;
+  systemMessageKind?: string;
+  retryOfRequestId?: string;
+}
+
 function setup(settings: Record<string, number> = {}) {
   const delivery = { immediate: true, queued: [] as SentLetter[] };
   // The thread events bb records per conversation: turn requests, refusals
   // and provider-confirmed turn starts, in order.
-  type Row = { seq: number; createdAt: number; type: string; data: Record<string, unknown> };
+  type Scope = { kind: "thread" } | { kind: "turn"; turnId: string };
+  type Row = {
+    seq: number;
+    createdAt: number;
+    type: string;
+    scope: Scope;
+    data: Record<string, unknown>;
+  };
   const events = new Map<string, Row[]>();
   let seq = 0;
-  const push = (threadId: string, type: string, data: Record<string, unknown>) => {
+  const push = (
+    threadId: string,
+    type: string,
+    data: Record<string, unknown>,
+    scope: Scope = { kind: "thread" },
+  ) => {
     // Every event happens a moment after whatever came before it.
     clock += 1;
     seq += 1;
-    events.set(threadId, [...(events.get(threadId) ?? []), { seq, createdAt: clock, type, data }]);
+    events.set(threadId, [
+      ...(events.get(threadId) ?? []),
+      { seq, createdAt: clock, type, scope, data },
+    ]);
   };
   // kind "start": the provider starts a new turn; "steer": the message joins
   // the running turn; "rejected": the provider refuses the request.
+  // accepted: the provider also confirms which request a new turn took.
   const recordTurn = (
     threadId: string,
-    initiator: "user" | "agent",
+    initiator: "user" | "agent" | "system",
     sender: string | null,
-    kind: "start" | "steer" | "rejected" = "start",
+    kind: "start" | "steer" | "rejected" | "requested" = "start",
+    { accepted = false, ...request }: TurnExtra = {},
   ) => {
     const requestId = `req_${seq + 1}`;
-    push(threadId, "client/turn/requested", { initiator, senderThreadId: sender, requestId });
+    push(threadId, "client/turn/requested", {
+      initiator,
+      senderThreadId: sender,
+      requestId,
+      ...request,
+    });
     if (kind === "rejected")
       push(threadId, "client/turn/rejected", { requestId, message: "refused", reason: "provider" });
-    if (kind === "start") push(threadId, "turn/started", {});
-    if (kind === "steer") push(threadId, "turn/input/accepted", { clientRequestId: requestId });
+    if (kind === "start") startTurn(threadId, accepted ? requestId : null);
+    if (kind === "steer") {
+      const running = events.get(threadId)!.findLast((row) => row.type === "turn/started");
+      push(threadId, "turn/input/accepted", { clientRequestId: requestId }, running?.scope);
+    }
+    return requestId;
+  };
+  const startTurn = (threadId: string, requestId: string | null) => {
+    const scope = { kind: "turn", turnId: `turn_${seq + 1}` } as const;
+    push(threadId, "turn/started", {}, scope);
+    if (requestId !== null)
+      push(threadId, "turn/input/accepted", { clientRequestId: requestId }, scope);
   };
   const settle = (threadId: string) =>
     host.harness.behavior.emitThreadEvent("thread.idle", {
@@ -91,8 +138,13 @@ function setup(settings: Record<string, number> = {}) {
       ids: readonly string[],
     ) => Promise<void>;
     // The same right after bb worked the answer out.
-    after?: (call: "list" | "descendants" | "update", ids: readonly string[]) => Promise<void>;
+    after?: (
+      call: "get" | "list" | "descendants" | "update",
+      ids: readonly string[],
+    ) => Promise<void>;
   } = {};
+  const queuedWorkOf = (thread: { id: string; queuedMessageCount: number }) =>
+    failedQueues.has(thread.id) ? "failed" : thread.queuedMessageCount > 0 ? "waiting" : "none";
   const host = createFakePluginHost({
     pluginId: "1ma-bots",
     agentSkillIds: ["1ma-bots"],
@@ -120,7 +172,9 @@ function setup(settings: Record<string, number> = {}) {
         get: async ({ threadId }: { threadId: string }) => {
           const code = missing.get(threadId);
           if (code !== undefined) throw Object.assign(new Error("No answer"), { code });
-          return threadOf(threadId);
+          const thread = threadOf(threadId);
+          await bbCalls.after?.("get", [threadId]);
+          return thread;
         },
         experimental_listAncestors: async ({ threadIds }) => ({
           threads: threadIds.map((threadId) => {
@@ -185,11 +239,7 @@ function setup(settings: Record<string, number> = {}) {
             .map((thread) => ({
               ...thread,
               hasPendingInteraction: waiting.has(thread.id),
-              queuedWork: failedQueues.has(thread.id)
-                ? "failed"
-                : thread.queuedMessageCount > 0
-                  ? "waiting"
-                  : "none",
+              queuedWork: queuedWorkOf(thread),
             }));
           await bbCalls.after?.("list", filter.threadIds ?? []);
           return rows;
@@ -207,17 +257,20 @@ function setup(settings: Record<string, number> = {}) {
             threadId,
             types,
             limit,
+            beforeSeq,
           }: {
             threadId: string;
             types?: readonly string[];
             limit?: string;
+            beforeSeq?: string;
           }) => {
             await bbCalls.before?.("events", [threadId]);
             return (events.get(threadId) ?? [])
               .filter((row) => types === undefined || types.includes(row.type))
+              .filter((row) => beforeSeq === undefined || row.seq < Number(beforeSeq))
               .toReversed()
               .slice(0, limit === undefined ? undefined : Number(limit))
-              .map((row) => ({ id: `evt_${row.seq}`, scope: "thread", threadId, ...row }));
+              .map((row) => ({ id: `evt_${row.seq}`, threadId, ...row }));
           },
         },
       },
@@ -269,19 +322,50 @@ function setup(settings: Record<string, number> = {}) {
       }),
     );
   };
+  const bots = async () => (await rpc<{ bots: BotSummary[] }>("bots.v1.list")).bots;
   const threadsOf = async (botId: string) =>
-    (await rpc<{ threads: BotThread[] }>("bots.v1.threads", { botId })).threads.map(
-      ({ threadId, startedFromBot, completed }) => ({ threadId, startedFromBot, completed }),
+    (await rpc<{ threads: BotThread[] }>("bots.v1.threads", { botId })).threads;
+  const list = async () => ({
+    bots: await Promise.all(
+      (await bots()).map(async ({ id }) => ({
+        id,
+        threads: (await threadsOf(id)).map(({ position: _position, ...thread }) => thread),
+      })),
+    ),
+  });
+  // What a window knows of the conversations and the bots.
+  const view = async () => {
+    const members = await Promise.all(
+      (await bots()).map(async ({ id: botId }) =>
+        (await threadsOf(botId)).map(
+          ({ threadId, ...thread }) => [threadId, { botId, ...thread }] as const,
+        ),
+      ),
     );
-  const list = async () => {
-    const { bots } = await rpc<{ bots: BotSummary[] }>("bots.v1.list");
     return {
-      bots: await Promise.all(bots.map(async ({ id }) => ({ id, threads: await threadsOf(id) }))),
+      members: new Map(members.flat()),
+      rows: new Map(
+        [...threads.values()]
+          .filter((thread) => thread.deletedAt === null)
+          .map((thread): [string, TreeRow] => [
+            thread.id,
+            {
+              id: thread.id,
+              parentThreadId: thread.parentThreadId,
+              isArchived: thread.archivedAt !== null,
+              isHidden: thread.visibility !== "visible",
+              status: thread.status,
+              hasPendingInteraction: waiting.has(thread.id),
+              queuedWork: queuedWorkOf(thread),
+            },
+          ]),
+      ),
     };
   };
   return {
     bb: host.bb,
     recordTurn,
+    startTurn,
     attempt,
     settle,
     delivery,
@@ -294,6 +378,7 @@ function setup(settings: Record<string, number> = {}) {
     letter,
     dispatch,
     list,
+    view,
     threads,
     waiting,
     askedAt,
@@ -305,6 +390,8 @@ function setup(settings: Record<string, number> = {}) {
     },
   };
 }
+
+type View = Awaited<ReturnType<ReturnType<typeof setup>["view"]>>;
 
 async function threeBots() {
   const t = setup({ chainLetters: 4 });
@@ -350,7 +437,12 @@ describe("the superagent seam", () => {
     expect(configuredDuringSpawn!.instructions).toContain('You are the bot "Main"');
     const [listed] = (await t.list()).bots;
     expect(listed!.threads).toEqual([
-      { threadId: "thr_started", startedFromBot: true, completed: false },
+      {
+        threadId: "thr_started",
+        startedFromBot: true,
+        completed: false,
+        assignment: expect.any(String),
+      },
     ]);
   });
 
@@ -381,8 +473,9 @@ describe("an old conversation bound to a bot", () => {
     const t = setup();
     const bot = await t.create("Marketer");
     await t.assign("thr_old", bot.id);
-    const { threadId } = await t.rpc<{ threadId: string }>("bots.v1.continueInBot", {
+    const { threadId } = await t.rpc<{ threadId: string }>("bots.v2.continueInBot", {
       threadId: "thr_old",
+      seen: assignmentOf((await t.view()).members, "thr_old"),
     });
     const [args] = t.harness.sdk.callsTo("threads.fork")[0] as [Record<string, unknown>];
     expect(args).toMatchObject({
@@ -390,11 +483,18 @@ describe("an old conversation bound to a bot", () => {
       pluginMetadata: { startToken: expect.any(String) },
     });
     const threads = (await t.list()).bots[0]!.threads;
-    expect(threads).toContainEqual({ threadId, startedFromBot: true, completed: false });
+    const assignment = expect.any(String);
+    expect(threads).toContainEqual({
+      threadId,
+      startedFromBot: true,
+      completed: false,
+      assignment,
+    });
     expect(threads).toContainEqual({
       threadId: "thr_old",
       startedFromBot: false,
       completed: false,
+      assignment,
     });
   });
 
@@ -428,7 +528,10 @@ describe("an old conversation bound to a bot", () => {
             return continuation;
           },
         );
-        await t.rpc("bots.v1.continueInBot", { threadId: "thr_source" });
+        await t.rpc("bots.v2.continueInBot", {
+          threadId: "thr_source",
+          seen: assignmentOf((await t.view()).members, "thr_source"),
+        });
       } else {
         await created();
       }
@@ -933,8 +1036,13 @@ describe("review fixes", () => {
   it("reordering needs the complete list", async () => {
     const t = setup();
     const a = await t.create("Alpha");
-    await t.create("Beta");
-    await expect(t.rpc("bots.v1.reorderBots", { botIds: [a.id] })).rejects.toThrow(/complete/);
+    const b = await t.create("Beta");
+    const seen = [a.id, b.id];
+    await expect(t.rpc("bots.v2.reorderBots", { botIds: [a.id], seen })).rejects.toThrow(
+      /complete/,
+    );
+    await t.rpc("bots.v2.reorderBots", { botIds: [b.id, a.id], seen });
+    expect((await t.list()).bots.map((bot) => bot.id)).toEqual([b.id, a.id]);
   });
 });
 
@@ -1233,6 +1341,127 @@ describe("the owner's message steered into a running turn", () => {
   });
 });
 
+describe("bb's own notice that a sub-thread was attached or detached", () => {
+  async function doneChat() {
+    const t = await threeBots();
+    await t.dispatch("thr_a", "user", null);
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: true });
+    const notice = (
+      kind?: "start" | "requested" | "rejected",
+      extra: { accepted?: boolean; systemMessageKind?: string } = {},
+    ) =>
+      t.recordTurn("thr_a", "system", null, kind, {
+        systemMessageKind: "ownership-assigned",
+        ...extra,
+      });
+    const isDone = async () => {
+      await t.settle("thr_a");
+      return (await t.list()).bots.find((bot) => bot.id === t.a.id)!.threads[0]!.completed;
+    };
+    return { ...t, notice, isDone };
+  }
+
+  it.each(
+    ["ownership-assigned", "ownership-removed", "ownership-batch"].flatMap((systemMessageKind) =>
+      [true, false].map((accepted) => ({ systemMessageKind, accepted })),
+    ),
+  )("keeps Done ($systemMessageKind, accepted: $accepted)", async (extra) => {
+    const t = await doneChat();
+    t.notice("start", extra);
+    expect(await t.isDone()).toBe(true);
+  });
+
+  it("keeps Done when its refused turn is retried", async () => {
+    const t = await doneChat();
+    const retryOfRequestId = t.notice("rejected");
+    t.recordTurn("thr_a", "system", null, "start", { retryOfRequestId });
+    expect(await t.isDone()).toBe(true);
+  });
+
+  it("a retry of the owner's refused turn brings the conversation back", async () => {
+    const t = await doneChat();
+    const retryOfRequestId = t.recordTurn("thr_a", "user", null, "rejected");
+    expect(await t.isDone()).toBe(true);
+    t.recordTurn("thr_a", "system", null, "start", { retryOfRequestId });
+    expect(await t.isDone()).toBe(false);
+  });
+
+  it.each<[string, (t: Awaited<ReturnType<typeof doneChat>>) => unknown]>([
+    ["the owner's message", (t) => t.recordTurn("thr_a", "user", null)],
+    ["a letter", (t) => t.recordTurn("thr_a", "agent", "thr_b")],
+    [
+      "another message of bb",
+      (t) => t.recordTurn("thr_a", "system", null, "start", { systemMessageKind: "unlabeled" }),
+    ],
+    ["the owner's steered message", (t) => t.recordTurn("thr_a", "user", null, "steer")],
+  ])("%s taken before it brings the conversation back", async (_what, happens) => {
+    for (const accepted of [true, false]) {
+      const t = await doneChat();
+      happens(t);
+      t.notice("start", { accepted });
+      expect(await t.isDone()).toBe(false);
+    }
+  });
+
+  it("the owner's message steered into its turn brings the conversation back", async () => {
+    const t = await doneChat();
+    t.notice("start", { accepted: true });
+    t.recordTurn("thr_a", "user", null, "steer");
+    expect(await t.isDone()).toBe(false);
+  });
+
+  it("is told from a message taken first by the request each turn accepted", async () => {
+    const t = await doneChat();
+    const notice = t.notice("requested");
+    t.recordTurn("thr_a", "user", null, "requested");
+    t.startTurn("thr_a", notice);
+    expect(await t.isDone()).toBe(true);
+    t.startTurn("thr_a", null);
+    expect(await t.isDone()).toBe(false);
+  });
+
+  it("does not hide the owner's message behind more than one page of notices", async () => {
+    const t = await doneChat();
+    t.recordTurn("thr_a", "user", null);
+    for (let i = 0; i < 60; i += 1) t.notice();
+    expect(await t.isDone()).toBe(false);
+  });
+
+  it("is found behind more than one page of refused messages", async () => {
+    const t = await doneChat();
+    const notice = t.notice("requested");
+    for (let i = 0; i < 60; i += 1) t.recordTurn("thr_a", "user", null, "rejected");
+    t.startTurn("thr_a", notice);
+    expect(await t.isDone()).toBe(true);
+  });
+
+  it("is told from a message taken before the mark, more than one page ago", async () => {
+    const t = await doneChat();
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: false });
+    t.notice("requested");
+    t.recordTurn("thr_a", "user", null, "steer");
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: true });
+    for (let i = 0; i < 60; i += 1) t.recordTurn("thr_a", "user", null, "rejected");
+    t.startTurn("thr_a", null);
+    expect(await t.isDone()).toBe(true);
+  });
+
+  it("is not looked for in the history before the mark", async () => {
+    const t = await doneChat();
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: false });
+    const notice = t.notice("requested");
+    for (let i = 0; i < 60; i += 1) t.recordTurn("thr_a", "user", null, "rejected");
+    t.startTurn("thr_a", notice);
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: true });
+    let pages = 0;
+    t.bbCalls.before = async (call) => {
+      if (call === "events") pages += 1;
+    };
+    expect(await t.isDone()).toBe(true);
+    expect(pages).toBe(1);
+  });
+});
+
 describe("hiding a bot from the sidebar", () => {
   it.each(["thread.active", "interaction.pending"] as const)(
     "%s brings back exactly the bot whose conversation needs it",
@@ -1379,11 +1608,15 @@ describe("nested conversations", () => {
       (await t.list()).bots[0]!.threads.filter((thread) => thread.completed).map(
         (thread) => thread.threadId,
       );
-    const mark = (threadId: string, completed = true) =>
-      t.rpc("bots.v1.setCompleted", { threadId, completed });
+    // What the menu sends: the conversation as the window shows it.
+    const mark = async (threadId: string, completed = true) => {
+      const { members, rows } = await t.view();
+      const thread = seenThread(members, rows, threadId);
+      return t.rpc("bots.v2.setCompleted", { botId: bot.id, thread, completed });
+    };
     // Where a click on the bot goes.
     const clicked = async () =>
-      (await t.rpc<{ threadId: string | null }>("bots.v1.main", { botId: bot.id })).threadId;
+      (await t.rpc<{ threadId: string | null }>("bots.v2.main", { botId: bot.id })).threadId;
     // Where a letter to the bot goes.
     const lettered = async () => {
       const sender = await t.create("Sender");
@@ -1400,33 +1633,56 @@ describe("nested conversations", () => {
         interaction: {} as never,
       });
     };
-    // What the panel sends: the conversations above in the bot's tree as it knows
-    // them, and whether it drew these conversations under them.
-    const move = (
+    // What the panel sends: every conversation as it drew it, and whether it drew
+    // them under the ones above.
+    const moveInput = (
+      { members, rows }: View,
       threadIds: string[],
       placement: "before" | "after" | "inside",
       threadId: string,
-      {
-        parentThreadId = t.threads.get(threadId)?.parentThreadId ?? null,
-        levelShown = true,
-        drawn = {},
-      }: {
-        parentThreadId?: string | null;
-        levelShown?: boolean;
-        drawn?: Record<string, { parentThreadId: string | null; real: boolean }>;
-      } = {},
-    ) =>
-      t.rpc("bots.v1.moveThreads", {
-        botId: bot.id,
-        sources: threadIds.map((id) => ({
+      levelShown?: boolean,
+    ) => {
+      const kept = new Set(
+        [...rows.values()]
+          .filter((row) => !row.isArchived && !row.isHidden && keepsOpen(row))
+          .flatMap((row) => seenThread(members, rows, row.id)?.branch ?? [])
+          .map((above) => above.threadId),
+      );
+      type Branch = Array<{ threadId: string; completed: boolean }>;
+      const isDone = (branch: Branch) =>
+        branch.some((above) => above.completed && !kept.has(above.threadId));
+      const seenRow = (id: string) => {
+        const seen = seenThread(members, rows, id) ?? {
           threadId: id,
-          parentThreadId: t.threads.get(id)?.parentThreadId ?? null,
-          real: true,
-          ...drawn[id],
-        })),
-        target: { threadId, placement, parentThreadId },
-        levelShown,
-      });
+          assignment: "none",
+          parentThreadId: null,
+          branch: [{ threadId: id, completed: false }],
+        };
+        return { ...seen, shownDone: isDone(seen.branch) };
+      };
+      const sources = threadIds.map(seenRow);
+      const target = seenRow(threadId);
+      return {
+        botId: bot.id,
+        sources,
+        target: { ...target, placement },
+        levelShown:
+          levelShown ??
+          [...sources, target].every(
+            ({ branch, shownDone }) => branch.length === 1 || isDone(branch.slice(1)) === shownDone,
+          ),
+      };
+    };
+    const move = async (
+      threadIds: string[],
+      placement: "before" | "after" | "inside",
+      threadId: string,
+      { levelShown, shown }: { levelShown?: boolean; shown?: View } = {},
+    ) =>
+      t.rpc(
+        "bots.v2.moveThreads",
+        moveInput(shown ?? (await t.view()), threadIds, placement, threadId, levelShown),
+      );
     // Happens while thr_parent is checked, after its sub-threads were read.
     const duringCheck = (by: "owner" | "schedule", happens: () => Promise<unknown>) => {
       t.bbCalls.before = async (call, ids) => {
@@ -1454,6 +1710,7 @@ describe("nested conversations", () => {
       clicked,
       lettered,
       ask,
+      moveInput,
       move,
       duringCheck,
       queueEvent,
@@ -1590,7 +1847,10 @@ describe("nested conversations", () => {
       });
       if (path === "bot action") {
         t.harness.sdk.stub("threads.fork", async () => fork);
-        await t.rpc("bots.v1.continueInBot", { threadId: "thr_child" });
+        await t.rpc("bots.v2.continueInBot", {
+          threadId: "thr_child",
+          seen: assignmentOf((await t.view()).members, "thr_child"),
+        });
       } else {
         await t.harness.behavior.emitThreadEvent("thread.created", { thread: fork });
       }
@@ -1633,6 +1893,37 @@ describe("nested conversations", () => {
       expect(t.harness.experimental_rpcInvalidations).toHaveLength(before + 1);
     },
   );
+
+  it.each<[string, (t: Awaited<ReturnType<typeof botWithBranch>>) => Promise<unknown>]>([
+    ["a question", (t) => t.ask()],
+    [
+      "a turn",
+      (t) => {
+        t.recordTurn(t.grand.id, "agent", "thr_child");
+        return t.settle(t.grand.id);
+      },
+    ],
+    [
+      "a continuation",
+      (t) =>
+        t.harness.behavior.emitThreadEvent("thread.created", {
+          thread: makeThreadResponse({ id: "thr_fork", sourceThreadId: "thr_child" }),
+        }),
+    ],
+  ])("%s counts however often the tree changes while it is taken in", async (_what, happens) => {
+    const t = await botWithBranch();
+    for (const id of ["thr_child", "thr_parent"]) await t.mark(id);
+    let changes = 0;
+    t.bbCalls.before = async (call) => {
+      // One more than a request puts up with.
+      if (call !== "list" || changes === 6) return;
+      changes += 1;
+      await t.queueEvent("message.queued", "thr_other");
+    };
+    await happens(t);
+    expect(changes).toBe(6);
+    expect(await t.done()).toEqual([]);
+  });
 
   it("a turn that ran before the branch was marked keeps it done", async () => {
     const t = await botWithBranch();
@@ -1760,7 +2051,7 @@ describe("nested conversations", () => {
     t.duringCheck("owner", () => happens(t, next.id));
     await expect(t.mark("thr_parent")).rejects.toMatchObject({
       code: "conflict",
-      message: expect.stringContaining("assigned anew"),
+      message: expect.stringMatching(/tree changed/),
     });
     const { bots } = await t.list();
     expect(bots.flatMap((bot) => bot.threads).filter((thread) => thread.completed)).toEqual([]);
@@ -2171,7 +2462,7 @@ describe("nested conversations", () => {
       await t.assign("thr_other", null);
     };
     await expect(t.move(["thr_child", "thr_sibling"], "before", "thr_other")).rejects.toThrow(
-      refuses ? /bb is busy/ : /not in this bot/,
+      refuses ? /bb is busy/ : /tree changed/,
     );
     for (const [id, place] of Object.entries(places)) expect(t.place(id)).toEqual(place);
     expect(await t.order()).toEqual([
@@ -2288,6 +2579,7 @@ describe("nested conversations", () => {
       const t = await botWithBranch();
       t.nest("thr_parent", null, { sectionId: "sec_parent" });
       t.nest("thr_child", "thr_parent", { sectionId: "sec_child" });
+      const shown = await t.view();
       let fail = () => {};
       t.bbCalls.before = async (call, [id]) => {
         if (call !== "update" || id !== "thr_sibling") return;
@@ -2297,9 +2589,7 @@ describe("nested conversations", () => {
       };
       const first = t.move(["thr_child", "thr_sibling"], "before", "thr_other");
       await vi.waitFor(() => expect(t.bbCalls.before).toBeUndefined());
-      const second = t.move(["thr_child"], placement, "thr_main", {
-        drawn: { thr_child: { parentThreadId: "thr_parent", real: true } },
-      });
+      const second = t.move(["thr_child"], placement, "thr_main", { shown });
       await new Promise((resolve) => setTimeout(resolve, 20));
       fail();
       await expect(first).rejects.toThrow(/bb is busy/);
@@ -2314,11 +2604,31 @@ describe("nested conversations", () => {
     },
   );
 
+  it.each(["came to be shown", "is not shown any more"])(
+    "refuses a drop where the level above the target %s, and changes nothing",
+    async (since) => {
+      const t = await botWithBranch();
+      for (const id of ["thr_child", "thr_parent", "thr_other"]) await t.mark(id);
+      // A working sub-thread keeps thr_parent open, and so apart from its done thr_child.
+      const states = ["active", "idle"];
+      if (since === "is not shown any more") states.reverse();
+      t.nest("thr_sibling", "thr_parent", { status: states[0] });
+      const shown = await t.view();
+      t.nest("thr_sibling", "thr_parent", { status: states[1] });
+      const order = await t.order();
+      await expect(t.move(["thr_other"], "before", "thr_child", { shown })).rejects.toMatchObject({
+        code: "conflict",
+      });
+      expect(await t.order()).toEqual(order);
+      expect(t.place("thr_other").parentThreadId).toBeNull();
+    },
+  );
+
   it("a drop where the parents were not shown changes the order only", async () => {
     const t = await botWithBranch();
     for (const id of ["thr_child", "thr_other"]) await t.mark(id);
     // Done draws thr_child at the top: its parent is open.
-    await t.move(["thr_other"], "before", "thr_child", { levelShown: false });
+    await t.move(["thr_other"], "before", "thr_child");
     expect(t.place("thr_other").parentThreadId).toBeNull();
     expect(t.place("thr_child").parentThreadId).toBe("thr_parent");
     expect((await t.order()).slice(0, 2)).toEqual(["thr_other", "thr_child"]);
@@ -2378,11 +2688,10 @@ describe("nested conversations", () => {
       t.bbCalls.after = undefined;
       await t.rpc("bots.v1.remove", { botId: editor.id });
     };
-    await expect(
-      t.move(["thr_main"], "before", "thr_other", {
-        drawn: { thr_main: { parentThreadId: null, real: false } },
-      }),
-    ).rejects.toMatchObject({ code: "conflict", message: expect.stringMatching(/tree changed/) });
+    await expect(t.move(["thr_main"], "before", "thr_other")).rejects.toMatchObject({
+      code: "conflict",
+      message: expect.stringMatching(/tree changed/),
+    });
     expect(t.bbCalls.after).toBeUndefined();
     expect(t.harness.sdk.callsTo("threads.update")).toEqual([]);
     expect(await t.order()).toEqual(order);
@@ -2395,32 +2704,34 @@ describe("nested conversations", () => {
       t.nest("thr_foreign", null);
       t.nest("thr_main", "thr_foreign", { title: "Landing copy" });
       const order = await t.order();
-      await expect(
-        t.move(["thr_other", "thr_main"], placement, "thr_child", {
-          drawn: { thr_main: { parentThreadId: null, real: false } },
-        }),
-      ).rejects.toMatchObject({
-        code: "invalid",
-        message: expect.stringMatching(/^Landing copy is a sub-thread of a conversation outside/),
-      });
+      await expect(t.move(["thr_other", "thr_main"], placement, "thr_child")).rejects.toMatchObject(
+        {
+          code: "invalid",
+          message: expect.stringMatching(/^Landing copy is a sub-thread of a conversation outside/),
+        },
+      );
       expect(t.harness.sdk.callsTo("threads.update")).toEqual([]);
       expect(await t.order()).toEqual(order);
     },
   );
 
-  it.each<[string, string | null, { parentThreadId: string | null; real: boolean }]>([
-    ["under another one of the bot", "thr_parent", { parentThreadId: null, real: true }],
-    ["to the top level", null, { parentThreadId: "thr_parent", real: true }],
-    ["under a conversation outside the bot", "thr_foreign", { parentThreadId: null, real: true }],
-    ["from outside the bot to the top level", null, { parentThreadId: null, real: false }],
-  ])("refuses a drop of a conversation that moved %s since", async (_where, parent, drawn) => {
+  it.each<[string, string | null, string | null]>([
+    ["under another one of the bot", null, "thr_parent"],
+    ["to the top level", "thr_parent", null],
+    ["under a conversation outside the bot", null, "thr_foreign"],
+    ["from outside the bot to the top level", "thr_foreign", null],
+    ["from one conversation outside the bot to another", "thr_foreign", "thr_alien"],
+  ])("refuses a drop of a conversation that moved %s since", async (_where, from, to) => {
     for (const levelShown of [true, false]) {
       const t = await botWithBranch();
       t.nest("thr_foreign", null);
-      t.nest("thr_main", parent);
+      t.nest("thr_alien", null);
+      t.nest("thr_main", from);
+      const shown = await t.view();
+      t.nest("thr_main", to);
       const order = await t.order();
       await expect(
-        t.move(["thr_main"], "before", "thr_other", { levelShown, drawn: { thr_main: drawn } }),
+        t.move(["thr_main"], "before", "thr_other", { levelShown, shown }),
       ).rejects.toMatchObject({ code: "conflict", message: expect.stringMatching(/tree changed/) });
       expect(t.harness.sdk.callsTo("threads.update")).toEqual([]);
       expect(await t.order()).toEqual(order);
@@ -2464,8 +2775,11 @@ describe("nested conversations", () => {
     ["a conversation of no bot", "thr_main", (t) => t.assign("thr_other", null)],
   ])("refuses to nest with %s, and changes nothing", async (_case, target, happens) => {
     const t = await botWithBranch();
+    const shown = await t.view();
     await happens(t);
-    await expect(t.move(["thr_sibling", "thr_other"], "inside", target)).rejects.toMatchObject({
+    await expect(
+      t.move(["thr_sibling", "thr_other"], "inside", target, { shown }),
+    ).rejects.toMatchObject({
       code: "conflict",
       message: expect.stringMatching(/tree changed/),
     });
@@ -2493,12 +2807,10 @@ describe("nested conversations", () => {
     for (const levelShown of [true, false]) {
       const t = await botWithBranch();
       const order = await t.order();
+      const shown = await t.view();
       t.threads.set(id, { ...t.threads.get(id)!, ...change });
       await expect(
-        t.move(["thr_sibling", "thr_child"], "before", "thr_other", {
-          parentThreadId: null,
-          levelShown,
-        }),
+        t.move(["thr_sibling", "thr_child"], "before", "thr_other", { levelShown, shown }),
       ).rejects.toMatchObject({ code: "conflict", message: expect.stringMatching(/tree changed/) });
       expect(t.harness.sdk.callsTo("threads.update")).toEqual([]);
       expect(await t.order()).toEqual(order);
@@ -2509,9 +2821,7 @@ describe("nested conversations", () => {
     const t = await botWithBranch();
     t.nest("thr_plain", null, { archivedAt: START });
     t.nest("thr_main", "thr_plain");
-    await t.move(["thr_main"], "after", "thr_other", {
-      drawn: { thr_main: { parentThreadId: null, real: false } },
-    });
+    await t.move(["thr_main"], "after", "thr_other");
     await t.move(["thr_sibling"], "before", "thr_child");
     expect(t.harness.sdk.callsTo("threads.update")).toEqual([]);
     expect(await t.order()).toEqual([
@@ -2538,14 +2848,14 @@ describe("nested conversations", () => {
   });
 
   it.each([
-    ["a conversation of no bot", ["thr_child", "thr_plain"], "thr_main"],
-    ["a target of no bot", ["thr_child"], "thr_plain"],
-    ["the target among the moved", ["thr_child", "thr_main"], "thr_main"],
-  ])("refuses to move %s and changes nothing", async (_case, ids, target) => {
+    ["a conversation of no bot", ["thr_child", "thr_plain"], "thr_main", "conflict"],
+    ["a target of no bot", ["thr_child"], "thr_plain", "conflict"],
+    ["the target among the moved", ["thr_child", "thr_main"], "thr_main", "invalid"],
+  ])("refuses to move %s and changes nothing", async (_case, ids, target, code) => {
     const t = await botWithBranch();
     t.nest("thr_plain", null);
     const order = await t.order();
-    await expect(t.move(ids, "before", target)).rejects.toMatchObject({ code: "invalid" });
+    await expect(t.move(ids, "before", target)).rejects.toMatchObject({ code });
     expect(t.harness.sdk.callsTo("threads.update")).toEqual([]);
     expect(await t.order()).toEqual(order);
   });
@@ -2596,6 +2906,548 @@ describe("nested conversations", () => {
     const t = await botWithBranch({ autoCompleteHours: 72 });
     await t.harness.behavior.runSchedule(AUTO_COMPLETE_SCHEDULE);
     expect(await t.done()).toEqual(["thr_child", "thr_parent", "thr_sibling", "thr_other"]);
+  });
+
+  it("a conversation the owner reads while auto-complete checks it is not marked", async () => {
+    const t = await botWithBranch({ autoCompleteHours: 72 });
+    t.bbCalls.before = async (call, ids) => {
+      if (call !== "interactions" || ids[0] !== "thr_child") return;
+      t.bbCalls.before = undefined;
+      const thread = t.nest("thr_child", "thr_parent", { updatedAt: START });
+      await t.harness.behavior.emitThreadEvent("experimental_thread.read", { thread });
+    };
+    await t.harness.behavior.runSchedule(AUTO_COMPLETE_SCHEDULE);
+    expect(t.bbCalls.before).toBeUndefined();
+    expect(await t.done()).toEqual([]);
+  });
+
+  describe("a change after the window showed what a request acts on", () => {
+    async function withEditor() {
+      const t = await botWithBranch();
+      const editor = await t.create("Editor");
+      for (const id of ["thr_open", "thr_second", "thr_spare", "thr_last"])
+        await t.assign(id, t.bot.id);
+      for (const id of ["thr_open", "thr_second"]) t.nest(id, "thr_parent");
+      for (const id of ["thr_spare", "thr_last", "thr_free", "thr_foreign", "thr_alien"])
+        t.nest(id, null);
+      return { ...t, editor };
+    }
+    type Fixture = Awaited<ReturnType<typeof withEditor>>;
+
+    // What a request can depend on.
+    type Fact =
+      | "source"
+      | "source parent"
+      | "source mark"
+      | "source group"
+      | "above mark"
+      | "above parent"
+      | "target"
+      | "target parent"
+      | "target mark"
+      | "target group"
+      | "bot"
+      | "destination"
+      | "bots"
+      | "revision";
+    type Place = "source" | "target" | "ancestor";
+    type Outcome = "goes through" | "conflict" | "not_found" | "invalid";
+
+    interface Change {
+      of?: Place;
+      touches: readonly Fact[];
+      arrange?(t: Fixture, id: string): Promise<unknown>;
+      happens(t: Fixture, id: string): Promise<unknown>;
+    }
+    const assignTo = async (t: Fixture, id: string, ...botIds: Array<string | null>) => {
+      const thread = t.threads.get(id)!;
+      t.threads.set(id, { ...thread, parentThreadId: null });
+      for (const botId of botIds) await t.assign(id, botId);
+      t.threads.set(id, thread);
+    };
+    const nestUnder = (parentThreadId: string) => (t: Fixture, id: string) =>
+      t.harness.behavior.emitThreadEvent("experimental_thread.parentChanged", {
+        previousParentThreadId: t.threads.get(id)!.parentThreadId,
+        thread: t.nest(id, parentThreadId),
+      });
+    const onPlace = (of: "source" | "target"): Record<string, Change> => ({
+      [`${of} assigned to another bot`]: {
+        of,
+        touches: [of],
+        happens: (t, id) => assignTo(t, id, t.editor.id),
+      },
+      [`${of} left and came back to the bot`]: {
+        of,
+        touches: [of],
+        happens: (t, id) => assignTo(t, id, null, t.bot.id),
+      },
+      [`${of} deleted`]: {
+        of,
+        touches: [of],
+        happens: (t, id) =>
+          t.harness.behavior.emitThreadEvent("thread.deleted", {
+            thread: t.nest(id, t.threads.get(id)!.parentThreadId, { deletedAt: START }),
+          }),
+      },
+      [`${of} moved under another one of the bot`]: {
+        of,
+        touches: [`${of} parent`],
+        happens: nestUnder("thr_last"),
+      },
+      [`${of} moved from one parent outside the bot to another`]: {
+        of,
+        touches: [`${of} parent`],
+        arrange: nestUnder("thr_foreign"),
+        happens: nestUnder("thr_alien"),
+      },
+      [`${of} marked done`]: { of, touches: [`${of} mark`], happens: (t, id) => t.mark(id) },
+      [`${of} no longer marked done`]: {
+        of,
+        touches: [`${of} mark`],
+        arrange: (t, id) => t.mark(id),
+        happens: (t, id) => t.mark(id, false),
+      },
+      [`${of} marked done, but shown open again`]: {
+        of,
+        touches: [`${of} group`],
+        arrange: (t, id) => t.mark(id),
+        happens: (t, id) =>
+          t.harness.behavior.emitThreadEvent("thread.active", {
+            thread: t.nest("thr_low", id, { status: "active" }),
+          }),
+      },
+    });
+    const changes: Record<string, Change> = {
+      ...onPlace("source"),
+      ...onPlace("target"),
+      "ancestor marked done": {
+        of: "ancestor",
+        touches: ["above mark"],
+        happens: (t, id) => t.mark(id),
+      },
+      "ancestor no longer marked done": {
+        of: "ancestor",
+        touches: ["above mark"],
+        arrange: (t, id) => t.mark(id),
+        happens: (t, id) => t.mark(id, false),
+      },
+      "ancestor moved under another one of the bot": {
+        of: "ancestor",
+        touches: ["above parent"],
+        happens: nestUnder("thr_last"),
+      },
+      "bot removed": {
+        touches: ["bot", "bots"],
+        happens: (t) => t.rpc("bots.v1.remove", { botId: t.bot.id }),
+      },
+      "the bot it goes to removed": {
+        touches: ["destination", "bots"],
+        happens: (t) => t.rpc("bots.v1.remove", { botId: t.editor.id }),
+      },
+      "bot created": { touches: ["bots"], happens: (t) => t.create("Late") },
+      "bots reordered": {
+        touches: ["bots"],
+        happens: (t) =>
+          t.rpc("bots.v2.reorderBots", {
+            botIds: [t.editor.id, t.bot.id],
+            seen: [t.bot.id, t.editor.id],
+          }),
+      },
+      "bot edited": {
+        touches: ["revision"],
+        happens: (t) =>
+          t.rpc("bots.v1.update", {
+            botId: t.bot.id,
+            expectedRevision: t.bot.revision,
+            role: "Ads",
+          }),
+      },
+      "source read by the owner": {
+        of: "source",
+        touches: [],
+        happens: (t, id) =>
+          t.harness.behavior.emitThreadEvent("experimental_thread.read", {
+            thread: t.threads.get(id)!,
+          }),
+      },
+    };
+
+    interface Row extends Partial<Record<Place, string>> {
+      method: keyof typeof botsWrites;
+      does: string;
+      // Every change of these is refused, with a conflict unless named below.
+      needs: readonly Fact[];
+      // The same for a change before the request arrives, when that differs.
+      needsOnArrival?: readonly Fact[];
+      refusals?: Partial<Record<Fact, Outcome>>;
+      outcomes?: Record<string, Outcome>;
+      // Decides on what this plugin stores: bb is not asked, so nothing can
+      // change meanwhile.
+      asksBb?: false;
+      // In no bot, so it carries no mark.
+      unmarked?: true;
+      arrange?(t: Fixture): Promise<unknown>;
+      input(t: Fixture, view: View): unknown;
+    }
+    const moveNeeds = [
+      "source",
+      "source parent",
+      "source mark",
+      "source group",
+      "above mark",
+      "above parent",
+      "target",
+      "target parent",
+      "bot",
+    ] as const satisfies readonly Fact[];
+    const seenIn = ({ members, rows }: View, id: string) => seenThread(members, rows, id);
+    const toTop = ({ members, rows }: View, id: string) => topMove(members, rows, id);
+    const ofBot = { asksBb: false, source: "thr_child", refusals: { bot: "not_found" } } as const;
+    const setCompleted = {
+      source: "thr_child",
+      ancestor: "thr_parent",
+      refusals: { bot: "not_found" },
+    } as const;
+    const rows: Row[] = [
+      {
+        method: "bots.v1.create",
+        does: "creates a bot",
+        asksBb: false,
+        needs: [],
+        input: () => ({ name: "New" }),
+      },
+      {
+        ...ofBot,
+        method: "bots.v1.update",
+        does: "edits the bot",
+        needs: ["bot", "revision"],
+        input: (t) => ({ botId: t.bot.id, expectedRevision: t.bot.revision, name: "Renamed" }),
+      },
+      {
+        ...ofBot,
+        method: "bots.v1.remove",
+        does: "removes the bot",
+        needs: ["bot"],
+        input: (t) => ({ botId: t.bot.id }),
+      },
+      {
+        ...ofBot,
+        method: "bots.v1.setHidden",
+        does: "hides the bot",
+        needs: ["bot"],
+        input: (t) => ({ botId: t.bot.id, hidden: true }),
+      },
+      {
+        method: "bots.v2.reorderBots",
+        does: "reorders the bots",
+        asksBb: false,
+        needs: ["bots"],
+        input: (t) => ({ botIds: [t.editor.id, t.bot.id], seen: [t.bot.id, t.editor.id] }),
+      },
+      {
+        method: "bots.v1.startThread",
+        does: "starts a conversation",
+        source: "thr_main",
+        needs: ["bot"],
+        refusals: { bot: "not_found" },
+        input: (t) => ({ botId: t.bot.id, request: { projectId: "proj_1", input: [] } }),
+      },
+      {
+        method: "bots.v1.assign",
+        does: "assigns, as the released panel asks",
+        source: "thr_spare",
+        needs: ["source", "source parent", "bot", "destination"],
+        needsOnArrival: ["source parent", "destination"],
+        refusals: { "source parent": "invalid", destination: "not_found" },
+        outcomes: { "source deleted on the way": "not_found" },
+        input: (t) => ({ threadId: "thr_spare", botId: t.editor.id }),
+      },
+      {
+        method: "bots.v1.assign",
+        does: "takes out of its bot, as the released panel asks",
+        asksBb: false,
+        source: "thr_spare",
+        needs: [],
+        input: () => ({ threadId: "thr_spare", botId: null }),
+      },
+      {
+        method: "bots.v2.assign",
+        does: "assigns to another bot",
+        source: "thr_spare",
+        needs: ["source", "source parent", "bot", "destination"],
+        refusals: { "source parent": "invalid", destination: "not_found" },
+        input: (t, { members }) => ({
+          threadId: "thr_spare",
+          botId: t.editor.id,
+          seen: assignmentOf(members, "thr_spare"),
+        }),
+      },
+      {
+        method: "bots.v2.assign",
+        does: "assigns a conversation of no bot",
+        source: "thr_free",
+        unmarked: true,
+        needs: ["source", "source parent", "destination"],
+        refusals: { "source parent": "invalid", destination: "not_found" },
+        outcomes: {
+          "source deleted on the way": "not_found",
+          "source deleted during the read": "not_found",
+        },
+        input: (t, { members }) => ({
+          threadId: "thr_free",
+          botId: t.editor.id,
+          seen: assignmentOf(members, "thr_free"),
+        }),
+      },
+      {
+        method: "bots.v2.assign",
+        does: "takes out of its bot",
+        asksBb: false,
+        source: "thr_child",
+        ancestor: "thr_parent",
+        needs: ["source", "bot"],
+        input: (_t, { members }) => ({
+          threadId: "thr_child",
+          botId: null,
+          seen: assignmentOf(members, "thr_child"),
+        }),
+      },
+      {
+        ...setCompleted,
+        method: "bots.v1.setCompleted",
+        does: "marks done, as the released panel asks",
+        needs: ["source", "bot"],
+        needsOnArrival: ["bot"],
+        refusals: {},
+        outcomes: {
+          "bot removed on the way": "not_found",
+          "source deleted on the way": "not_found",
+          // Brought back since the request arrived.
+          "source no longer marked done during the read": "conflict",
+        },
+        input: () => ({ threadId: "thr_child", completed: true }),
+      },
+      {
+        ...setCompleted,
+        method: "bots.v1.setCompleted",
+        does: "brings back, as the released panel asks",
+        needs: ["source", "bot"],
+        needsOnArrival: ["bot"],
+        refusals: {},
+        outcomes: {
+          "bot removed on the way": "not_found",
+          "source deleted on the way": "not_found",
+        },
+        arrange: (t) => t.mark("thr_child"),
+        input: () => ({ threadId: "thr_child", completed: false }),
+      },
+      {
+        ...setCompleted,
+        method: "bots.v2.setCompleted",
+        does: "marks done",
+        needs: ["source", "source parent", "source mark", "above mark", "above parent", "bot"],
+        refusals: {},
+        input: (t, view) => ({
+          botId: t.bot.id,
+          thread: seenIn(view, "thr_child"),
+          completed: true,
+        }),
+      },
+      {
+        ...setCompleted,
+        method: "bots.v2.setCompleted",
+        does: "brings back",
+        needs: ["source", "source parent", "source mark", "above mark", "above parent", "bot"],
+        refusals: {},
+        outcomes: {
+          // It is marked already.
+          "source marked done on the way": "goes through",
+          "source marked done during the read": "goes through",
+        },
+        arrange: (t) => t.mark("thr_child"),
+        input: (t, view) => ({
+          botId: t.bot.id,
+          thread: seenIn(view, "thr_child"),
+          completed: false,
+        }),
+      },
+      ...(["before", "after", "inside"] as const).map((placement): Row => ({
+        method: "bots.v2.moveThreads",
+        does: `moves ${placement} one under the same parent`,
+        source: "thr_child",
+        target: "thr_sibling",
+        ancestor: "thr_parent",
+        needs: [...moveNeeds, "target mark", "target group"],
+        input: (t, view) => t.moveInput(view, ["thr_child"], placement, "thr_sibling"),
+      })),
+      ...(["before", "inside"] as const).map((placement): Row => ({
+        method: "bots.v2.moveThreads",
+        does: `moves ${placement} one of another level`,
+        source: "thr_child",
+        target: "thr_other",
+        ancestor: "thr_parent",
+        needs: [...moveNeeds, "target mark", "target group"],
+        input: (t, view) => t.moveInput(view, ["thr_sibling", "thr_child"], placement, "thr_other"),
+      })),
+      {
+        method: "bots.v2.moveThreads",
+        does: "moves to the top",
+        source: "thr_second",
+        target: "thr_child",
+        ancestor: "thr_parent",
+        // The target is only a place in the order, in the other group too.
+        needs: moveNeeds,
+        outcomes: {
+          // Under an outside parent it is no sibling, so the request names another one.
+          "target moved from one parent outside the bot to another on the way": "goes through",
+          "target moved from one parent outside the bot to another during the read": "goes through",
+        },
+        arrange: (t) => t.mark("thr_sibling"),
+        input: (_t, view) => toTop(view, "thr_second"),
+      },
+      {
+        method: "bots.v2.moveThreads",
+        does: "moves to the top of the bot",
+        source: "thr_spare",
+        target: "thr_main",
+        needs: moveNeeds,
+        arrange: (t) => t.mark("thr_other"),
+        input: (_t, view) => toTop(view, "thr_spare"),
+      },
+      {
+        method: "bots.v2.continueInBot",
+        does: "continues in a conversation of the bot",
+        source: "thr_child",
+        ancestor: "thr_parent",
+        needs: ["source", "bot"],
+        input: (_t, { members }) => ({
+          threadId: "thr_child",
+          seen: assignmentOf(members, "thr_child"),
+        }),
+      },
+    ];
+
+    const outcomeOf = (row: Row, name: string, { touches }: Change, when: string): Outcome => {
+      const needs = when === "on the way" ? (row.needsOnArrival ?? row.needs) : row.needs;
+      const broken = touches.find((fact) => needs.includes(fact));
+      return (
+        row.outcomes?.[`${name} ${when}`] ??
+        (broken === undefined ? "goes through" : (row.refusals?.[broken] ?? "conflict"))
+      );
+    };
+    const cells = rows.flatMap((row) =>
+      Object.entries(changes)
+        .filter(([, { of }]) => of === undefined || row[of] !== undefined)
+        .filter(([, { touches }]) => !row.unmarked || !touches.some((f) => /mark|group/.test(f)))
+        .flatMap(([name, change]) =>
+          ["on the way", ...(row.asksBb === false ? [] : ["during the read"])].map((when) => ({
+            row,
+            method: row.method,
+            does: row.does,
+            change,
+            name,
+            when,
+            outcome: outcomeOf(row, name, change, when),
+          })),
+        ),
+    );
+
+    // Everything the plugin stores and every change it asked bb for.
+    const writes = (t: Fixture) => {
+      const db = t.bb.storage.database();
+      const tables = db
+        .prepare<[], { name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .all();
+      return {
+        stored: tables.map(({ name }) => [name, db.prepare(`SELECT * FROM "${name}"`).all()]),
+        asked: (["threads.update", "threads.spawn", "threads.fork"] as const).map((call) =>
+          t.harness.sdk.callsTo(call),
+        ),
+      };
+    };
+
+    it("has a row for every method that changes something, and so has the plan", () => {
+      const plan = readFileSync(
+        new URL("../../docs/plan/2026-11-14-1ma-bots-and-sidebar-design.md", import.meta.url),
+        "utf8",
+      );
+      const planned = [...plan.matchAll(/^\| `(bots\.[^`]+)`/gm)].map((match) => match[1]);
+      const methods = Object.keys(botsWrites).sort();
+      expect([...new Set(rows.map((row) => row.method))].sort()).toEqual(methods);
+      expect([...new Set(planned)].sort()).toEqual(methods);
+    });
+
+    it("every other method changes nothing", async () => {
+      const t = await withEditor();
+      const inputs: Record<keyof typeof botsReads, unknown> = {
+        "bots.v1.list": {},
+        "bots.v1.forThread": { threadId: "thr_child" },
+        "bots.v1.forThreads": { keys: ["thr_child"] },
+        "bots.v1.threads": { botId: t.bot.id },
+        "bots.v1.get": { botId: t.bot.id },
+        "bots.v1.instructions": { botId: t.bot.id },
+        "bots.v1.mains": { keys: [t.bot.id] },
+        "bots.v1.events": { botId: t.bot.id },
+        "bots.v2.main": { botId: t.bot.id },
+      };
+      for (const method of Object.keys(botsReads) as Array<keyof typeof botsReads>) {
+        const before = writes(t);
+        await t.rpc(method, inputs[method]);
+        expect(writes(t), method).toEqual(before);
+      }
+    });
+
+    it.each(cells)(
+      "$method $does: $name $when, $outcome",
+      async ({ row, change, when, outcome }) => {
+        const t = await withEditor();
+        const id = (change.of && row[change.of]) ?? "";
+        await row.arrange?.(t);
+        await change.arrange?.(t, id);
+        const input = row.input(t, await t.view());
+        let left: ReturnType<typeof writes> | undefined;
+        const happen = async () => {
+          t.bbCalls.after = undefined;
+          await change.happens(t, id);
+          left = writes(t);
+        };
+        if (when === "on the way") await happen();
+        else t.bbCalls.after = happen;
+        const result = await t.rpc(row.method, input).then(
+          () => "goes through",
+          (error: unknown) => (error as { code?: string }).code,
+        );
+        expect(left).toBeDefined();
+        expect(result).toBe(outcome);
+        if (outcome !== "goes through") expect(writes(t)).toEqual(left);
+      },
+    );
+
+    it("a request that names another bot than its assignment's changes nothing", async () => {
+      const t = await withEditor();
+      const view = await t.view();
+      const botId = t.editor.id;
+      const move = t.moveInput(view, ["thr_child"], "inside", "thr_other");
+      const thread = seenIn(view, "thr_child");
+      const before = writes(t);
+      for (const [method, input] of [
+        ["bots.v2.moveThreads", { ...move, botId }],
+        ["bots.v2.setCompleted", { botId, thread, completed: true }],
+      ] as const)
+        await expect(t.rpc(method, input)).rejects.toMatchObject({ code: "conflict" });
+      expect(writes(t)).toEqual(before);
+    });
+
+    it.each([true, false])(
+      "a sub-thread without its own place in the bot takes no mark (Done: %s)",
+      async (completed) => {
+        const t = await withEditor();
+        if (!completed) await t.mark("thr_parent");
+        const before = writes(t);
+        await expect(t.mark("thr_grand", completed)).rejects.toMatchObject({ code: "conflict" });
+        expect(writes(t)).toEqual(before);
+      },
+    );
   });
 });
 

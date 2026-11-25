@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type Database from "better-sqlite3";
 import {
   appearanceSchema,
   chatDefaultsSchema,
   tags,
   type Appearance,
+  type Assignment,
   type BotDetail,
   type BotMember,
   type BotSummary,
@@ -19,7 +21,7 @@ import { randomAppearance } from "./appearance.js";
 import { BotsError } from "./errors.js";
 import { agentText } from "../strings.js";
 
-// The only owner of an installation without sign-in; migration 5 gives it every
+// The only owner of an installation without sign-in; migration 6 gives it every
 // row written before rows had an owner.
 export const INSTALLATION_OWNER = "installation";
 
@@ -109,6 +111,8 @@ export const MIGRATIONS = [
   `CREATE TABLE thread_assignment_decisions (thread_id TEXT PRIMARY KEY);
    INSERT INTO thread_assignment_decisions SELECT thread_id FROM bot_threads;`,
   `ALTER TABLE pending_starts ADD COLUMN beside TEXT NOT NULL DEFAULT '[]'`,
+  `ALTER TABLE bot_threads ADD COLUMN assignment TEXT NOT NULL DEFAULT '';
+   UPDATE bot_threads SET assignment = lower(hex(randomblob(16)));`,
   `${OWNED_TABLES.map(
     (table) =>
       `ALTER TABLE ${table} ADD COLUMN owner_id TEXT NOT NULL DEFAULT '${INSTALLATION_OWNER}';`,
@@ -161,6 +165,7 @@ interface ThreadRow {
   started_from_bot: number;
   completed_at: number | null;
   bound_at: number;
+  assignment: string;
 }
 
 type ThreadPlace =
@@ -185,11 +190,9 @@ export interface MemberRow {
 const PENDING_START_TTL_MS = 24 * 60 * 60 * 1000;
 const SUMMARY_COLUMNS = "id, name, role, appearance, capabilities, hidden";
 
-// Names of changes beside the tags: a thread came to another one, a
-// conversation left its bot, though it may be back in it, and one was brought
-// back, marked or not.
+// Names of changes beside the tags: a thread came to another one, and a
+// conversation was brought back, marked or not.
 export const childrenOf = (threadId: string) => `children:${threadId}`;
-export const leftBot = (threadId: string) => `left-bot:${threadId}`;
 export const broughtBack = (threadId: string) => `brought-back:${threadId}`;
 
 export function sha256(text: string): string {
@@ -202,6 +205,7 @@ function toMember(row: ThreadRow): BotMember {
     startedFromBot: row.started_from_bot === 1,
     completed: row.completed_at !== null,
     position: row.position,
+    assignment: row.assignment,
   };
 }
 
@@ -533,15 +537,12 @@ export class BotStore {
     });
   }
 
-  reorderBots(botIds: readonly string[]): void {
+  reorderBots(botIds: readonly string[], seen: readonly string[]): void {
     this.transaction(() => {
-      requireSameSet(
-        botIds,
-        this.db
-          .prepare<[string], { id: string }>("SELECT id FROM bots WHERE owner_id = ?")
-          .all(this.owner)
-          .map((row) => row.id),
-      );
+      const current = this.list().map((bot) => bot.id);
+      if (!isDeepStrictEqual(current, seen))
+        throw new BotsError("conflict", agentText.botsReordered);
+      requireSameSet(botIds, current);
       const write = this.db.prepare("UPDATE bots SET position = ? WHERE owner_id = ? AND id = ?");
       botIds.forEach((id, index) => write.run(index, this.owner, id));
       this.mark(tags.bots);
@@ -562,6 +563,11 @@ export class BotStore {
 
   boundAt(threadId: string): number | null {
     return this.threadRow(threadId)?.bound_at ?? null;
+  }
+
+  assignmentOf(threadId: string): Assignment | null {
+    const row = this.threadRow(threadId);
+    return row ? { botId: row.bot_id, assignment: row.assignment } : null;
   }
 
   completedAt(threadId: string): number | null {
@@ -623,10 +629,19 @@ export class BotStore {
       const [position] = this.positions(botId, 1, options.place);
       this.db
         .prepare(
-          `INSERT INTO bot_threads (owner_id, thread_id, bot_id, position, started_from_bot, completed_at, bound_at)
-           VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+          `INSERT INTO bot_threads
+             (owner_id, thread_id, bot_id, position, started_from_bot, completed_at, bound_at, assignment)
+           VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
         )
-        .run(this.owner, threadId, botId, position, Number(options.startedFromBot), this.now());
+        .run(
+          this.owner,
+          threadId,
+          botId,
+          position,
+          Number(options.startedFromBot),
+          this.now(),
+          randomUUID(),
+        );
       this.mark(tags.thread(threadId), tags.conversations(botId));
     });
   }
@@ -650,7 +665,7 @@ export class BotStore {
   }
 
   // A continuation is top-level: it stands before the branch its source is in,
-  // and that branch comes back from Done.
+  // and the bot's conversations in that branch come back from Done.
   bindContinuation(
     threadId: string,
     sourceThreadId: string,
@@ -663,7 +678,7 @@ export class BotStore {
       if (botId === null) return false;
       this.recordAssignmentDecision(threadId);
       this.bind(threadId, botId, { startedFromBot, place: { before: sourceBranch.at(-1) } });
-      this.reopen(sourceBranch);
+      this.reopen(sourceBranch.filter((id) => this.botOfThread(id) === botId));
       return true;
     });
   }
@@ -689,7 +704,6 @@ export class BotStore {
       )
       .get(this.owner, threadId);
     if (left === undefined) return null;
-    this.noteChange(leftBot(threadId));
     this.mark(tags.thread(threadId), tags.conversations(left.bot_id));
     return left.bot_id;
   }

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { useSectionThreadDnd } from "../app/dnd/useSectionThreadDnd.js";
 import { makeSidebarThread } from "../app/model/fixtures.js";
 import type { ProjectThreadItem } from "../app/model/project-thread-groups.js";
+import type { SeenRow } from "./bots/contract.js";
 
 type DndArgs = Parameters<typeof useSectionThreadDnd>[0];
 
@@ -57,6 +58,18 @@ const PARENTS: Record<string, string> = {
   done: "elsewhere",
 };
 
+const MEMBERS = ["main", "archived", "guest", "parent", "first", "second", "restored", "done"];
+const seen = (threadId: string): SeenRow => ({
+  threadId,
+  assignment: `joined_${threadId}`,
+  parentThreadId: THREADS.find(({ id }) => id === threadId)?.parentThreadId ?? null,
+  branch: [threadId, PARENTS[threadId] ?? []].flat().map((id) => ({
+    threadId: id,
+    completed: id === "done",
+  })),
+  shownDone: threadId === "done",
+});
+
 function renderTree(answer: () => { ok: true } = () => ({ ok: true }), threads = THREADS) {
   const moves: unknown[] = [];
   const { inspection } = renderSlot(
@@ -71,21 +84,26 @@ function renderTree(answer: () => { ok: true } = () => ({ ok: true }), threads =
         hidden: false,
       },
       members: Object.fromEntries(
-        ["main", "archived", "guest", "parent", "first", "second", "restored", "done"].map(
-          (threadId, position) => [
-            threadId,
-            { botId: "bot_m", startedFromBot: true, completed: false, position },
-          ],
-        ),
+        MEMBERS.map((threadId, position) => [
+          threadId,
+          {
+            botId: "bot_m",
+            startedFromBot: true,
+            completed: threadId === "done",
+            position,
+            assignment: `joined_${threadId}`,
+          },
+        ]),
       ),
       threads,
       compareThreads: () => 0,
       parentOf: (threadId: string) => PARENTS[threadId] ?? null,
+      seenOf: new Map([...MEMBERS, "spawned"].map((threadId) => [threadId, seen(threadId)])),
       collapsedThreadIds: new Set(),
     } as never,
     {
       rpc: {
-        "bots.v1.moveThreads": (input: unknown) => {
+        "bots.v2.moveThreads": (input: unknown) => {
           moves.push(input);
           return answer();
         },
@@ -95,12 +113,6 @@ function renderTree(answer: () => { ok: true } = () => ({ ok: true }), threads =
   const { accepts, drop, nest } = (captured.dnd as DndArgs).botReorder!;
   return { accepts, drop, nest, moves, inspection };
 }
-
-const source = (threadId: string, real = true) => ({
-  threadId,
-  parentThreadId: PARENTS[threadId] ?? null,
-  real,
-});
 
 describe("a drop on the edge of a bot's conversation", () => {
   it("takes only conversations with a place in the bot's order", () => {
@@ -121,53 +133,47 @@ describe("a drop on the edge of a bot's conversation", () => {
   });
 
   it.each([
-    [["second"], { threadId: "first", placement: "before" }, "parent"],
-    [["second", "first"], { threadId: "main", placement: "after" }, null],
-    [["main"], { threadId: "guest", placement: "after" }, null],
-    [["guest", "restored"], { threadId: "main", placement: "after" }, null],
-  ] as const)(
-    "sends %o to %o as it was dropped, in one call",
-    async (threadIds, target, parentThreadId) => {
-      const { drop, moves, inspection } = renderTree();
-      drop(threadIds, target);
-      await waitFor(() =>
-        expect(moves).toEqual([
-          {
-            botId: "bot_m",
-            sources: threadIds.map((id) => source(id, !["guest", "restored"].includes(id))),
-            target: { ...target, parentThreadId },
-            levelShown: true,
-          },
-        ]),
-      );
-      expect(inspection.sdkCalls).toEqual([]);
-      expect(captured.error).not.toHaveBeenCalled();
-    },
-  );
+    [["second"], { threadId: "first", placement: "before" }],
+    [["second", "first"], { threadId: "main", placement: "after" }],
+    [["main"], { threadId: "guest", placement: "after" }],
+    [["guest", "restored"], { threadId: "main", placement: "after" }],
+  ] as const)("sends %o to %o with what it showed, in one call", async (threadIds, target) => {
+    const { drop, moves, inspection } = renderTree();
+    drop(threadIds, target);
+    await waitFor(() =>
+      expect(moves).toEqual([
+        {
+          botId: "bot_m",
+          sources: threadIds.map(seen),
+          target: { ...seen(target.threadId), placement: target.placement },
+          levelShown: true,
+        },
+      ]),
+    );
+    expect(inspection.sdkCalls).toEqual([]);
+    expect(captured.error).not.toHaveBeenCalled();
+  });
 
   it.each([
-    ["main", "done", "elsewhere"],
-    ["done", "main", null],
-  ])(
-    "says that the level was not shown when %s goes to %s in Done",
-    async (threadId, target, parentThreadId) => {
-      const shown = ["main", "done"].map((id) =>
-        makeSidebarThread({ id, parentThreadId: PARENTS[id] ?? null }),
-      );
-      const { drop, moves } = renderTree(undefined, shown);
-      drop([threadId], { threadId: target, placement: "before" });
-      await waitFor(() =>
-        expect(moves).toEqual([
-          {
-            botId: "bot_m",
-            sources: [source(threadId)],
-            target: { threadId: target, placement: "before", parentThreadId },
-            levelShown: false,
-          },
-        ]),
-      );
-    },
-  );
+    ["main", "done"],
+    ["done", "main"],
+  ])("says that the level was not shown when %s goes to %s in Done", async (threadId, target) => {
+    const shown = ["main", "done"].map((id) =>
+      makeSidebarThread({ id, parentThreadId: PARENTS[id] ?? null }),
+    );
+    const { drop, moves } = renderTree(undefined, shown);
+    drop([threadId], { threadId: target, placement: "before" });
+    await waitFor(() =>
+      expect(moves).toEqual([
+        {
+          botId: "bot_m",
+          sources: [seen(threadId)],
+          target: { ...seen(target), placement: "before" },
+          levelShown: false,
+        },
+      ]),
+    );
+  });
 
   it.each(["drop", "nest"])("says why the move failed (%s)", async (gesture) => {
     const { drop, nest, inspection } = renderTree(() => {
@@ -187,8 +193,8 @@ describe("a drop on the middle of a bot's conversation", () => {
     expect(moves).toEqual([
       {
         botId: "bot_m",
-        sources: [source("spawned"), source("guest", false)],
-        target: { threadId: "first", placement: "inside", parentThreadId: "parent" },
+        sources: [seen("spawned"), seen("guest")],
+        target: { ...seen("first"), placement: "inside" },
         levelShown: true,
       },
     ]);

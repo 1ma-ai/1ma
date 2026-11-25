@@ -22,7 +22,7 @@ import {
   stubCall,
   stubRecords,
   thread,
-  turnsDone,
+  waitNotice,
   waitStatus,
   waitTurns,
 } from "./harness.mjs";
@@ -118,6 +118,30 @@ describe("1ma-bots on a real server", () => {
     await waitStatus(threadId, "idle");
     await rpc("bots.v1.setCompleted", { threadId, completed: true });
     assert.equal(await completedOf(bot.id, threadId), true);
+  });
+
+  it("keeps a conversation done when bb tells it about its new sub-thread", async () => {
+    const bot = await createBot("Parent Bot");
+    const ids = [];
+    for (const name of ["parent", "child"]) {
+      const id = await startConversation(bot, `[stub:reply ${name}]`);
+      ids.push(id);
+      await waitTurns(id, 1);
+      await waitStatus(id, "idle");
+    }
+    const [parent, child] = ids;
+    await rpc("bots.v1.setCompleted", { threadId: parent, completed: true });
+    await server.api("PATCH", `/threads/${child}`, { parentThreadId: parent });
+    await waitNotice(parent, "ownership-assigned", child);
+    await waitStatus(parent, "idle");
+    assert.equal(await completedOf(bot.id, parent), true);
+
+    await say(parent, "[stub:reply again]");
+    await waitFor(
+      "the owner's message brings it back",
+      60 * SECOND,
+      async () => (await completedOf(bot.id, parent)) === false,
+    );
   });
 
   it("reopens a done conversation when the owner presses Send now on a queued message", async () => {
@@ -557,7 +581,6 @@ describe("1ma-sidebar with the bots block", () => {
           (await conversations(fixture.visible.id))[0].threadId === fixture.v1 &&
           (await order())[0] === fixture.v1,
       );
-      const parentTurns = await turnsDone(fixture.v1);
       await drag(
         "inside",
         overParent('[data-sidebar-nest-target="valid"]'),
@@ -568,9 +591,9 @@ describe("1ma-sidebar with the bots block", () => {
         30 * SECOND,
         async () => (await thread(fixture.v2)).parentThreadId === fixture.v1,
       );
-      // bb tells the new parent about its child two seconds later; a turn taken
-      // after a done mark clears the mark.
-      await waitTurns(fixture.v1, parentTurns + 1);
+      // bb tells the new parent about its child two seconds later; until that
+      // turn ends, its branch does not go to Done.
+      await waitNotice(fixture.v1, "ownership-assigned", fixture.v2);
       await waitStatus(fixture.v1, "idle");
       await page.reload();
       await expandBot(page, "Visual Bot");

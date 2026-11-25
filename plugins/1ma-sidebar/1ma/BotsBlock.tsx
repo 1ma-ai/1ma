@@ -56,7 +56,7 @@ import { SidebarControlButton, SidebarRowControls } from "../app/rows/SidebarRow
 import { useBotDrop, useBotDropCount, useBotDropPlace, useBotDropTarget } from "./BotDrops.js";
 import { avatarDataUrl } from "./bots/avatar.js";
 import { keepsOpen } from "./bots/branch.js";
-import { botsRpc, type BotSummary } from "./bots/contract.js";
+import { botsRpc, type BotSummary, type SeenRow } from "./bots/contract.js";
 import { botBranches, type Members } from "./bot-threads.js";
 import { strings } from "./strings.js";
 import type { BotDropHandler } from "./thread-drop.js";
@@ -82,7 +82,7 @@ interface BotsBlockProps extends TreeState {
   onProjectSelect?: () => void;
 }
 
-// bots.v1.assign gives these answers before it writes anything: the host's
+// bots.v2.assign gives these answers before it writes anything: the host's
 // own checks of the call and the plugin's refusals (BotsError).
 const REFUSALS: ReadonlySet<PluginRpcCallError["code"]> = new Set([
   "forbidden",
@@ -121,7 +121,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
   const assign = useRpcMutation({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.assign",
+    method: "bots.v2.assign",
   });
   // Fresh reads, to learn where a conversation ended up when an assignment's
   // answer was lost.
@@ -155,8 +155,10 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
           const confirmed: string[] = [];
           let failure: unknown = null;
           for (const threadId of ordered) {
+            const member = members[threadId];
+            const seen = member ? { botId: member.botId, assignment: member.assignment } : null;
             try {
-              await assign.mutate({ threadId, botId: bot.id, place: target.place });
+              await assign.mutate({ threadId, botId: bot.id, place: target.place, seen });
               confirmed.push(threadId);
             } catch (error) {
               failure = error;
@@ -165,7 +167,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
           }
           // The call that failed is the only one in doubt: the ones before it
           // were confirmed and the ones after it were never sent. A refusal
-          // is a definite answer, since bots.v1.assign refuses only before it
+          // is a definite answer, since bots.v2.assign refuses only before it
           // writes. Any other failure may have been saved or may still be
           // saved, so its place is read again and only what the read shows is
           // counted: a conversation from elsewhere that the bot now has, or
@@ -347,9 +349,10 @@ interface BotConversations {
   compare: ThreadComparator;
   // The conversation above this one in its bot's tree.
   parentOf: (threadId: string) => string | null;
+  seenOf: ReadonlyMap<string, SeenRow>;
 }
 
-function useBotConversations(members: Members, threads: readonly PluginSidebarThread[]) {
+export function useBotConversations(members: Members, threads: readonly PluginSidebarThread[]) {
   return useMemo(() => {
     const byId = new Map(threads.map((thread) => [thread.id, thread]));
     const branches = botBranches(members, threads);
@@ -371,7 +374,11 @@ function useBotConversations(members: Members, threads: readonly PluginSidebarTh
     }
     const byBot = new Map<string, BotConversations>();
     for (const [botId, shown] of shownBy) {
-      const kept = new Set(shown.filter(keepsOpen).flatMap((thread) => branchOf(thread.id)));
+      const kept = new Set(
+        shown
+          .filter((thread) => !thread.isArchived && keepsOpen(thread))
+          .flatMap((thread) => branchOf(thread.id)),
+      );
       const marked = new Set(
         shown.map(({ id }) => id).filter((id) => members[id]?.completed && !kept.has(id)),
       );
@@ -380,12 +387,29 @@ function useBotConversations(members: Members, threads: readonly PluginSidebarTh
       );
       const doneIds = new Set(done.map((thread) => thread.id));
       const open = shown.filter((thread) => !doneIds.has(thread.id));
+      const seenOf = new Map<string, SeenRow>();
+      for (const { id, parentThreadId } of shown) {
+        const branch = branchOf(id);
+        const place = branch.map((above) => members[above]).find((found) => found);
+        if (!place) continue;
+        seenOf.set(id, {
+          threadId: id,
+          assignment: place.assignment,
+          parentThreadId,
+          branch: branch.map((threadId) => ({
+            threadId,
+            completed: members[threadId]?.completed ?? false,
+          })),
+          shownDone: doneIds.has(id),
+        });
+      }
       byBot.set(botId, {
         open,
         done,
         doneCount: done.filter(({ id }) => !doneIds.has(parentOf(id) ?? "")).length,
         compare,
         parentOf,
+        seenOf,
       });
     }
     const empty: BotConversations = {
@@ -394,6 +418,7 @@ function useBotConversations(members: Members, threads: readonly PluginSidebarTh
       doneCount: 0,
       compare: () => 0,
       parentOf,
+      seenOf: new Map(),
     };
     return {
       of: (bot: BotSummary) => byBot.get(bot.id) ?? empty,
@@ -553,11 +578,11 @@ function BotRow({
   const [showDone, setShowDone] = useState(false);
   const [composing, setComposing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const { open, done, doneCount, compare, parentOf } = conversations;
+  const { open, done, doneCount, compare, parentOf, seenOf } = conversations;
   const main = useRpcMutation({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.main",
+    method: "bots.v2.main",
   });
   // A hidden bot's conversations stay in their projects; shown here, it is
   // only a row to bring it back.
@@ -596,6 +621,7 @@ function BotRow({
     members,
     compareThreads: compare,
     parentOf,
+    seenOf,
     selectedThreadId,
     onProjectSelect,
     depthOffset: 1,

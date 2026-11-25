@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   cliCommand,
   defineCli,
@@ -15,10 +16,13 @@ import {
   chatDefaultsSchema,
   tags,
   type Actor,
+  type Assignment,
+  type AssignInput,
   type BotDetail,
   type BotSummary,
   type ChatDefaults,
   type MoveThreadsInput,
+  type SeenThread,
 } from "./src/contract.js";
 import { branchOf, keepsOpen } from "./src/branch.js";
 import { BotsError } from "./src/errors.js";
@@ -45,7 +49,6 @@ import {
   MIGRATIONS,
   broughtBack,
   childrenOf,
-  leftBot,
   sha256,
   type MemberRow,
 } from "./src/store.js";
@@ -69,6 +72,14 @@ const SPAWN_FIELDS = [
 ] as const;
 // How often a decision is read again when something it rests on changed meanwhile.
 const DECISION_READS_MAX = 5;
+// bb's limit of events in one call.
+const EVENTS_MAX = 100;
+// bb's own notice that a sub-thread was attached to a conversation or detached.
+const OWNERSHIP_NOTICES: ReadonlySet<string | undefined> = new Set([
+  "ownership-assigned",
+  "ownership-removed",
+  "ownership-batch",
+]);
 const TOOLS = [
   "bot_read",
   "bot_memory_update",
@@ -193,14 +204,16 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
 
   // Acts on a reading nothing it rests on changed under: acting awaits nothing,
   // so no change fits between the comparison and the act. `changes` is what
-  // changed since the decision was asked for.
+  // changed since the decision was asked for. A request is refused when changes
+  // do not stop; an event has nobody to refuse.
   const decide = async <T, R>(
     read: (reads: Reads) => Promise<T>,
     act: (value: T, changes: readonly string[]) => R | Promise<R>,
+    readings = DECISION_READS_MAX,
   ): Promise<R> => {
     const changes = store.watch();
     try {
-      for (let reading = 1; reading <= DECISION_READS_MAX; reading += 1) {
+      for (let reading = 1; reading <= readings; reading += 1) {
         const from = changes.length;
         const reads: Reads = new Set();
         const value = await read(reads);
@@ -221,8 +234,9 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
 
   // What the readings below take from bb: where a conversation stands (archived,
   // deleted, its parent) and what keepsOpen looks at (status, question, queue).
-  // bb has no event for visibility, a pin and a failed queue: those count from
-  // the next reading on.
+  // Of the times of update bb tells only that the owner read a conversation. It
+  // has no event for visibility, a pin, a failed queue, an answered question and
+  // a start that is being prepared: those count from the next reading on.
   for (const event of [
     "thread.created",
     "thread.archived",
@@ -233,6 +247,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     "thread.idle",
     "thread.failed",
     "interaction.pending",
+    "experimental_thread.read",
   ] as const)
     bb.events.on(event, ({ thread }) => noteThread(thread));
   for (const event of ["message.queued", "message.dispatched", "message.cancelled"] as const)
@@ -306,8 +321,8 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
 
   // The bot's own conversations from this one up to its top in the bot's tree,
   // nearest first.
-  const membersAbove = async (threadId: string) =>
-    ((await branchesOf([threadId])).get(threadId)?.threadIds ?? []).filter(
+  const membersAbove = async (threadId: string, reads: Reads) =>
+    ((await branchesOf([threadId], reads)).get(threadId)?.threadIds ?? []).filter(
       (id) => store.botOfThread(id) !== null,
     );
 
@@ -339,6 +354,54 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         }
         return [threadId, below] as const;
       }),
+    );
+  };
+
+  // Which of these conversations something in their branch keeps open.
+  const keptOpen = async (
+    threadIds: readonly string[],
+    rows: ReadonlyMap<string, ThreadRow>,
+    reads: Reads,
+  ): Promise<ReadonlySet<string>> => {
+    const below = await treesBelow(threadIds, reads);
+    return new Set(
+      threadIds.filter((threadId) =>
+        [rows.get(threadId), ...(below.get(threadId) ?? [])].some(
+          (row) => row !== undefined && keepsOpen(row),
+        ),
+      ),
+    );
+  };
+
+  // Where conversations stand in bb and in their bot's tree.
+  const standingOf = async (threadIds: readonly string[], reads: Reads) => ({
+    branches: await branchesOf(threadIds, reads),
+    rows: await rowsOf(threadIds, {}),
+  });
+  type Standing = Awaited<ReturnType<typeof standingOf>>;
+
+  const isMarked = (threadId: string) => store.completedAt(threadId) !== null;
+
+  // Whether a conversation stands where the window showed it: in the same bot
+  // since the same assignment, under the same parent in bb and in the tree, with
+  // the same marks.
+  const isAsSeen = (
+    { rows, branches }: Standing,
+    botId: string,
+    seen: SeenThread,
+    markOf: (seenMark: SeenThread["branch"][number]) => boolean = ({ threadId }) =>
+      isMarked(threadId),
+  ) => {
+    const branch = branches.get(seen.threadId)?.threadIds ?? [];
+    const assignment = branch.map((id) => store.assignmentOf(id)).find((found) => found !== null);
+    return (
+      rows.get(seen.threadId)?.parentThreadId === seen.parentThreadId &&
+      isDeepStrictEqual(assignment, { botId, assignment: seen.assignment }) &&
+      isDeepStrictEqual(
+        branch,
+        seen.branch.map(({ threadId }) => threadId),
+      ) &&
+      seen.branch.every((mark) => mark.completed === markOf(mark))
     );
   };
 
@@ -377,10 +440,8 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
           return unmarked === -1 ? ids : ids.slice(0, unmarked);
         }),
       );
-      const below = await treesBelow([...done], reads);
-      const isOpen = (threadId: string) =>
-        !done.has(threadId) ||
-        [rows.get(threadId)!, ...(below.get(threadId) ?? [])].some(keepsOpen);
+      const kept = await keptOpen([...done], rows, reads);
+      const isOpen = (threadId: string) => !done.has(threadId) || kept.has(threadId);
       unread = read.flatMap(({ botId, next }) => {
         const ids = topsOf.get(botId)!;
         const open = ids.find(isOpen);
@@ -397,56 +458,65 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
 
   const reopenBranch = async (threadId: string) => {
     store.reopen([threadId]);
-    store.reopen(await membersAbove(threadId));
+    await decide(
+      (reads) => membersAbove(threadId, reads),
+      (above) => store.reopen(above),
+      Infinity,
+    );
   };
 
   // Puts conversations beside another one of the same bot, under its parent in
-  // the bot's tree when the caller saw that level, or inside another one: all of
-  // it, or nothing.
+  // the bot's tree when the window showed that level, or inside another one: all
+  // of it, or nothing.
   const moveThreads = ({ botId, sources, target, levelShown }: MoveThreadsInput) => {
     const { placement } = target;
     const beside = placement === "inside" ? null : { threadId: target.threadId, placement };
-    const parentThreadId = beside === null ? target.threadId : target.parentThreadId;
+    const places = [...sources, target];
+    type Place = (typeof places)[number];
+    const parentOf = (place: Place) => place.branch[1]?.threadId ?? null;
+    const parentThreadId = beside === null ? target.threadId : parentOf(target);
     const threadIds = sources.map((source) => source.threadId);
     const titleOf = (row: ThreadRow) => row.title ?? row.titleFallback ?? row.id;
+    const requireSeen = (isSeen: (place: Place) => boolean) => {
+      if (!places.every(isSeen)) throw new BotsError("conflict", agentText.treeChanged);
+    };
     return decide(
       async (reads) => {
-        const drawn = [...threadIds, target.threadId];
-        return {
-          branches: await branchesOf(drawn, reads),
-          rows: await rowsOf(drawn, {}),
-        };
+        const standing = await standingOf([...threadIds, target.threadId], reads);
+        const marked = [...standing.branches.values()]
+          .flatMap((branch) => branch?.threadIds ?? [])
+          .filter(isMarked);
+        const ids = [...new Set(marked)];
+        return { ...standing, kept: await keptOpen(ids, await shownRows(ids, reads), reads) };
       },
-      async ({ branches, rows }) => {
-        if (beside !== null) store.requireMovable(botId, threadIds, beside);
-        const row = (threadId: string) => {
-          const found = rows.get(threadId);
-          if (found === undefined) throw new BotsError("conflict", agentText.treeChanged);
-          return found;
-        };
-        const stands = (
-          place: MoveThreadsInput["target"] | MoveThreadsInput["sources"][number],
-        ) => {
-          const branch = branches.get(place.threadId);
-          const { archivedAt } = row(place.threadId);
-          return (
-            branch?.botId === botId &&
-            (branch.threadIds[1] ?? null) === place.parentThreadId &&
+      async ({ kept, ...standing }) => {
+        const row = (threadId: string) => standing.rows.get(threadId)!;
+        const isDone = (branch: Place["branch"]) =>
+          branch.some(({ threadId }) => isMarked(threadId) && !kept.has(threadId));
+        // "Move to top" shows no target: it is a place in the order.
+        const isShown = (place: Place) => levelShown !== null || place !== target;
+        requireSeen(
+          (place) =>
+            isAsSeen(
+              standing,
+              botId,
+              place,
+              isShown(place) ? undefined : (mark) => mark.completed,
+            ) &&
+            (!isShown(place) || isDone(place.branch) === place.shownDone) &&
             // bb lets an archived conversation go under another one.
-            (archivedAt === null || (beside === null && place !== target))
-          );
-        };
-        const real = (source: MoveThreadsInput["sources"][number]) =>
-          row(source.threadId).parentThreadId === source.parentThreadId;
-        if (
-          ![...sources, target].every(stands) ||
-          sources.some((source) => source.real !== real(source))
-        )
-          throw new BotsError("conflict", agentText.treeChanged);
-        const moves = sources.filter(
-          (source) => (beside === null || levelShown) && source.parentThreadId !== parentThreadId,
+            (row(place.threadId).archivedAt === null || (beside === null && place !== target)),
         );
-        const outside = moves.find((source) => !source.real);
+        const isLevelShown = places.every(
+          ({ branch }) => branch.length === 1 || isDone(branch.slice(1)) === isDone(branch),
+        );
+        if (beside !== null && levelShown !== null && levelShown !== isLevelShown)
+          throw new BotsError("conflict", agentText.treeChanged);
+        if (beside !== null) store.requireMovable(botId, threadIds, beside);
+        const moves = sources.filter(
+          (source) => (beside === null || levelShown) && parentOf(source) !== parentThreadId,
+        );
+        const outside = moves.find((source) => source.parentThreadId !== parentOf(source));
         if (outside !== undefined)
           throw new BotsError("invalid", agentText.outsideParent(titleOf(row(outside.threadId))));
         const started: ThreadRow[] = [];
@@ -479,7 +549,15 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
               ...(parentThreadId === null && { sectionId: before.sectionId }),
             });
           }
-          if (beside !== null) store.moveThreads(botId, threadIds, beside);
+          if (beside !== null) {
+            requireSeen((place) =>
+              isDeepStrictEqual(store.assignmentOf(place.threadId), {
+                botId,
+                assignment: place.assignment,
+              }),
+            );
+            store.moveThreads(botId, threadIds, beside);
+          }
         } catch (error) {
           const stuck: ThreadRow[] = [];
           for (const before of started.toReversed())
@@ -751,25 +829,83 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     return null;
   };
 
-  // Done is cleared by input the provider actually took after the mark (a new
-  // turn, or a message steered into the running one), checked when the
-  // conversation settles. bb marks a thread active while it still prepares
-  // the request, and the provider may refuse it. Done covers the branch, so
-  // work in a sub-thread clears the marks above it too.
+  // When the provider last took input into a conversation after `since`: a new
+  // turn, or a message steered into the running one. What bb's own notice about
+  // a sub-thread started does not count, nor does a retry of that turn.
+  const lastInputAfter = async (threadId: string, since: number): Promise<number | null> => {
+    type Row = Awaited<ReturnType<typeof bb.sdk.threads.events.list>>[number];
+    const rows: Row[] = [];
+    let more = true;
+    const loadOlder = async () => {
+      const page = await bb.sdk.threads.events.list({
+        threadId,
+        types: [
+          "turn/started",
+          "turn/input/accepted",
+          "client/turn/requested",
+          "client/turn/rejected",
+        ],
+        order: "desc",
+        limit: String(EVENTS_MAX),
+        beforeSeq: rows.length === 0 ? undefined : String(rows.at(-1)!.seq),
+      });
+      rows.push(...page);
+      more = page.length === EVENTS_MAX;
+    };
+    const requestOf = async (fits: (requestId: string, row: Row) => boolean) => {
+      for (;;) {
+        for (const row of rows)
+          if (row.type === "client/turn/requested" && fits(row.data.requestId, row))
+            return row.data;
+        if (!more) return undefined;
+        await loadOlder();
+      }
+    };
+    for (let index = 0; ; index += 1) {
+      if (index === rows.length && more) await loadOlder();
+      const row = rows[index];
+      if (row === undefined || row.createdAt <= since) return null;
+      let request: Awaited<ReturnType<typeof requestOf>>;
+      if (row.type === "turn/input/accepted") {
+        request = await requestOf((requestId) => requestId === row.data.clientRequestId);
+      } else if (row.type === "turn/started") {
+        const hasOwnInput = rows.some(
+          (other) =>
+            other.type === "turn/input/accepted" && isDeepStrictEqual(other.scope, row.scope),
+        );
+        if (hasOwnInput) continue;
+        const isTaken = (requestId: string) =>
+          rows.some(
+            (other) =>
+              (other.type === "turn/input/accepted" && other.data.clientRequestId === requestId) ||
+              (other.type === "client/turn/rejected" && other.data.requestId === requestId),
+          );
+        request = await requestOf((requestId, asked) => asked.seq < row.seq && !isTaken(requestId));
+      } else continue;
+      const origin = request?.retryOfRequestId;
+      if (origin !== undefined) request = await requestOf((requestId) => requestId === origin);
+      if (!OWNERSHIP_NOTICES.has(request?.systemMessageKind)) return row.createdAt;
+    }
+  };
+
+  // Done is cleared by input the provider actually took after the mark, checked
+  // when the conversation settles. bb marks a thread active while it still
+  // prepares the request, and the provider may refuse it. Done covers the branch,
+  // so work in a sub-thread clears the marks above it too.
   const reopenIfTurnStarted = async (threadId: string) => {
-    const done = (await membersAbove(threadId)).filter((id) => store.completedAt(id) !== null);
-    if (done.length === 0) return;
-    const [latest] = await bb.sdk.threads.events.list({
-      threadId,
-      types: ["turn/started", "turn/input/accepted"],
-      order: "desc",
-      limit: "1",
-    });
-    if (latest === undefined) return;
-    const reopened = done.filter(
-      (id) => latest.createdAt > (store.completedAt(id) ?? latest.createdAt),
+    await decide(
+      async (reads) => {
+        const done = (await membersAbove(threadId, reads)).flatMap((id) => {
+          const at = store.completedAt(id);
+          return at === null ? [] : [{ id, at }];
+        });
+        if (done.length === 0) return [];
+        const inputAt = await lastInputAfter(threadId, Math.min(...done.map(({ at }) => at)));
+        return done.filter(({ at }) => inputAt !== null && inputAt > at).map(({ id }) => id);
+      },
+      (threadIds) => store.reopen(threadIds),
+      Infinity,
     );
-    store.reopen(reopened);
   };
   const textsOf = (blocks: ReadonlyArray<{ type: string; text?: string }>) =>
     blocks.flatMap((block) =>
@@ -791,8 +927,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       (thread.originKind === "fork" && thread.originPluginId === bb.pluginId)
     )
       return;
-    const branch = await membersAbove(sourceThreadId);
-    store.bindContinuation(thread.id, sourceThreadId, branch, false);
+    await decide(
+      (reads) => membersAbove(sourceThreadId, reads),
+      (branch) => store.bindContinuation(thread.id, sourceThreadId, branch, false),
+      Infinity,
+    );
   };
   bb.events.on("thread.created", ({ thread }) => inheritBot(thread));
   bb.experimental_hooks.on("message.dispatch", async ({ thread }) => {
@@ -956,33 +1095,85 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     await reconcile();
   });
 
-  // The same rule as the Assign to bot menu, enforced where it is written:
-  // only an existing, top-level, unarchived conversation joins a bot.
-  const requireAssignable = async (threadId: string) => {
-    let thread: Awaited<ReturnType<typeof bb.sdk.threads.get>>;
-    try {
-      thread = await bb.sdk.threads.get({ threadId });
-    } catch {
-      throw new BotsError("not_found", agentText.noSuchThread);
-    }
-    if (thread.deletedAt !== null) throw new BotsError("not_found", agentText.noSuchThread);
-    if (thread.parentThreadId !== null || thread.archivedAt !== null) {
-      throw new BotsError("invalid", agentText.notAssignable);
-    }
-  };
+  // The same rule as the Assign to bot menu, enforced where it is written: only
+  // an existing, top-level, unarchived conversation joins a bot. Every refusal
+  // comes before the write: the sidebar takes a refusal as proof that a dropped
+  // conversation did not move.
+  const assign = ({ threadId, botId, place }: AssignInput, seen: Assignment | null, actor: Actor) =>
+    decide(
+      async () =>
+        botId === null ? null : await bb.sdk.threads.get({ threadId }).catch(() => null),
+      (thread) => {
+        if (!isDeepStrictEqual(store.assignmentOf(threadId), seen))
+          throw new BotsError("conflict", agentText.reassigned);
+        if (botId !== null) {
+          store.get(botId);
+          if (thread === null || thread.deletedAt !== null)
+            throw new BotsError("not_found", agentText.noSuchThread);
+          if (thread.parentThreadId !== null || thread.archivedAt !== null)
+            throw new BotsError("invalid", agentText.notAssignable);
+        }
+        const startedFromBot = store.transaction(() => {
+          store.recordAssignmentDecision(threadId);
+          if (botId === null) {
+            store.unbind(threadId);
+            if (seen !== null) {
+              store.record({
+                botId: seen.botId,
+                kind: "thread.unassigned",
+                actor,
+                detail: { threadId },
+              });
+            }
+            return false;
+          }
+          const startedFromBot = store.members([threadId]).get(threadId)?.startedFromBot ?? false;
+          store.bind(threadId, botId, { startedFromBot, place: place ?? "last" });
+          store.record({ botId, kind: "thread.assigned", actor, detail: { threadId } });
+          return startedFromBot;
+        });
+        return { botId, startedFromBot };
+      },
+    );
 
-  const startIn = async (
-    botId: string,
+  const setCompleted = (
+    threadId: string,
+    completed: boolean,
+    requireSeen: (standing: Standing) => void,
+  ) =>
+    decide(
+      async (reads) => ({
+        below: completed ? ((await treesBelow([threadId], reads)).get(threadId) ?? []) : [],
+        standing: await standingOf([threadId], reads),
+      }),
+      ({ below, standing }, changes) => {
+        requireSeen(standing);
+        const { rows, branches } = standing;
+        if (completed) {
+          const waits = [...below, ...rows.values()].some(
+            (thread) =>
+              thread.hasPendingInteraction ||
+              thread.status === "error" ||
+              thread.queuedWork === "failed",
+          );
+          if (waits) throw new BotsError("conflict", agentText.needsOwner);
+          if (changes.includes(broughtBack(threadId)))
+            throw new BotsError("conflict", agentText.broughtBack);
+          store.complete(threadId);
+        } else {
+          store.reopen(branches.get(threadId)?.threadIds ?? []);
+        }
+        return { ok: true as const };
+      },
+    );
+
+  // A failed create keeps its token: the thread may exist anyway, and its first
+  // configure still claims it. Old tokens expire in addPendingStart.
+  const startWith = async (
+    token: string,
     create: (token: string) => Promise<{ id: string }>,
     sourceThreadId: string | null = null,
   ) => {
-    // A failed create keeps its token: the thread may exist anyway, and its
-    // first configure still claims it. Old tokens expire in addPendingStart.
-    const beside =
-      sourceThreadId === null
-        ? [(await mainThread(botId))?.threadId].filter((id) => id !== undefined)
-        : await membersAbove(sourceThreadId);
-    const token = store.addPendingStart(botId, beside);
     const thread = await create(token);
     store.claimPendingStart(thread.id, token, sourceThreadId);
     return { threadId: thread.id };
@@ -1036,43 +1227,6 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       store.setHidden(botId, hidden, actorOf(ctx));
       return { ok: true as const };
     },
-    "bots.v1.reorderBots": ({ botIds }) => {
-      store.reorderBots(botIds);
-      return { ok: true as const };
-    },
-    "bots.v1.assign": async ({ threadId, botId, place }, ctx) => {
-      // Every refusal comes before the write: the sidebar takes a refusal as
-      // proof that a dropped conversation did not move.
-      if (botId !== null) {
-        store.get(botId);
-        await requireAssignable(threadId);
-      }
-      const startedFromBot = store.transaction(() => {
-        store.recordAssignmentDecision(threadId);
-        if (botId === null) {
-          const previous = store.unbind(threadId);
-          if (previous !== null) {
-            store.record({
-              botId: previous,
-              kind: "thread.unassigned",
-              actor: actorOf(ctx),
-              detail: { threadId },
-            });
-          }
-          return false;
-        }
-        const startedFromBot = store.members([threadId]).get(threadId)?.startedFromBot ?? false;
-        store.bind(threadId, botId, { startedFromBot, place: place ?? "last" });
-        store.record({ botId, kind: "thread.assigned", actor: actorOf(ctx), detail: { threadId } });
-        return startedFromBot;
-      });
-      return { botId, startedFromBot };
-    },
-    "bots.v1.main": ({ botId }) =>
-      decide(
-        (reads) => mainThread(botId, reads),
-        (main) => ({ threadId: main?.open ? main.threadId : null }),
-      ),
     "bots.v1.mains": async ({ keys }) => {
       const mains = await mainThreads(keys);
       return Object.fromEntries(
@@ -1082,56 +1236,28 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         }),
       );
     },
-    "bots.v1.moveThreads": async (input) => {
-      await moveInTurn(input);
-      return { ok: true as const };
-    },
-    "bots.v1.setCompleted": async ({ threadId, completed }) => {
-      if (store.botOfThread(threadId) === null) throw new BotsError("not_found", agentText.notABot);
-      const requireSameAssignment = (changes: readonly string[]) => {
-        if (changes.includes(leftBot(threadId)))
+    "bots.v1.assign": (input, ctx) =>
+      assign(input, store.assignmentOf(input.threadId), actorOf(ctx)),
+    "bots.v1.setCompleted": ({ threadId, completed }) => {
+      const seen = store.assignmentOf(threadId);
+      if (seen === null) throw new BotsError("not_found", agentText.notABot);
+      return setCompleted(threadId, completed, () => {
+        if (!isDeepStrictEqual(store.assignmentOf(threadId), seen))
           throw new BotsError("conflict", agentText.reassigned);
-      };
-      if (completed) {
-        await decide(
-          async (reads) => [
-            ...((await treesBelow([threadId], reads)).get(threadId) ?? []),
-            ...(await bb.sdk.threads.list({ threadIds: [threadId] })),
-          ],
-          (branch, changes) => {
-            requireSameAssignment(changes);
-            const waits = branch.some(
-              (thread) =>
-                thread.hasPendingInteraction ||
-                thread.status === "error" ||
-                thread.queuedWork === "failed",
-            );
-            if (waits) throw new BotsError("conflict", agentText.needsOwner);
-            if (changes.includes(broughtBack(threadId)))
-              throw new BotsError("conflict", agentText.broughtBack);
-            store.complete(threadId);
-          },
-        );
-      } else {
-        await decide(
-          () => membersAbove(threadId),
-          (above, changes) => {
-            requireSameAssignment(changes);
-            store.reopen(above);
-          },
-        );
-      }
-      return { ok: true as const };
+      });
     },
     "bots.v1.startThread": async ({ botId, request }) => {
-      store.get(botId);
       const picked = Object.fromEntries(
         SPAWN_FIELDS.filter((field) => field in request).map((field) => [field, request[field]]),
       );
       // The composer's request is validated by the server's own spawn schema.
       const spawnArgs = picked as unknown as Parameters<typeof bb.sdk.threads.spawn>[0];
-      const result = await startIn(botId, (token) =>
-        bb.sdk.threads.spawn({ ...spawnArgs, pluginMetadata: { [START_TOKEN]: token } }),
+      const token = await decide(
+        (reads) => mainThread(botId, reads),
+        (main) => store.addPendingStart(botId, main === undefined ? [] : [main.threadId]),
+      );
+      const result = await startWith(token, (startToken) =>
+        bb.sdk.threads.spawn({ ...spawnArgs, pluginMetadata: { [START_TOKEN]: startToken } }),
       );
       store.saveDefaults(botId, defaultsFrom(request));
       return result;
@@ -1140,18 +1266,44 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       store.get(botId);
       return { events: store.events(botId, limit ?? 50) };
     },
-    "bots.v1.continueInBot": async ({ threadId }) => {
-      const botId = store.botOfThread(threadId);
-      if (botId === null) throw new BotsError("not_found", agentText.notABot);
-      return startIn(
-        botId,
-        (token) =>
+    "bots.v2.main": ({ botId }) =>
+      decide(
+        (reads) => mainThread(botId, reads),
+        (main) => ({ threadId: main?.open ? main.threadId : null }),
+      ),
+    "bots.v2.assign": ({ seen, ...input }, ctx) => assign(input, seen, actorOf(ctx)),
+    "bots.v2.setCompleted": ({ botId, thread, completed }) =>
+      setCompleted(thread.threadId, completed, (standing) => {
+        // A sub-thread without its own place in the bot carries no mark.
+        if (store.botOfThread(thread.threadId) !== botId || !isAsSeen(standing, botId, thread))
+          throw new BotsError("conflict", agentText.treeChanged);
+      }),
+    "bots.v2.moveThreads": async (input) => {
+      await moveInTurn(input);
+      return { ok: true as const };
+    },
+    "bots.v2.continueInBot": async ({ threadId, seen }) => {
+      const token = await decide(
+        (reads) => membersAbove(threadId, reads),
+        (branch) => {
+          if (!isDeepStrictEqual(store.assignmentOf(threadId), seen))
+            throw new BotsError("conflict", agentText.reassigned);
+          return store.addPendingStart(seen.botId, branch);
+        },
+      );
+      return startWith(
+        token,
+        (startToken) =>
           bb.sdk.threads.fork({
             sourceThreadId: threadId,
-            pluginMetadata: { [START_TOKEN]: token },
+            pluginMetadata: { [START_TOKEN]: startToken },
           }),
         threadId,
       );
+    },
+    "bots.v2.reorderBots": ({ botIds, seen }) => {
+      store.reorderBots(botIds, seen);
+      return { ok: true as const };
     },
   });
 

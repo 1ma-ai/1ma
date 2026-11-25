@@ -14,14 +14,37 @@ function bot(id: string, name: string): BotSummary {
   return { id, name, role: "", appearance, capabilities: [], hidden: false };
 }
 
-function member(botId: string, position: number, state: Partial<BotMember> = {}): BotMember {
-  return { botId, position, startedFromBot: true, completed: false, ...state };
+function membersOf(
+  botId: string,
+  threadIds: readonly string[],
+  done: readonly string[] = [],
+  startedFromBot = true,
+): Map<string, BotMember> {
+  return new Map(
+    threadIds.map((threadId, position) => [
+      threadId,
+      {
+        botId,
+        position,
+        startedFromBot,
+        completed: done.includes(threadId),
+        assignment: `joined_${threadId}`,
+      },
+    ]),
+  );
 }
+
+const membersFor = (members: ReadonlyMap<string, BotMember>, input: unknown) =>
+  Object.fromEntries(
+    botsRpc["bots.v1.forThreads"].input
+      .parse(input)
+      .keys.map((key) => [key, members.get(key) ?? null]),
+  );
 
 async function threadRow(
   threadId: string,
   bots: BotSummary[],
-  members: Record<string, BotMember>,
+  members: ReadonlyMap<string, BotMember>,
   text = "",
 ) {
   const app = await loadPluginApp(() => import("./app.js"));
@@ -33,16 +56,12 @@ async function threadRow(
       pluginId: "1ma-bots",
       rpc: {
         "bots.v1.list": () => ({ bots }),
-        "bots.v1.forThreads": (input) =>
-          Object.fromEntries(
-            botsRpc["bots.v1.forThreads"].input
-              .parse(input)
-              .keys.map((key) => [key, members[key] ?? null]),
-          ),
+        "bots.v1.forThreads": (input) => membersFor(members, input),
         "bots.v1.instructions": (input) => ({
           text: `${botsRpc["bots.v1.instructions"].input.parse(input).botId}: ${text}`,
         }),
-        "bots.v1.continueInBot": () => ({ threadId: "thr_continued" }),
+        "bots.v2.continueInBot": () => ({ threadId: "thr_continued" }),
+        "bots.v2.assign": () => ({ botId: null, startedFromBot: false }),
       },
     },
   );
@@ -50,14 +69,46 @@ async function threadRow(
 
 describe("the thread's bot row", () => {
   it("warns that a conversation bound later lacks other plugins' bot tools and offers to continue", async () => {
-    const view = await threadRow("thr_old", [bot("bot_a", "Marketer")], {
-      thr_old: member("bot_a", 1, { startedFromBot: false }),
-    });
+    const view = await threadRow(
+      "thr_old",
+      [bot("bot_a", "Marketer")],
+      membersOf("bot_a", ["thr_old"], [], false),
+    );
     await screen.findByText(strings.threadBot.notStartedFromBot);
     fireEvent.click(screen.getByRole("button", { name: strings.threadBot.continueInBot }));
     await waitFor(() =>
       expect(view.inspection.navigateCalls).toContainEqual(
         expect.objectContaining({ threadId: "thr_continued" }),
+      ),
+    );
+    expect(view.inspection.rpcCalls).toContainEqual(
+      expect.objectContaining({
+        method: "bots.v2.continueInBot",
+        input: {
+          threadId: "thr_old",
+          seen: { botId: "bot_a", assignment: "joined_thr_old" },
+        },
+      }),
+    );
+  });
+
+  it.each([
+    ["Editor", "bot_b"],
+    [strings.threadBot.none, null],
+  ])("names the assignment it shows when it assigns to %s", async (choice, botId) => {
+    const view = await threadRow(
+      "thr_a",
+      [bot("bot_a", "Marketer"), bot("bot_b", "Editor")],
+      membersOf("bot_a", ["thr_a"]),
+    );
+    fireEvent.keyDown(await screen.findByRole("button", { name: "Marketer" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: choice }));
+    await waitFor(() =>
+      expect(view.inspection.rpcCalls).toContainEqual(
+        expect.objectContaining({
+          method: "bots.v2.assign",
+          input: { threadId: "thr_a", botId, seen: { botId: "bot_a", assignment: "joined_thr_a" } },
+        }),
       ),
     );
   });
@@ -66,7 +117,7 @@ describe("the thread's bot row", () => {
     await threadRow(
       "thr_a",
       [bot("bot_a", "Marketer"), bot("bot_b", "Analyst")],
-      { thr_a: member("bot_a", 1), thr_b: member("bot_b", 1) },
+      new Map([...membersOf("bot_a", ["thr_a"]), ...membersOf("bot_b", ["thr_b"])]),
       "Write a short brief.",
     );
     fireEvent.click(await screen.findByRole("button", { name: strings.threadBot.preview }));
@@ -77,7 +128,7 @@ describe("the thread's bot row", () => {
   });
 
   it("says nothing more for a conversation started from the bot", async () => {
-    await threadRow("thr_new", [bot("bot_a", "Marketer")], { thr_new: member("bot_a", 1) });
+    await threadRow("thr_new", [bot("bot_a", "Marketer")], membersOf("bot_a", ["thr_new"]));
     await screen.findByText("Marketer");
     expect(screen.queryByText(strings.threadBot.notStartedFromBot)).toBeNull();
   });
@@ -138,13 +189,11 @@ describe("Assign to bot in a thread's menu", () => {
 
   it("offers every bot, marks the current one and can take the thread out", async () => {
     const { assignToBotAction } = await import("./src/ui/assign-action.js");
-    const calls: Array<[string, string | null]> = [];
+    const assign = vi.fn();
     const data = {
       bots: [bot("bot_a", "Marketer"), bot("bot_b", "Accountant")],
-      members: new Map([["thr_1", member("bot_a", 1)]]),
-      assign: async (threadId: string, botId: string | null) => {
-        calls.push([threadId, botId]);
-      },
+      members: membersOf("bot_a", ["thr_1"], [], false),
+      assign,
     };
     const item = assignToBotAction.item({ thread, data } as never)!;
     expect(item.choices!.items.map((choice) => [choice.id, choice.selected ?? false])).toEqual([
@@ -154,10 +203,50 @@ describe("Assign to bot in a thread's menu", () => {
     ]);
     await item.run({ value: "bot_b" } as never);
     await item.run({ value: "none" } as never);
-    expect(calls).toEqual([
-      ["thr_1", "bot_b"],
-      ["thr_1", null],
+    const seen = { botId: "bot_a", assignment: "joined_thr_1" };
+    expect(assign.mock.calls).toEqual([
+      ["thr_1", "bot_b", seen],
+      ["thr_1", null, seen],
     ]);
+    const other = { id: "thr_2", parentThreadId: null, archivedAt: null } as never;
+    await assignToBotAction
+      .item({ thread: other, data } as never)!
+      .run({ value: "bot_a" } as never);
+    expect(assign).toHaveBeenLastCalledWith("thr_2", "bot_a", null);
+  });
+
+  it("names the assignment it shows in the request", async () => {
+    const app = await loadPluginApp(() => import("./app.js"));
+    const action = app.threadActions.find(({ id }) => id === "assign-to-bot")!;
+    function Probe() {
+      const data = action.useData!({ threadIds: ["thr_1"] } as never);
+      const item = action.item({ thread, data } as never);
+      return (
+        <button onClick={() => void item?.run({ value: "none" } as never)}>{item?.label}</button>
+      );
+    }
+    const view = renderSlot({ component: Probe as never }, {} as never, {
+      pluginId: "1ma-bots",
+      rpc: {
+        "bots.v1.list": () => ({ bots: [bot("bot_a", "Marketer")] }),
+        "bots.v1.forThreads": (input) => membersFor(membersOf("bot_a", ["thr_1"]), input),
+        "bots.v2.assign": () => ({ botId: null, startedFromBot: false }),
+      },
+    });
+    fireEvent.click(await screen.findByText(strings.threadBot.choose));
+    await waitFor(() =>
+      expect(view.inspection.rpcCalls).toContainEqual(
+        expect.objectContaining({
+          method: "bots.v2.assign",
+          input: {
+            threadId: "thr_1",
+            botId: null,
+            place: "last",
+            seen: { botId: "bot_a", assignment: "joined_thr_1" },
+          },
+        }),
+      ),
+    );
   });
 
   it("is absent for child conversations and when there are no bots", async () => {
@@ -179,11 +268,7 @@ describe("Assign to bot in a thread's menu", () => {
 
 describe("bot conversation menu", () => {
   const thread = { id: "thr_b", parentThreadId: null, archivedAt: null };
-  const members = new Map([
-    ["thr_c", member("bot_a", 3)],
-    ["thr_b", member("bot_a", 2, { completed: true })],
-    ["thr_a", member("bot_a", 1)],
-  ]);
+  const members = membersOf("bot_a", ["thr_a", "thr_b", "thr_c"], ["thr_b"]);
   const row = (id: string, parentThreadId: string | null = null, state = {}) => ({
     id,
     parentThreadId,
@@ -211,47 +296,70 @@ describe("bot conversation menu", () => {
       } as never);
     return { item, move };
   }
-  const placeBefore = (threadId: string, target: string, parentThreadId: string | null = null) => ({
-    botId: "bot_a",
-    sources: [{ threadId, parentThreadId, real: true }],
-    target: { threadId: target, placement: "before", parentThreadId },
-    levelShown: false,
+  const seen = (threadId: string, above: string[] = [], done: string[] = []) => ({
+    threadId,
+    assignment: `joined_${threadId}`,
+    parentThreadId: above[0] ?? null,
+    branch: [threadId, ...above].map((id) => ({ threadId: id, completed: done.includes(id) })),
   });
-  const inOrder = (ids: string[], done: string[] = []) =>
-    new Map(ids.map((id, index) => [id, member("bot_a", index, { completed: done.includes(id) })]));
+  // source and target: a conversation, the ones above it, and the marked ones of these.
+  type Shown = [threadId: string, above?: string[], done?: string[]];
+  const placeBefore = (
+    source: Shown,
+    target: Shown,
+    [sourceDone, targetDone] = [false, false],
+  ) => ({
+    botId: "bot_a",
+    sources: [{ ...seen(...source), shownDone: sourceDone }],
+    target: { ...seen(...target), shownDone: targetDone, placement: "before" },
+    levelShown: null,
+  });
   it("moves the selected conversation ahead of the others", async () => {
     const { item, move } = await moveToTop([row("thr_a"), row("thr_b"), row("thr_c")], "thr_c");
     await item!.run({} as never);
-    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_c", "thr_a"));
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore(["thr_c"], ["thr_a"]));
     expect((await moveToTop([row("thr_project")], "thr_project")).item).toBeNull();
   });
-  it("says that the parent of a conversation it moves is outside the bot", async () => {
+  it("names the parent in bb of a conversation it moves, outside the bot too", async () => {
     const tree = [row("thr_a"), row("thr_b"), row("thr_c", "thr_elsewhere"), row("thr_elsewhere")];
     const { item, move } = await moveToTop(tree, "thr_c");
     await item!.run({} as never);
     expect(move.mutate).toHaveBeenCalledExactlyOnceWith({
-      ...placeBefore("thr_c", "thr_a"),
-      sources: [{ threadId: "thr_c", parentThreadId: null, real: false }],
+      ...placeBefore(["thr_c"], ["thr_a"]),
+      sources: [{ ...seen("thr_c"), parentThreadId: "thr_elsewhere", shownDone: false }],
     });
   });
   it("offers Move to top among the conversations under the same parent", async () => {
     const tree = [row("thr_a"), row("thr_b", "thr_a"), row("thr_c", "thr_a")];
-    const open = inOrder(["thr_a", "thr_b", "thr_c"]);
+    const open = membersOf("bot_a", ["thr_a", "thr_b", "thr_c"]);
     expect((await moveToTop(tree, "thr_b", open)).item).toBeNull();
     const { item, move } = await moveToTop(tree, "thr_c", open);
     await item!.run({} as never);
-    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_c", "thr_b", "thr_a"));
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(
+      placeBefore(["thr_c", ["thr_a"]], ["thr_b", ["thr_a"]]),
+    );
     expect((await moveToTop(tree, "thr_a", open)).item).toBeNull();
   });
   it("offers Move to top only when it changes the place in its group of the tree", async () => {
     const tree = [row("thr_a"), row("thr_b"), row("thr_c")];
     // thr_b is the only done one and stands first in Done.
     expect((await moveToTop(tree, "thr_b")).item).toBeNull();
-    const doneFirst = inOrder(["thr_b", "thr_a", "thr_c"], ["thr_b", "thr_c"]);
+    const doneFirst = membersOf("bot_a", ["thr_b", "thr_a", "thr_c"], ["thr_b", "thr_c"]);
     expect((await moveToTop(tree, "thr_a", doneFirst)).item).toBeNull();
     const { item, move } = await moveToTop(tree, "thr_c", doneFirst);
     await item!.run({} as never);
-    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_c", "thr_b"));
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(
+      placeBefore(["thr_c", [], ["thr_c"]], ["thr_b", [], ["thr_b"]], [true, true]),
+    );
+  });
+  it("puts a done conversation before the first open one when that stands first", async () => {
+    const done = membersOf("bot_a", ["thr_a", "thr_b", "thr_c"], ["thr_b", "thr_c"]);
+    const tree = [row("thr_a"), row("thr_b"), row("thr_c")];
+    const { item, move } = await moveToTop(tree, "thr_c", done);
+    await item!.run({} as never);
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(
+      placeBefore(["thr_c", [], ["thr_c"]], ["thr_a"], [true, false]),
+    );
   });
   it("counts a done conversation kept open by its sub-thread among the open ones", async () => {
     const tree = [row("thr_a"), row("thr_b"), row("thr_c"), row("thr_low", "thr_b")];
@@ -259,17 +367,35 @@ describe("bot conversation menu", () => {
     const working = [...tree.slice(0, 3), row("thr_low", "thr_b", { status: "active" })];
     const { item, move } = await moveToTop(working, "thr_b");
     await item!.run({} as never);
-    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_b", "thr_a"));
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(
+      placeBefore(["thr_b", [], ["thr_b"]], ["thr_a"]),
+    );
   });
+  it.each([{ isArchived: true }, { isHidden: true }])(
+    "a working sub-thread the list does not show (%o) keeps no done conversation open",
+    async (state) => {
+      const low = row("thr_low", "thr_b", { status: "active", ...state });
+      const tree = [row("thr_a"), row("thr_b"), row("thr_c"), low];
+      expect((await moveToTop(tree, "thr_b")).item).toBeNull();
+    },
+  );
   it.each([{ isArchived: true }, { isHidden: true }])(
     "does not count a conversation the list does not show (%o) as the top",
     async (state) => {
       const tree = [row("thr_a", null, state), row("thr_b", "thr_a"), row("thr_c")];
-      const open = inOrder(["thr_a", "thr_b", "thr_c"]);
+      const open = membersOf("bot_a", ["thr_a", "thr_b", "thr_c"]);
       expect((await moveToTop(tree, "thr_b", open)).item).toBeNull();
       const { item, move } = await moveToTop(tree, "thr_c", open);
       await item!.run({} as never);
-      expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_c", "thr_b"));
+      expect(move.mutate).toHaveBeenCalledExactlyOnceWith({
+        ...placeBefore(["thr_c"], ["thr_b"]),
+        target: {
+          ...seen("thr_b"),
+          parentThreadId: "thr_a",
+          shownDone: false,
+          placement: "before",
+        },
+      });
     },
   );
   it("reopens a completed conversation from the same menu", async () => {
@@ -278,13 +404,20 @@ describe("bot conversation menu", () => {
     const mutate = vi.fn();
     const action = toggle.item({
       thread,
-      data: { members, rows: new Map(), setCompleted: { mutate } },
+      data: { members, rows: rowsOf([row("thr_b")]), setCompleted: { mutate } },
     } as never)!;
     expect(action.label).toBe(strings.threadBot.markNotDone);
     await action.run({} as never);
-    expect(mutate).toHaveBeenCalledExactlyOnceWith({ threadId: thread.id, completed: false });
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({
+      botId: "bot_a",
+      thread: seen("thr_b", [], ["thr_b"]),
+      completed: false,
+    });
     expect(
-      toggle.item({ thread: { ...thread, id: "thr_project" }, data: { members } } as never),
+      toggle.item({
+        thread: { ...thread, id: "thr_project" },
+        data: { members, rows: rowsOf([row("thr_b")]) },
+      } as never),
     ).toBeNull();
   });
   it("says Not done for a sub-chat that is done with the conversation above it", async () => {
@@ -295,7 +428,7 @@ describe("bot conversation menu", () => {
       toggle.item({
         thread: { id, archivedAt: null },
         data: {
-          members: new Map([...members, ["thr_guest", member("bot_g", 1)]]),
+          members: new Map([...members, ...membersOf("bot_g", ["thr_guest"])]),
           rows: rowsOf([
             row("thr_b"),
             row("thr_c", "thr_spawned"),
@@ -308,7 +441,11 @@ describe("bot conversation menu", () => {
       } as never)!;
     expect(item("thr_c").label).toBe(strings.threadBot.markNotDone);
     await item("thr_c").run({} as never);
-    expect(mutate).toHaveBeenCalledExactlyOnceWith({ threadId: "thr_c", completed: false });
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({
+      botId: "bot_a",
+      thread: seen("thr_c", ["thr_spawned", "thr_b"], ["thr_b"]),
+      completed: false,
+    });
     expect(item("thr_guest").label).toBe(strings.threadBot.markDone);
     expect(item("thr_a").label).toBe(strings.threadBot.markDone);
   });

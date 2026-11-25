@@ -7,7 +7,7 @@ const members = (threadIds: string[], botId = "bot_1") =>
   Object.fromEntries(
     threadIds.map((threadId, position) => [
       threadId,
-      { botId, startedFromBot: true, completed: false, position },
+      { botId, startedFromBot: true, completed: false, position, assignment: "" },
     ]),
   );
 
