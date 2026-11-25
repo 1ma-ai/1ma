@@ -564,53 +564,56 @@ describe("1ma-superagent bot actions with a model turn", () => {
 
   it("keeps a decision taken through decide when the control server is killed before the request is sent, and starts the chat once", async () => {
     await clearCards();
-    control.bb(["plugin", "config", PLUGIN, "set", "passEnabled", "false"]);
     const known = await knownActions();
     const prompt = "[stub:reply crash task]";
     await sayToBot(startCall(prompt, "crash task"));
     const created = await newestAction(known);
     const card = await waitCard("start card", (data) => data.quote === prompt);
     const { questionId, token, waiting } = card.payload.data;
-    const decided = await control.rpc(PLUGIN, "questions.v1.decide", {
-      questionId,
-      token,
-      optionId: "start",
-    });
-    assert.equal(decided.outcome, "applied");
-    assert.equal((await action(created.id)).state, "confirmed");
-    const recorded = { open: false, decided: "start", outdated: null, waiting };
-    assert.deepEqual(
-      await control.rpc(PLUGIN, "questions.v1.state", { questionId, token }),
-      recorded,
-    );
-    assert.deepEqual(
-      (await pendingCards()).map((pending) => pending.id),
-      [card.id],
-    );
-    const postsBefore = proxy.spawnPosts().length;
-    await control.crash();
-    control.start();
-    await control.waitReady();
-    const afterCrash = await waitFor("plugin back after the crash", 120_000, async () =>
-      action(created.id).catch(() => null),
-    );
-    assert.equal(afterCrash.state, "confirmed");
-    assert.equal(proxy.spawnPosts().length, postsBefore);
-    const closed = await control.api("GET", `/threads/${ids.bot}/interactions/${card.id}`);
-    assert.deepEqual(
-      { status: closed.status, statusReason: closed.statusReason },
-      { status: "interrupted", statusReason: "server-restarted" },
-    );
-    assert.deepEqual(
-      await control.rpc(PLUGIN, "questions.v1.state", { questionId, token }),
-      recorded,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 10_000));
-    const shownAgain = (await pendingCards()).filter(
-      (pending) => pending.payload.data.questionId === questionId,
-    );
-    assert.deepEqual(shownAgain, []);
-    control.bb(["plugin", "config", PLUGIN, "set", "passEnabled", "true"]);
+    control.bb(["plugin", "config", PLUGIN, "set", "passEnabled", "false"]);
+    try {
+      const decided = await control.rpc(PLUGIN, "questions.v1.decide", {
+        questionId,
+        token,
+        optionId: "start",
+      });
+      assert.equal(decided.outcome, "applied");
+      assert.equal((await action(created.id)).state, "confirmed");
+      const recorded = { open: false, decided: "start", outdated: null, waiting };
+      assert.deepEqual(
+        await control.rpc(PLUGIN, "questions.v1.state", { questionId, token }),
+        recorded,
+      );
+      assert.deepEqual(
+        (await pendingCards()).map((pending) => pending.id),
+        [card.id],
+      );
+      const postsBefore = proxy.spawnPosts().length;
+      await control.crash();
+      control.start();
+      await control.waitReady();
+      const afterCrash = await waitFor("plugin back after the crash", 120_000, async () =>
+        action(created.id).catch(() => null),
+      );
+      assert.equal(afterCrash.state, "confirmed");
+      assert.equal(proxy.spawnPosts().length, postsBefore);
+      const closed = await control.api("GET", `/threads/${ids.bot}/interactions/${card.id}`);
+      assert.deepEqual(
+        { status: closed.status, statusReason: closed.statusReason },
+        { status: "interrupted", statusReason: "server-restarted" },
+      );
+      assert.deepEqual(
+        await control.rpc(PLUGIN, "questions.v1.state", { questionId, token }),
+        recorded,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+      const shownAgain = (await pendingCards()).filter(
+        (pending) => pending.payload.data.questionId === questionId,
+      );
+      assert.deepEqual(shownAgain, []);
+    } finally {
+      control.bb(["plugin", "config", PLUGIN, "set", "passEnabled", "true"]);
+    }
     const bound = await waitFor("crash action bound", PASS * 2, async () => {
       const current = await action(created.id);
       return current?.state === "bound" ? current : null;
