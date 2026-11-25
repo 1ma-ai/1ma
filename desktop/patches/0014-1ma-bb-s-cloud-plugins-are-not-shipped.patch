@@ -30,7 +30,8 @@ Desktop, the saved server list: bb reads server-target.json once at start
 and treats any read error as "no file", so the next change writes an empty
 list over the saved servers. A file that exists but could not be read is now
 left alone for that start: changes stay in memory, and a move to a direct
-server is not recorded as shown, so the next start repeats it.
+server is not recorded as shown, so the next start repeats it. Both Server
+menus say for that start that changes last until quit.
 
 The AI services text and search keyword no longer mention bb cloud.
 
@@ -38,10 +39,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../settings/AiServicesSettingsSection.tsx    |   2 +-
  .../components/settings/settings-search.ts    |   2 +-
- apps/desktop/src/main.ts                      | 161 +++++++++-------
+ apps/desktop/src/main.ts                      | 162 ++++++++++-------
+ apps/desktop/src/menu.ts                      |  10 +
  apps/desktop/src/server-moved.ts              |   6 +-
  apps/desktop/src/server-target.ts             |  49 ++++-
  .../test/fixtures/startup-retry-smoke.cjs     |  82 +++++++--
+ apps/desktop/test/menu.test.ts                |  25 +++
  apps/desktop/test/preload-build.test.ts       |   1 +
  apps/desktop/test/server-moved.test.ts        |  69 ++++++-
  apps/desktop/test/server-target.test.ts       | 172 +++++++++++++++++-
@@ -58,7 +61,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  packages/db/src/data/plugins.ts               |  11 ++
  packages/domain/src/bb-cloud.ts               |  14 ++
  packages/domain/src/index.ts                  |   1 +
- 22 files changed, 663 insertions(+), 167 deletions(-)
+ 24 files changed, 699 insertions(+), 167 deletions(-)
  create mode 100644 packages/domain/src/bb-cloud.ts
 
 diff --git a/apps/app/src/components/settings/AiServicesSettingsSection.tsx b/apps/app/src/components/settings/AiServicesSettingsSection.tsx
@@ -88,7 +91,7 @@ index c7d16a5..9f08062 100644
        {
          title: "Thread titles",
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 92cdadc..97a6460 100644
+index 92cdadc..40de2af 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
 @@ -45,6 +45,7 @@ import {
@@ -99,7 +102,15 @@ index 92cdadc..97a6460 100644
    type AppCommandId,
    type AppKeybindings,
  } from "@bb/domain";
-@@ -1415,6 +1416,13 @@ async function activateLocalServerMove(move: DesktopServerMove): Promise<void> {
+@@ -798,6 +799,7 @@ function buildServerMenuArgs(): ServerMenuArgs {
+     selectServer(serverId) {
+       void setActiveServerTarget(serverId);
+     },
++    serverChangesAreSaved: serverTargetStore?.savesChanges() ?? true,
+     servers: buildMenuServerItems(connectServers),
+     setServerUrl() {
+       void openSetServerUrlDialog();
+@@ -1415,6 +1417,13 @@ async function activateLocalServerMove(move: DesktopServerMove): Promise<void> {
    const userDataPath = desktopUserDataPath;
    localServerMove = move;
    stopServerMovedWatcher();
@@ -113,7 +124,7 @@ index 92cdadc..97a6460 100644
    desktopLogger.info(
      `[desktop] this computer's bb server moved to ${move.toHostName}; the app now opens that server and runs this computer as a regular machine`,
    );
-@@ -1717,6 +1725,9 @@ async function runStartupAction(
+@@ -1717,6 +1726,9 @@ async function runStartupAction(
  }
  
  function openConnectSignIn(parentWindow: BrowserWindow | null): void {
@@ -123,7 +134,7 @@ index 92cdadc..97a6460 100644
    if (connectSignInWindow !== null && !connectSignInWindow.isDestroyed()) {
      connectSignInWindow.focus();
      return;
-@@ -1814,15 +1825,26 @@ async function selectBuiltinServer(): Promise<void> {
+@@ -1814,15 +1826,26 @@ async function selectBuiltinServer(): Promise<void> {
    await applyServerTarget();
  }
  
@@ -154,7 +165,7 @@ index 92cdadc..97a6460 100644
      logs: "",
      title: `bb moved to ${move.toHostName}`,
    });
-@@ -1853,6 +1875,15 @@ async function applyServerTarget(): Promise<void> {
+@@ -1853,6 +1876,15 @@ async function applyServerTarget(): Promise<void> {
    const target = serverTargetStore.getTarget();
    desktopBrowserBrokerClient?.reconnect();
  
@@ -170,7 +181,7 @@ index 92cdadc..97a6460 100644
    if (target.kind === "builtin") {
      startServerMovedWatcher();
      const attached = await ensureBuiltinRuntimeAttached();
-@@ -3056,6 +3087,10 @@ async function runDesktopApp(): Promise<void> {
+@@ -3056,6 +3088,10 @@ async function runDesktopApp(): Promise<void> {
    });
  
    serverTargetStore = createServerTargetStore({
@@ -181,7 +192,7 @@ index 92cdadc..97a6460 100644
      storagePath: join(userDataPath, SERVER_TARGET_FILE_NAME),
    });
    await serverTargetStore.load();
-@@ -3071,63 +3106,65 @@ async function runDesktopApp(): Promise<void> {
+@@ -3071,63 +3107,65 @@ async function runDesktopApp(): Promise<void> {
    machineServiceNoticeStore = createServerMoveNoticeStore({
      storagePath: join(userDataPath, MACHINE_SERVICE_NOTICE_FILE_NAME),
    });
@@ -304,7 +315,7 @@ index 92cdadc..97a6460 100644
  
    const desktopUpdateSupport = resolveDesktopUpdateSupport({
      canReplaceAppImage,
-@@ -3410,7 +3447,7 @@ async function runDesktopApp(): Promise<void> {
+@@ -3410,7 +3448,7 @@ async function runDesktopApp(): Promise<void> {
      await initializeRuntime({ bridgePath, serverUrl, userDataPath });
    } else {
      await applyServerTarget();
@@ -313,6 +324,48 @@ index 92cdadc..97a6460 100644
    }
  }
  
+diff --git a/apps/desktop/src/menu.ts b/apps/desktop/src/menu.ts
+index 7e6924a..43cc7db 100644
+--- a/apps/desktop/src/menu.ts
++++ b/apps/desktop/src/menu.ts
+@@ -34,6 +34,8 @@ const SERVER_MENU_ITEM_IDS = [
+   WINDOW_SERVER_MENU_ITEM_ID,
+ ];
+ export const SET_SERVER_URL_MENU_LABEL = "Edit Server…";
++export const SERVER_CHANGES_NOT_SAVED_MENU_LABEL =
++  "Saved servers could not be read. Changes last until you quit.";
+ const CONNECT_SIGN_IN_MENU_LABELS: Partial<
+   Record<ConnectServerSyncSkipReason, string>
+ > = {
+@@ -71,6 +73,7 @@ export interface InstallApplicationMenuArgs {
+   addServer(): void;
+   onServerMenuWillShow?: () => void;
+   servers: ApplicationMenuServerItem[];
++  serverChangesAreSaved: boolean;
+   connectServersSkipReason: ConnectServerSyncSkipReason | null;
+ }
+ 
+@@ -96,6 +99,7 @@ export type ServerMenuArgs = Pick<
+   | "addServer"
+   | "connectServersSkipReason"
+   | "selectServer"
++  | "serverChangesAreSaved"
+   | "servers"
+   | "setServerUrl"
+   | "signInToConnect"
+@@ -119,6 +123,12 @@ export function createServerMenuItems(
+       ? undefined
+       : CONNECT_SIGN_IN_MENU_LABELS[args.connectServersSkipReason];
+   return [
++    ...(args.serverChangesAreSaved
++      ? []
++      : [
++          { enabled: false, label: SERVER_CHANGES_NOT_SAVED_MENU_LABEL },
++          { type: "separator" as const },
++        ]),
+     ...serverItems,
+     { type: "separator" },
+     ...(signInLabel === undefined
 diff --git a/apps/desktop/src/server-moved.ts b/apps/desktop/src/server-moved.ts
 index 748464c..81469dc 100644
 --- a/apps/desktop/src/server-moved.ts
@@ -597,6 +650,56 @@ index 8c48973..6859834 100644
    assert.equal(
      retryLoads.length,
      1,
+diff --git a/apps/desktop/test/menu.test.ts b/apps/desktop/test/menu.test.ts
+index 25f1a1a..b05ef42 100644
+--- a/apps/desktop/test/menu.test.ts
++++ b/apps/desktop/test/menu.test.ts
+@@ -10,6 +10,7 @@ import { Menu } from "electron";
+ 
+ import {
+   buildApplicationMenuTemplate,
++  SERVER_CHANGES_NOT_SAVED_MENU_LABEL,
+   SET_SERVER_URL_MENU_LABEL,
+   type InstallApplicationMenuArgs,
+ } from "../src/menu.js";
+@@ -47,6 +48,7 @@ function menuArgs(
+     reloadWindow,
+     zoomFocusedPage: () => {},
+     selectServer: () => {},
++    serverChangesAreSaved: true,
+     servers: [{ checked: true, id: "builtin", name: BUILTIN_SERVER_NAME }],
+     setServerUrl: () => {},
+     signInToConnect: () => {},
+@@ -434,6 +436,29 @@ describe("application menu", () => {
+   });
+ });
+ 
++it.each([true, false])(
++  "says in both Server menus when changes will not be kept (saved: %s)",
++  (serverChangesAreSaved) => {
++    const template = buildApplicationMenuTemplate(
++      menuArgs(() => {}, { serverChangesAreSaved }),
++    );
++    for (const items of [
++      findServerSubmenu(template),
++      findDesktopSettingsServerSubmenu(template),
++    ]) {
++      const notice = items.filter(
++        (item) => item.label === SERVER_CHANGES_NOT_SAVED_MENU_LABEL,
++      );
++      expect(notice).toEqual(
++        serverChangesAreSaved
++          ? []
++          : [{ enabled: false, label: SERVER_CHANGES_NOT_SAVED_MENU_LABEL }],
++      );
++      expect(items[0]?.type === "radio").toBe(serverChangesAreSaved);
++    }
++  },
++);
++
+ it.each([true, false])(
+   "exposes the platform visibility checkbox (Mac: %s)",
+   (isMac) => {
 diff --git a/apps/desktop/test/preload-build.test.ts b/apps/desktop/test/preload-build.test.ts
 index ae9566d..a071c18 100644
 --- a/apps/desktop/test/preload-build.test.ts
