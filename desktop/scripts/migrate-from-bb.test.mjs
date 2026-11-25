@@ -11,7 +11,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { after, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,7 @@ import {
   hostCopyPlan,
   importIntoOneMa,
   parseArgs,
+  PI_SESSIONS,
   processesUsing,
   runningFrom,
 } from "./migrate-from-bb.mjs";
@@ -35,7 +36,8 @@ function write(root, relative, text = "x") {
   writeFileSync(path.join(root, relative), text);
 }
 
-// A bb data folder with server data (carried by an export) and machine data.
+// A bb data folder with server data (carried by an export) and machine data,
+// and next to it the folder of Pi's earlier conversations.
 function bbFolder() {
   const from = fresh("bb");
   write(from, "bb.db", "db");
@@ -43,7 +45,7 @@ function bbFolder() {
   write(from, "auth.json", '{"credential":"c"}');
   write(from, "thread-storage/thr_1/page.html", "<p>notes</p>");
   write(from, "local-plugins/demo/package.json", "{}");
-  write(from, "pi-bridge-sessions/thr_1.jsonl", '{"type":"session"}\n');
+  write(`${from}-pi`, "thr_1.jsonl", '{"type":"session"}\n');
   write(from, "plugins/automations/data.db", "plugin db");
   write(from, "plugins/browser-automation/host-data/profile/Cookies", "cookies");
   write(from, "plugins/provider-claude-code/bridge-data/session.json", "{}");
@@ -105,6 +107,8 @@ const importArgs = (from, to, cli, more = []) => ({
     archive(),
     "--cli",
     cli,
+    "--pi-sessions",
+    `${from}-pi`,
     ...more,
   ]),
   listProcesses: noProcesses,
@@ -117,10 +121,17 @@ describe("arguments", () => {
     assert.throws(() => parseArgs(["import", "--archive", "a.tar"]), /--cli/);
     assert.throws(() => parseArgs(["import", "--archive"]), /--archive needs a value/);
     assert.throws(() => parseArgs(["import", "--move-asid"]), /unknown argument --move-asid/);
-    const options = parseArgs(["import", "--archive", "a.tar", "--cli", "bb.js", "--dry-run"]);
+    const options = parseArgs(["import", "--archive", "a.tar", "--cli", "bb.js", "--dry-run"], {});
     assert.equal(options.dryRun, true);
     assert.equal(path.basename(options.from), ".bb");
     assert.equal(path.basename(options.to), ".1ma");
+    assert.equal(options.piSessions, path.join(homedir(), ".bb", "pi-bridge-sessions"));
+    assert.equal(
+      parseArgs(["import", "--archive", "a.tar", "--cli", "bb.js"], {
+        BB_PI_BRIDGE_SESSION_DIR: "pi",
+      }).piSessions,
+      path.resolve("pi"),
+    );
   });
 });
 
@@ -149,7 +160,6 @@ describe("the machine data an export leaves behind", () => {
         "auth.json",
         "thread-storage",
         "local-plugins",
-        "pi-bridge-sessions",
         "plugins/browser-automation/host-data",
         "plugins/environment-git-worktree/host-data",
         "plugins/environment-personal-workspace/host-data",
@@ -160,19 +170,129 @@ describe("the machine data an export leaves behind", () => {
 });
 
 describe("Pi sessions of a bb older than 0.50", () => {
-  test("are copied into the folder where 1ma's Pi plugin looks for them", () => {
-    const patches = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "patches");
-    const dataDirPatch = readdirSync(patches).find((name) => name.includes("data-directory"));
-    const lookup =
-      /^\+\s*const legacyFile = join\(homedir\(\), "\.1ma", "([^"]+)", fileName\);$/m.exec(
-        readFileSync(path.join(patches, dataDirPatch), "utf8"),
-      );
-    assert.ok(lookup, "the data directory patch no longer names the folder of earlier Pi sessions");
-    assert.ok(
-      hostCopyPlan(bbFolder()).some(
-        (entry) => entry.relative === lookup[1] && entry.kind === "directory",
+  // The data directory patch replaces the line naming the home folder where bb
+  // kept them with the one where 1ma looks when a session is not in its data.
+  const patches = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "patches");
+  const patch = readFileSync(
+    path.join(
+      patches,
+      readdirSync(patches).find((name) => name.includes("data-directory")),
+    ),
+    "utf8",
+  );
+  const legacyFolder = (sign, root) =>
+    new RegExp(
+      `^\\${sign}\\s*const legacyFile = join\\(homedir\\(\\), "\\${root}", "([^"]+)", fileName\\);$`,
+      "m",
+    ).exec(patch)?.[1];
+  const bbFolderName = legacyFolder("-", ".bb");
+  const oneMaFolderName = legacyFolder("+", ".1ma");
+
+  // 1ma's Pi plugin reads a thread's session from its bridge data, and only
+  // when it is missing there from the home folder of an earlier 1ma.
+  const sessionOneMaReads = (dataDir, home, file) =>
+    [
+      path.join(dataDir, "plugins", "provider-pi", "bridge-data", "sessions", file),
+      path.join(home, ".1ma", oneMaFolderName, file),
+    ].find((candidate) => existsSync(candidate));
+
+  function withEnv(values, action) {
+    const before = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, values);
+    for (const [key, value] of Object.entries(values))
+      if (value === undefined) delete process.env[key];
+    try {
+      return action();
+    } finally {
+      for (const [key, value] of Object.entries(before))
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+    }
+  }
+
+  function homeImport(home, { more = [], env = {}, prepare = () => {} } = {}) {
+    const from = bbFolder();
+    prepare(from);
+    const to = fresh("1ma");
+    const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
+    const lines = [];
+    const record = withEnv({ HOME: home, BB_PI_BRIDGE_SESSION_DIR: undefined, ...env }, () =>
+      importIntoOneMa(
+        {
+          ...parseArgs([
+            "import",
+            "--from",
+            from,
+            "--to",
+            to,
+            "--archive",
+            archive(),
+            "--cli",
+            cli,
+            ...more,
+          ]),
+          listProcesses: noProcesses,
+        },
+        (line) => lines.push(line),
       ),
     );
+    return { from, to, record, log: lines.join("\n") };
+  }
+
+  test("the patch still names both home folders", () => {
+    assert.ok(bbFolderName, "the data directory patch no longer names bb's folder of Pi sessions");
+    assert.ok(
+      oneMaFolderName,
+      "the data directory patch no longer names 1ma's folder of Pi sessions",
+    );
+  });
+
+  test("come from bb's home folder whatever its data folder, and win over another 1ma's", () => {
+    const home = fresh("home");
+    const file = "thr_legacy-a.1.jsonl";
+    write(home, `.bb/${bbFolderName}/${file}`, '{"from":"bb"}\n');
+    write(home, `.1ma/${oneMaFolderName}/${file}`, '{"from":"another 1ma"}\n');
+    const { to, log } = homeImport(home);
+    assert.equal(readFileSync(sessionOneMaReads(to, home, file), "utf8"), '{"from":"bb"}\n');
+    assert.match(
+      log,
+      new RegExp(`Pi's earlier conversations: 1 from ${path.join(home, ".bb", bbFolderName)}`),
+    );
+  });
+
+  test("come from BB_PI_BRIDGE_SESSION_DIR or the folder given, and never replace a session", () => {
+    const home = fresh("home");
+    write(home, `.bb/${bbFolderName}/thr_home.jsonl`, "home\n");
+    const configured = fresh("pi-configured");
+    write(configured, "thr_configured.jsonl", "configured\n");
+    write(configured, "thr_kept.jsonl", "earlier\n");
+    const fromEnv = homeImport(home, {
+      env: { BB_PI_BRIDGE_SESSION_DIR: configured },
+      prepare: (from) =>
+        write(from, "plugins/provider-pi/bridge-data/sessions/thr_kept.jsonl", "bridge data\n"),
+    });
+    assert.equal(
+      readFileSync(sessionOneMaReads(fromEnv.to, home, "thr_kept.jsonl"), "utf8"),
+      "bridge data\n",
+    );
+    assert.equal(
+      readFileSync(sessionOneMaReads(fromEnv.to, home, "thr_configured.jsonl"), "utf8"),
+      "configured\n",
+    );
+    assert.equal(sessionOneMaReads(fromEnv.to, home, "thr_home.jsonl"), undefined);
+
+    const given = fresh("pi-given");
+    write(given, "thr_given.jsonl", "given\n");
+    const fromOption = homeImport(home, {
+      more: ["--pi-sessions", given],
+      env: { BB_PI_BRIDGE_SESSION_DIR: configured },
+    });
+    assert.match(fromOption.log, new RegExp(`Pi's earlier conversations: 1 from ${given}`));
+    assert.equal(
+      readFileSync(sessionOneMaReads(fromOption.to, home, "thr_given.jsonl"), "utf8"),
+      "given\n",
+    );
+    assert.equal(sessionOneMaReads(fromOption.to, home, "thr_configured.jsonl"), undefined);
   });
 });
 
@@ -187,7 +307,7 @@ describe("importing into 1ma", () => {
     assert.equal(readFileSync(path.join(to, "host-id"), "utf8"), "host-1\n");
     assert.ok(existsSync(path.join(to, "thread-storage/thr_1/page.html")));
     assert.equal(
-      readFileSync(path.join(to, "pi-bridge-sessions/thr_1.jsonl"), "utf8"),
+      readFileSync(path.join(to, PI_SESSIONS, "thr_1.jsonl"), "utf8"),
       '{"type":"session"}\n',
     );
     assert.ok(existsSync(path.join(to, "plugins/browser-automation/host-data/profile/Cookies")));

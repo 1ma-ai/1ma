@@ -93,6 +93,8 @@ jobs:
           node scripts/check-provider-literal-ratchet.mjs --base "$base"
           node scripts/check-test-process-identity.mjs
           node scripts/check-branch-ref-owner.mjs
+      - name: Check the embedded 1ma plugins for literal NUL bytes, as bb checks its own sources
+        run: node desktop/scripts/check-plugin-nul.mjs
       - name: Keep the rebrand diff for review
         run: git -C "$RUNNER_TEMP/bb" diff HEAD~1 HEAD > "$RUNNER_TEMP/rebrand.diff"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
