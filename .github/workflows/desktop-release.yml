@@ -68,7 +68,7 @@ jobs:
             fail "the latest push run of desktop-tests.yml on main for $commit is '$tests'; bb's tests must pass on the 1ma tree before publishing"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
       - name: Check out the version tool at the build commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ steps.build.outputs.commit }}
           path: 1ma

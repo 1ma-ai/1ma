@@ -1,0 +1,11 @@
+# Actions are pinned to commits; Dependabot proposes the newer commits once a
+# month in one pull request, with the version in the comment after each pin.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
