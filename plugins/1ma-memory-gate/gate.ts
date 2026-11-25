@@ -3,6 +3,7 @@ import { strings } from "./strings.js";
 
 export const SAMPLE_MAX_AGE_MS = 15_000;
 export const READING_RETRY_MS = 2_000;
+export const READING_GRACE_MS = 30_000;
 export const MEMORY_RETRY_MS = 15_000;
 export const ADMISSION_WINDOW_MS = 45_000;
 export const MAX_REASON_LENGTH = 200;
@@ -35,14 +36,20 @@ export interface GateInput {
   question: DispatchQuestion;
   settings: GateSettings;
   sample: Sample | undefined;
-  /** Ids of the threads running on the question's host. */
+  /** Ids of the threads the server lists as running on the question's host. */
   runningOnHost: readonly string[];
 }
 
 export type Verdict =
   | {
       action: "proceed";
-      why: "not-a-new-turn" | "disabled" | "unsupported" | "few-running" | "enough-memory";
+      why:
+        | "not-a-new-turn"
+        | "disabled"
+        | "unsupported"
+        | "reading-unavailable"
+        | "few-running"
+        | "enough-memory";
     }
   | {
       action: "wait";
@@ -80,17 +87,22 @@ export function freeBytes(reading: MemoryReading): number | null {
 }
 
 export function createGate(now: () => number) {
-  // Threads this gate let start, per host: their memory does not show in a
-  // reading until they have loaded, so each one holds a reserve meanwhile.
-  const admissions = new Map<string, Map<string, number>>();
+  // When this gate let each thread start. A thread's memory does not show in a
+  // reading until it has loaded, so while it runs it holds a share meanwhile.
+  const admittedAt = new Map<string, number>();
+  // Since when turns on a host have been asking without a reading to decide from.
+  const unread = new Map<string, { since: number; last: number }>();
 
-  function admittedOthers(hostId: string, threadId: string, at: number): string[] {
-    const onHost = admissions.get(hostId);
-    if (onHost === undefined) return [];
-    for (const [id, admittedAt] of onHost)
-      if (at - admittedAt >= ADMISSION_WINDOW_MS) onHost.delete(id);
-    if (onHost.size === 0) admissions.delete(hostId);
-    return [...onHost.keys()].filter((id) => id !== threadId);
+  function unreadSince(hostId: string, at: number): number {
+    const asked = unread.get(hostId);
+    return asked !== undefined && at - asked.last <= READING_GRACE_MS ? asked.since : at;
+  }
+
+  function forgetExpired(at: number): void {
+    for (const [id, admitted] of admittedAt)
+      if (at - admitted >= ADMISSION_WINDOW_MS) admittedAt.delete(id);
+    for (const [hostId, asked] of unread)
+      if (at - asked.last > READING_GRACE_MS) unread.delete(hostId);
   }
 
   function decide(input: GateInput, at: number): Verdict {
@@ -100,19 +112,30 @@ export function createGate(now: () => number) {
     if (sample?.reading.supported === false) return { action: "proceed", why: "unsupported" };
     const host = hostLabel(question.host);
     const free = sample === undefined ? null : freeBytes(sample.reading);
-    if (sample === undefined || at - sample.takenAt > SAMPLE_MAX_AGE_MS || free === null)
+    if (sample === undefined || at - sample.takenAt > SAMPLE_MAX_AGE_MS || free === null) {
+      // A reading that stays away must not hold chats forever: the thread-count
+      // limit still guards a machine this gate cannot see.
+      if (at - unreadSince(question.host.id, at) >= READING_GRACE_MS)
+        return { action: "proceed", why: "reading-unavailable" };
       return {
         action: "wait",
         why: "no-reading",
         reason: bounded(strings.waitingForReading(host)),
         retryInMs: READING_RETRY_MS,
       };
-    const admitted = admittedOthers(question.host.id, question.threadId, at);
-    const running = new Set(
-      [...input.runningOnHost, ...admitted].filter((id) => id !== question.threadId),
+    }
+    const running = input.runningOnHost.filter((id) => id !== question.threadId);
+    if (new Set(running).size < settings.minRunning)
+      return { action: "proceed", why: "few-running" };
+    // Core commits a cleared turn's status before the next attempt is asked, so
+    // a thread let through here and held by another plugin is not in the list.
+    const loading = new Set(
+      running.filter((id) => {
+        const admitted = admittedAt.get(id);
+        return admitted !== undefined && at - admitted < ADMISSION_WINDOW_MS;
+      }),
     );
-    if (running.size < settings.minRunning) return { action: "proceed", why: "few-running" };
-    const needed = settings.reserveBytes * (admitted.length + 1);
+    const needed = settings.reserveBytes * (loading.size + 1);
     if (free < needed)
       return {
         action: "wait",
@@ -136,20 +159,19 @@ export function createGate(now: () => number) {
     preview(input: GateInput): Verdict {
       return decide(input, now());
     },
-    /** The answer for this attempt; a turn let through on a host holds a reserve there. */
+    /** The answer for this attempt; a turn let through holds a share while it loads. */
     answer(input: GateInput): Verdict {
       const at = now();
+      forgetExpired(at);
       const verdict = decide(input, at);
       const { host, threadId } = input.question;
-      if (
-        host !== null &&
-        verdict.action === "proceed" &&
-        (verdict.why === "few-running" || verdict.why === "enough-memory")
-      ) {
-        const onHost = admissions.get(host.id) ?? new Map<string, number>();
-        if (!onHost.has(threadId)) onHost.set(threadId, at);
-        admissions.set(host.id, onHost);
-      }
+      if (host === null || verdict.why === "not-a-new-turn" || verdict.why === "disabled")
+        return verdict;
+      if (verdict.why === "no-reading" || verdict.why === "reading-unavailable")
+        unread.set(host.id, { since: unreadSince(host.id, at), last: at });
+      else unread.delete(host.id);
+      if (verdict.action === "proceed" && verdict.why !== "unsupported")
+        admittedAt.set(threadId, at);
       return verdict;
     },
   };

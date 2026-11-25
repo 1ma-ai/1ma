@@ -8,7 +8,7 @@ export const strings = {
     "Hold a new chat turn in the queue while its machine is short of memory. A running chat is never stopped, and Send now still sends at once.",
   reserveMbLabel: "Memory per chat (MB)",
   reserveMbDescription:
-    "How much free memory a new chat turn needs, 64 to 65536 MB. Each chat admitted in the last 45 seconds holds this much more, until its own memory shows.",
+    "How much free memory a new chat turn needs, 64 to 65536 MB. Each chat started in the last 45 seconds holds this much more, until its own memory shows.",
   pressurePercentLabel: "Memory pressure limit (%)",
   pressurePercentDescription:
     "Hold new turns while tasks on the machine spent at least this share of the last 10 seconds waiting for memory, 1 to 100.",
@@ -40,6 +40,7 @@ export const strings = {
   statusReading: (freeBytes: number | null, pressure: number | null, ageSeconds: number) =>
     `${freeBytes === null ? "free memory unknown" : `${gigabytes(freeBytes)} GB free`}, pressure ${pressure === null ? "unknown" : `${String(pressure)}%`}, read ${String(ageSeconds)} s ago`,
   statusStart: "a new chat starts",
+  statusStartUnchecked: "a new chat starts unchecked: no memory reading",
   statusWait: (reason: string) => `a new chat waits: ${reason}`,
   statusHostLine: (name: string, status: string, reading: string, answer: string) =>
     `${name} (${status}): ${reading}; ${answer}`,

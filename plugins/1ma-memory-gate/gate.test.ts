@@ -5,6 +5,7 @@ import {
   createGate,
   MAX_REASON_LENGTH,
   MEMORY_RETRY_MS,
+  READING_GRACE_MS,
   READING_RETRY_MS,
   SAMPLE_MAX_AGE_MS,
   type GateInput,
@@ -99,9 +100,12 @@ it("holds a new turn while memory pressure is at the limit or above", () => {
 it("lets only one of three queued chats through when there is room for one", () => {
   const gate = createGate(clock().now);
   const sample = { reading: linux(1000 * MIB), takenAt: NOW };
-  const verdicts = ["thr_a", "thr_b", "thr_c"].map((threadId) =>
-    gate.answer(input({ threadId, sample })),
-  );
+  const running = ["thr_running"];
+  const verdicts = ["thr_a", "thr_b", "thr_c"].map((threadId) => {
+    const verdict = gate.answer(input({ threadId, sample, runningOnHost: [...running] }));
+    if (verdict.action === "proceed") running.push(threadId);
+    return verdict;
+  });
   expect(verdicts.map((verdict) => verdict.action)).toEqual(["proceed", "wait", "wait"]);
   expect(verdicts[1]).toMatchObject({
     reason: "Waiting for memory on Build box: 1.0 GB free, 1.2 GB needed",
@@ -111,8 +115,9 @@ it("lets only one of three queued chats through when there is room for one", () 
 it("counts a thread that is re-attempted only once", () => {
   const gate = createGate(clock().now);
   const sample = { reading: linux(1000 * MIB), takenAt: NOW };
-  expect(gate.answer(input({ threadId: "thr_a", sample })).action).toBe("proceed");
-  expect(gate.answer(input({ threadId: "thr_a", sample })).action).toBe("proceed");
+  const runningOnHost = ["thr_running", "thr_a"];
+  expect(gate.answer(input({ threadId: "thr_a", sample, runningOnHost })).action).toBe("proceed");
+  expect(gate.answer(input({ threadId: "thr_a", sample, runningOnHost })).action).toBe("proceed");
 });
 
 it("forgets an admission after 45 seconds", () => {
@@ -122,21 +127,17 @@ it("forgets an admission after 45 seconds", () => {
     gate.answer(input({ threadId: "thr_a", sample: { reading: linux(1000 * MIB), takenAt: NOW } }))
       .action,
   ).toBe("proceed");
+  const runningOnHost = ["thr_running", "thr_a"];
   time.advance(ADMISSION_WINDOW_MS - 1);
   const later = { reading: linux(1000 * MIB), takenAt: time.now() };
-  expect(gate.answer(input({ threadId: "thr_b", sample: later })).action).toBe("wait");
+  expect(gate.answer(input({ threadId: "thr_b", sample: later, runningOnHost })).action).toBe(
+    "wait",
+  );
   time.advance(1);
   const after = { reading: linux(1000 * MIB), takenAt: time.now() };
-  expect(gate.answer(input({ threadId: "thr_b", sample: after })).action).toBe("proceed");
-});
-
-it("keeps admissions on one machine from holding turns on another", () => {
-  const gate = createGate(clock().now);
-  const sample = { reading: linux(1000 * MIB), takenAt: NOW };
-  expect(gate.answer(input({ threadId: "thr_a", sample })).action).toBe("proceed");
-  const other = input({ threadId: "thr_b", sample });
-  other.question.host = { id: "hst_2", name: "Other" };
-  expect(gate.answer(other).action).toBe("proceed");
+  expect(gate.answer(input({ threadId: "thr_b", sample: after, runningOnHost })).action).toBe(
+    "proceed",
+  );
 });
 
 it("lets the only chat start even with no free memory", () => {
@@ -147,7 +148,7 @@ it("lets the only chat start even with no free memory", () => {
     why: "few-running",
   });
   expect(
-    gate.answer(input({ threadId: "thr_second", sample: empty, runningOnHost: [] })),
+    gate.answer(input({ threadId: "thr_second", sample: empty, runningOnHost: ["thr_new"] })),
   ).toMatchObject({
     action: "wait",
   });
@@ -224,7 +225,10 @@ it("previews an answer without recording an admission", () => {
   const gate = createGate(clock().now);
   const sample = { reading: linux(1000 * MIB), takenAt: NOW };
   expect(gate.preview(input({ threadId: "thr_a", sample })).action).toBe("proceed");
-  expect(gate.answer(input({ threadId: "thr_b", sample })).action).toBe("proceed");
+  expect(
+    gate.answer(input({ threadId: "thr_b", sample, runningOnHost: ["thr_running", "thr_a"] }))
+      .action,
+  ).toBe("proceed");
 });
 
 it("names the machine by id when it has no name and keeps the reason short", () => {
@@ -236,4 +240,67 @@ it("names the machine by id when it has no name and keeps the reason short", () 
   long.question.host = { id: "hst_9", name: "x".repeat(400) };
   const verdict = gate.answer(long);
   expect(verdict.action === "wait" && verdict.reason.length).toBe(MAX_REASON_LENGTH);
+});
+
+it("holds no share for a chat it let through that did not start", () => {
+  const gate = createGate(clock().now);
+  const sample = { reading: linux(1000 * MIB), takenAt: NOW };
+  expect(gate.answer(input({ threadId: "thr_held_elsewhere", sample })).action).toBe("proceed");
+  expect(gate.answer(input({ threadId: "thr_b", sample })).action).toBe("proceed");
+});
+
+it("lets a turn through once its machine gave no reading for 30 seconds", () => {
+  const time = clock();
+  const gate = createGate(time.now);
+  for (let waited = 0; waited < READING_GRACE_MS; waited += READING_RETRY_MS) {
+    expect(gate.answer(input({ sample: undefined }))).toMatchObject({
+      action: "wait",
+      why: "no-reading",
+    });
+    time.advance(READING_RETRY_MS);
+  }
+  expect(gate.answer(input({ sample: undefined }))).toEqual({
+    action: "proceed",
+    why: "reading-unavailable",
+  });
+  expect(gate.answer(input({ threadId: "thr_next", sample: undefined }))).toEqual({
+    action: "proceed",
+    why: "reading-unavailable",
+  });
+});
+
+it("waits for a reading again after one arrived", () => {
+  const time = clock();
+  const gate = createGate(time.now);
+  gate.answer(input({ sample: undefined }));
+  time.advance(READING_GRACE_MS);
+  expect(gate.answer(input({ sample: undefined })).action).toBe("proceed");
+  expect(gate.answer(input({ sample: { reading: linux(4 * GIB), takenAt: time.now() } }))).toEqual({
+    action: "proceed",
+    why: "enough-memory",
+  });
+  time.advance(SAMPLE_MAX_AGE_MS + 1);
+  expect(gate.answer(input({ sample: undefined }))).toMatchObject({
+    action: "wait",
+    why: "no-reading",
+  });
+});
+
+it("waits for a reading again when no turn asked for longer than the patience", () => {
+  const time = clock();
+  const gate = createGate(time.now);
+  gate.answer(input({ sample: undefined }));
+  time.advance(READING_GRACE_MS + 1);
+  expect(gate.answer(input({ sample: undefined }))).toMatchObject({
+    action: "wait",
+    why: "no-reading",
+  });
+});
+
+it("previews an answer without starting to wait for a reading", () => {
+  const time = clock();
+  const gate = createGate(time.now);
+  gate.preview(input({ sample: undefined }));
+  time.advance(READING_GRACE_MS);
+  expect(gate.answer(input({ sample: undefined }))).toMatchObject({ action: "wait" });
 });

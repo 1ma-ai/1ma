@@ -6,6 +6,7 @@ import {
   freeBytes,
   hostLabel,
   isNewTurnOnHost,
+  READING_GRACE_MS,
   type DispatchQuestion,
   type GateSettings,
   type Sample,
@@ -157,7 +158,13 @@ export default function plugin(bb: BbPluginApi): void {
         sample: sampler.get(question.host.id),
         runningOnHost: await runningOn(question.host.id),
       });
-      if (verdict.action === "proceed") return { action: "proceed" };
+      if (verdict.action === "proceed") {
+        if (verdict.why === "reading-unavailable")
+          bb.log.warn(
+            `no memory reading from ${hostLabel(question.host)} for ${String(READING_GRACE_MS / 1000)} s, the turn goes ahead unchecked`,
+          );
+        return { action: "proceed" };
+      }
       if (verdict.why === "no-reading") sampler.requestRefresh();
       return { action: "wait", reason: verdict.reason, sendAt: Date.now() + verdict.retryInMs };
     } catch (error) {
@@ -212,8 +219,8 @@ export default function plugin(bb: BbPluginApi): void {
                     ageMs: sample === undefined ? null : Date.now() - sample.takenAt,
                     answer:
                       verdict.action === "proceed"
-                        ? { action: "start" }
-                        : { action: "wait", reason: verdict.reason },
+                        ? { action: "start", why: verdict.why }
+                        : { action: "wait", why: verdict.why, reason: verdict.reason },
                   })),
                 }),
               };
@@ -222,9 +229,11 @@ export default function plugin(bb: BbPluginApi): void {
                 host.name,
                 status,
                 readingLine(sample),
-                verdict.action === "proceed"
-                  ? strings.statusStart
-                  : strings.statusWait(verdict.reason),
+                verdict.action === "wait"
+                  ? strings.statusWait(verdict.reason)
+                  : verdict.why === "reading-unavailable"
+                    ? strings.statusStartUnchecked
+                    : strings.statusStart,
               ),
             );
             return {

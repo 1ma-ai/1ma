@@ -7,7 +7,7 @@ import {
   type ExperimentalFakeHostRpcCall,
 } from "@get-bb/plugin-sdk/testing";
 import type { MemoryReading } from "./contract.js";
-import { MEMORY_RETRY_MS, READING_RETRY_MS } from "./gate.js";
+import { MEMORY_RETRY_MS, READING_GRACE_MS, READING_RETRY_MS } from "./gate.js";
 import { SAMPLE_INTERVAL_MS } from "./sampler.js";
 import plugin, { SAMPLER_NAME } from "./server.js";
 
@@ -97,12 +97,14 @@ it("registers one dispatch hook and one sampler", async () => {
 });
 
 it("samples connected machines only and answers from the latest reading", async () => {
-  const { harness, state } = setup();
+  const running = [{ id: "thr_running", hostId: "hst_1" }];
+  const { harness, state } = setup({ running: async () => running });
   try {
     await startSampler(harness);
     expect(harness.experimental_hostRpcCalls.map((call) => call.hostId)).toEqual(["hst_1"]);
     const decide = harness.registrations.hooks["message.dispatch"]!;
     expect(await decide(newChat())).toEqual({ action: "proceed" });
+    running.push({ id: "thr_new", hostId: "hst_1" });
 
     state.reading = linux(300 * MIB);
     await vi.advanceTimersByTimeAsync(SAMPLE_INTERVAL_MS);
@@ -154,6 +156,34 @@ it("keeps answering when a machine cannot be read, and logs the failure", async 
         message: expect.stringContaining("daemon went away"),
       }),
     );
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+it("lets turns through unchecked, and says so, when a machine gives no reading for long", async () => {
+  const { harness } = setup({
+    readMemory: () => {
+      throw new Error("daemon went away");
+    },
+  });
+  try {
+    await startSampler(harness);
+    const decide = harness.registrations.hooks["message.dispatch"]!;
+    await expect(decide(newChat())).resolves.toMatchObject({ action: "wait" });
+    await vi.advanceTimersByTimeAsync(READING_GRACE_MS);
+    await expect(decide(newChat())).resolves.toEqual({ action: "proceed" });
+    expect(harness.logEntries).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        message: "no memory reading from Build box for 30 s, the turn goes ahead unchecked",
+      }),
+    );
+    const status = await harness.runCli(["status"]);
+    expect(status.stdout).toContain("a new chat starts unchecked: no memory reading");
+    expect(JSON.parse((await harness.runCli(["status", "--json"])).stdout)).toMatchObject({
+      hosts: [{ id: "hst_1", answer: { action: "start", why: "reading-unavailable" } }, {}],
+    });
   } finally {
     await harness.lifecycle.dispose();
   }
