@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import {
+  RELEASED_LATE,
   REVIVED_KIND,
   UNKNOWN_AFTER_MS,
   UNKNOWN_KIND,
@@ -807,7 +808,8 @@ describe("the owner's Keep this chat during a pass", () => {
     const hooks: {
       onMetadata?: () => void;
       onQueueRead?: () => void;
-      onDelete?: (path: string) => void;
+      onDelete?: (path: string) => void | Promise<void>;
+      onStop?: () => Promise<void>;
     } = {};
     let queued = [{ id: "queued_1" }, { id: "queued_2" }];
     const changes: string[] = [];
@@ -828,7 +830,8 @@ describe("the owner's Keep this chat during a pass", () => {
           return Response.json(queued);
         }
         changes.push(`${method} ${path}`);
-        if (method === "DELETE") hooks.onDelete?.(path);
+        if (method === "DELETE") await hooks.onDelete?.(path);
+        if (path.endsWith("/stop")) await hooks.onStop?.();
         return Response.json({});
       },
     });
@@ -863,6 +866,117 @@ describe("the owner's Keep this chat during a pass", () => {
     };
     return { questions, thread, hooks, changes, run, keep, result, reset };
   }
+
+  function held() {
+    let release = () => {};
+    let entered = () => {};
+    const reached = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return {
+      reached,
+      release,
+      wait: () => {
+        entered();
+        return gate;
+      },
+    };
+  }
+
+  it("sends no second delete once the owner keeps the chat while the first is still unanswered", async () => {
+    const t = keepRace();
+    await t.run();
+    t.reset([{ id: "queued_3" }, { id: "queued_4" }]);
+    const first = held();
+    t.hooks.onDelete = (path) => (path.endsWith("/queued_3") ? first.wait() : undefined);
+    const pass = t.run();
+    await first.reached;
+    t.keep();
+    first.release();
+    await pass;
+    expect({ changes: t.changes, result: t.result() }).toEqual({
+      changes: ["DELETE /api/v1/threads/thr_late/queued-messages/queued_3"],
+      result: "kept by the owner",
+    });
+    expect(t.questions.waiting()).toEqual([]);
+  });
+
+  it("keeps the owner's choice and asks nothing when a stop sent before it answers after it", async () => {
+    const t = keepRace();
+    await t.run();
+    t.reset([]);
+    const stop = held();
+    t.hooks.onStop = stop.wait;
+    const pass = t.run();
+    await stop.reached;
+    t.keep();
+    stop.release();
+    await pass;
+    expect({ changes: t.changes, result: t.result() }).toEqual({
+      changes: ["POST /api/v1/threads/thr_late/stop"],
+      result: "kept by the owner",
+    });
+    expect(t.questions.waiting()).toEqual([]);
+  });
+
+  it("sends nothing to a second chat of the action once the owner keeps it while the first is being stopped", async () => {
+    const db = new Database(":memory:");
+    for (const statement of MIGRATIONS) db.exec(statement);
+    const actions = new ActionStore(db);
+    const questions = new QuestionStore(db);
+    const action = actions.propose("linux", params, "thr_bot", 1_000_000);
+    actions.transition(action.id, ["proposed"], "confirmed", 1_000_000);
+    actions.claim(action.id, "gen_a", 1_000_000);
+    actions.transition(action.id, ["sending"], "canceled", 1_000_000, {
+      threadId: "thr_one",
+      result: "stopping late",
+    });
+    const first = held();
+    const requested: string[] = [];
+    const executor = fakeExecutor("linux", {
+      findSpawned: async () =>
+        ["thr_one", "thr_two"].map((threadId) => ({
+          threadId,
+          metadata: { spawn: { nonce: action.label } },
+          projectId: "proj_app",
+          createdAt: 1_000_000,
+          status: "active",
+          queuedWork: "none",
+        })),
+      clearQueueAndStop: async (threadId, admitted) => {
+        requested.push(threadId);
+        if (threadId === "thr_one") await first.wait();
+        return admitted();
+      },
+    });
+    const settings = (): PluginSettings => ({
+      generation: 0,
+      active: true,
+      executors: new Map([["linux", executor]]),
+      policy: repoPolicy([], []),
+    });
+    const pass = runActions({
+      actions,
+      questions,
+      read: settings(),
+      settings,
+      observed: new Map([["linux", "complete"]]),
+      claimant: "gen_a",
+      now: () => 1_000_000 + 1_000,
+      signal: new AbortController().signal,
+      warn: () => {},
+    });
+    await first.reached;
+    actions.transition(action.id, ["canceled"], "canceled", 1_000_500, { result: RELEASED_LATE });
+    first.release();
+    await pass;
+    expect(requested).toEqual(["thr_one"]);
+    expect(actions.get(action.id)?.result).toBe(RELEASED_LATE);
+    expect(questions.waiting()).toEqual([]);
+  });
 
   it("deletes and stops nothing once the owner keeps the chat while its queue is read", async () => {
     const t = keepRace();

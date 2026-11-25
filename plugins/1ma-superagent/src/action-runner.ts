@@ -427,21 +427,19 @@ export async function runActions(deps: ActionDeps): Promise<void> {
           return;
         }
       }
-      const requested = await Promise.all(
-        targets.map(async (row) => {
-          try {
-            return (await executor.clearQueueAndStop(row.threadId, stillAsRead, deps.signal))
-              ? true
-              : null;
-          } catch (error) {
-            deps.warn(
-              `stopping late chat ${chatRef(action.serverId, row.threadId)}: ${describeError(error)}`,
-            );
-            return false;
-          }
-        }),
-      );
-      if (requested.includes(null)) return;
+      const requested: boolean[] = [];
+      for (const row of targets) {
+        try {
+          if (!(await executor.clearQueueAndStop(row.threadId, stillAsRead, deps.signal))) return;
+          requested.push(true);
+        } catch (error) {
+          deps.warn(
+            `stopping late chat ${chatRef(action.serverId, row.threadId)}: ${describeError(error)}`,
+          );
+          requested.push(false);
+        }
+        if (!stillAsRead()) return;
+      }
       const revived = seenStopped && running.length > 0;
       if (requested.every(Boolean)) {
         if (seenStopped && !revived) return;
@@ -463,7 +461,7 @@ export async function runActions(deps: ActionDeps): Promise<void> {
               card: {
                 title: strings.revivedTitle,
                 observed: strings.revivedObserved(chats(running)),
-                affected: strings.lateAffected,
+                affected: strings.revivedAffected,
                 recommendation: strings.revivedRecommendation,
                 options: [
                   { id: "ok", label: strings.acknowledge, recommended: true },

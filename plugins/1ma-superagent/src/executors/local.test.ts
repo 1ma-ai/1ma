@@ -36,6 +36,42 @@ describe("local executor", () => {
     ]);
   });
 
+  it("sends the next delete only after the previous one answered and the guard still admits", async () => {
+    let allowed = true;
+    const pending: Array<() => void> = [];
+    const { sdk, harness } = createFakeSdk({
+      pluginId: "1ma-superagent",
+      overrides: {
+        threads: {
+          queuedMessages: {
+            list: async () => [{ id: "queued_1" }, { id: "queued_2" }],
+            delete: () =>
+              new Promise<void>((resolve) => {
+                pending.push(resolve);
+              }),
+          },
+          stop: async () => {},
+        },
+      },
+    });
+    const executor = createLocalExecutor(sdk);
+    const stopping = executor.clearQueueAndStop(
+      "thr_late",
+      () => allowed,
+      new AbortController().signal,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    allowed = false;
+    for (const release of pending.splice(0)) release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (const release of pending.splice(0)) release();
+    expect(await stopping).toBe(false);
+    expect(harness.callsTo("threads.queuedMessages.delete")).toEqual([
+      [{ threadId: "thr_late", queuedMessageId: "queued_1" }],
+    ]);
+    expect(harness.callsTo("threads.stop")).toEqual([]);
+  });
+
   it("deletes and stops nothing once the guard refuses after the queue was read", async () => {
     let allowed = true;
     const { sdk, harness } = createFakeSdk({

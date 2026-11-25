@@ -255,21 +255,17 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
     async clearQueueAndStop(threadId, admitted, signal) {
       const id = encodeURIComponent(threadId);
       const queued = await getJson(`/threads/${id}/queued-messages`, queuedSchema, signal);
-      const deletes: Array<Promise<unknown>> = [];
       for (const message of queued) {
-        if (!admitted()) break;
-        deletes.push(
-          getJson(
-            `/threads/${id}/queued-messages/${encodeURIComponent(message.id)}`,
-            okSchema,
-            signal,
-            undefined,
-            "DELETE",
-          ),
+        if (!admitted()) return false;
+        await getJson(
+          `/threads/${id}/queued-messages/${encodeURIComponent(message.id)}`,
+          okSchema,
+          signal,
+          undefined,
+          "DELETE",
         );
       }
-      await Promise.all(deletes);
-      if (deletes.length < queued.length || !admitted()) return false;
+      if (!admitted()) return false;
       await getJson(`/threads/${id}/stop`, okSchema, signal, {});
       return true;
     },

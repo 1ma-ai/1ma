@@ -122,13 +122,11 @@ export function createLocalExecutor(
     },
     async clearQueueAndStop(threadId, admitted, signal) {
       const queued = await sdk.threads.queuedMessages.list({ threadId, signal });
-      const deletes: Array<Promise<unknown>> = [];
       for (const message of queued) {
-        if (!admitted()) break;
-        deletes.push(sdk.threads.queuedMessages.delete({ threadId, queuedMessageId: message.id }));
+        if (!admitted()) return false;
+        await sdk.threads.queuedMessages.delete({ threadId, queuedMessageId: message.id });
       }
-      await Promise.all(deletes);
-      if (deletes.length < queued.length || !admitted()) return false;
+      if (!admitted()) return false;
       await sdk.threads.stop({ threadId });
       return true;
     },
