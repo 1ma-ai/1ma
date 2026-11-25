@@ -12,7 +12,6 @@ on:
     branches: [main]
     paths:
       - "desktop/**"
-      - "!desktop/**/*.md"
       - "brand/**"
       - "plugins/1ma-brand/**"
       - "plugins/1ma-theme/**"
@@ -21,18 +20,8 @@ on:
       - "pnpm-lock.yaml"
       - ".github/workflows/desktop.yml"
       - ".github/workflows/desktop-tests.yml"
+      - "!desktop/**/*.md"
   pull_request:
-    paths:
-      - "desktop/**"
-      - "!desktop/**/*.md"
-      - "brand/**"
-      - "plugins/1ma-brand/**"
-      - "plugins/1ma-theme/**"
-      - "plugins/1ma-server-switcher/**"
-      - "plugins/1ma-auto-updates/**"
-      - "pnpm-lock.yaml"
-      - ".github/workflows/desktop.yml"
-      - ".github/workflows/desktop-tests.yml"
   workflow_dispatch:
     inputs:
       rebrand:
@@ -51,8 +40,38 @@ env:
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
 
 jobs:
+  changes:
+    name: Desktop bb tests paths changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.paths.outputs.changed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: paths
+        name: Does this pull request touch what the workflow checks
+        env:
+          # The list of `on.push.paths` above; scripts/lib/workflows.test.mjs holds them equal.
+          PATHS: |
+            desktop/**
+            brand/**
+            plugins/1ma-brand/**
+            plugins/1ma-theme/**
+            plugins/1ma-server-switcher/**
+            plugins/1ma-auto-updates/**
+            pnpm-lock.yaml
+            .github/workflows/desktop.yml
+            .github/workflows/desktop-tests.yml
+            !desktop/**/*.md
+        run: node scripts/lib/changed-paths.mjs
+
   plan:
     name: Read bb's test shards
+    needs: changes
+    if: needs.changes.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -76,6 +95,8 @@ jobs:
 
   static:
     name: bb lint and typecheck
+    needs: changes
+    if: needs.changes.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -205,3 +226,28 @@ jobs:
         if: contains(matrix.filter, '--filter=@bb/desktop')
         working-directory: ${{ runner.temp }}/bb-src
         run: xvfb-run -a pnpm exec turbo run smoke:browser-address --filter=@bb/desktop --output-logs=new-only
+
+  # The one check of this workflow that a merge into main requires: it reports on
+  # every pull request, also when the paths above are untouched and the jobs are
+  # skipped.
+  result:
+    name: Desktop bb tests result
+    if: always()
+    needs: [changes, plan, static, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: The paths were read, and no job failed or was cancelled
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          if [[ "$CHANGES" != "success" ]]; then
+            echo "::error::the changed paths were not read"
+            exit 1
+          fi
+          if grep -qE '"(failure|cancelled)"' <<< "$RESULTS"; then
+            echo "::error::a job of this workflow failed or was cancelled"
+            exit 1
+          fi

@@ -2,17 +2,6 @@ name: Bots end-to-end
 
 on:
   pull_request:
-    paths:
-      - "plugins/1ma-bots/**"
-      - "plugins/1ma-sidebar/**"
-      - "e2e/bots/**"
-      - "e2e/lib/**"
-      - ".github/workflows/bots-e2e.yml"
-      # How the plugins are installed and built: bb-app's own SDK comes from
-      # packageExtensions in pnpm-workspace.yaml.
-      - "package.json"
-      - "pnpm-workspace.yaml"
-      - "pnpm-lock.yaml"
   workflow_dispatch:
 
 concurrency:
@@ -26,8 +15,37 @@ env:
   PLAYWRIGHT_VERSION: 1.55.0
 
 jobs:
+  changes:
+    name: Bots end-to-end paths changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.paths.outputs.changed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: paths
+        name: Does this pull request touch what the workflow checks
+        env:
+          # The last three are how the plugins are installed and built: bb-app's
+          # own SDK comes from packageExtensions in pnpm-workspace.yaml.
+          PATHS: |
+            plugins/1ma-bots/**
+            plugins/1ma-sidebar/**
+            e2e/bots/**
+            e2e/lib/**
+            .github/workflows/bots-e2e.yml
+            package.json
+            pnpm-workspace.yaml
+            pnpm-lock.yaml
+        run: node scripts/lib/changed-paths.mjs
+
   e2e:
     name: One 1ma server with the bots and sidebar plugins
+    needs: changes
+    if: needs.changes.outputs.changed == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -79,3 +97,28 @@ jobs:
           name: bots-sidebar-screenshots
           path: ${{ env.E2E_ROOT }}/bots/screenshots
           if-no-files-found: warn
+
+  # The one check of this workflow that a merge into main requires: it reports on
+  # every pull request, also when the paths above are untouched and the jobs are
+  # skipped.
+  result:
+    name: Bots end-to-end result
+    if: always()
+    needs: [changes, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: The paths were read, and no job failed or was cancelled
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          if [[ "$CHANGES" != "success" ]]; then
+            echo "::error::the changed paths were not read"
+            exit 1
+          fi
+          if grep -qE '"(failure|cancelled)"' <<< "$RESULTS"; then
+            echo "::error::a job of this workflow failed or was cancelled"
+            exit 1
+          fi

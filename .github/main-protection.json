@@ -1,0 +1,27 @@
+{
+  "$comment": "What GitHub enforces for main. Applied and compared by scripts/protect-main.mjs; scripts/lib/workflows.test.mjs holds the check names equal to the job names in the workflows.",
+  "actions": {
+    "enabled": true,
+    "allowed_actions": "all",
+    "sha_pinning_required": true
+  },
+  "protection": {
+    "required_status_checks": {
+      "strict": false,
+      "checks": [
+        { "context": "Lint, typecheck, test, build", "app_id": 15368 },
+        { "context": "Workflow files are valid", "app_id": 15368 },
+        { "context": "Desktop result", "app_id": 15368 },
+        { "context": "Desktop bb tests result", "app_id": 15368 },
+        { "context": "Bots end-to-end result", "app_id": 15368 }
+      ]
+    },
+    "enforce_admins": true,
+    "required_pull_request_reviews": null,
+    "restrictions": null,
+    "required_linear_history": false,
+    "allow_force_pushes": false,
+    "allow_deletions": false,
+    "required_conversation_resolution": false
+  }
+}
