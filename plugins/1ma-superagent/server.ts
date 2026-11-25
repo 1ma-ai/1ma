@@ -28,6 +28,7 @@ import { QUESTIONS_TAG, questionRpcContract } from "./src/card.js";
 import { QuestionDispatcher } from "./src/dispatcher.js";
 import {
   BYPASS_KIND,
+  bypassKind,
   JOURNAL_STATE_KEY,
   ROLLBACK_KIND,
   type JournalObservation,
@@ -141,7 +142,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
       [AMBIGUOUS_KIND, ambiguousKind()],
       [NOTICE_KIND, noticeKind()],
       [RESULT_KIND, noticeKind()],
-      [BYPASS_KIND, noticeKind()],
+      [BYPASS_KIND, bypassKind(db)],
       [ROLLBACK_KIND, rollbackKind(db)],
     ]);
     const readJournal = options.readJournal?.(bb) ?? hostJournal(bb, host);

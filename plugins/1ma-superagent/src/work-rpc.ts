@@ -111,7 +111,7 @@ export const workRpcContract = defineRpcContract({
         z.object({
           repo: z.string(),
           mainHead: z.string(),
-          confirmedHead: z.string(),
+          confirmedHead: z.string().nullable(),
           state: z.enum(["ok", "needs_reconcile", "bypass", "unknown"]),
           detail: z.string().nullable(),
           checkedAt: z.number(),
@@ -220,7 +220,7 @@ export function workRpcHandlers(
   questions: QuestionStore,
   releases: () => Array<{
     repo: string;
-    anchor: string;
+    anchor: string | null;
     observedHead: string;
     state: "ok" | "needs_reconcile" | "bypass" | "unknown";
     detail: string | null;

@@ -1,7 +1,10 @@
 import Database from "better-sqlite3";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { GitHubReader } from "./github/reader.js";
-import { mainWatchRows, rollbackKind, runMainWatch } from "./main-watch.js";
+import { bypassKind, mainWatchRows, rollbackKind, runMainWatch } from "./main-watch.js";
 import { QuestionStore } from "./questions.js";
 import { repoPolicy } from "./repos.js";
 import { MIGRATIONS } from "./schema.js";
@@ -10,6 +13,7 @@ const A = "a".repeat(40);
 const B = "b".repeat(40);
 const C = "c".repeat(40);
 const X = "d".repeat(40);
+const REPO = "example/app";
 
 function line(record: Record<string, unknown>) {
   return JSON.stringify({ author: "release-train", repo: "example/app", token: "t1", ...record });
@@ -214,5 +218,171 @@ describe("main watch", () => {
     expect(mainWatchRows(t.db)[0]).toMatchObject({ anchor: C, state: "ok" });
     await t.run();
     expect(t.questions.waiting()).toEqual([]);
+  });
+});
+
+const BEFORE_SPLIT = 16;
+
+function legacy(rows: Array<{ lastHead: string; state: string }>) {
+  const directory = mkdtempSync(join(tmpdir(), "sa-main-watch-"));
+  const db = new Database(join(directory, "superagent.db"));
+  for (const statement of MIGRATIONS.slice(0, BEFORE_SPLIT)) db.exec(statement);
+  const insert = db.prepare(
+    `INSERT INTO main_watch (repo, last_head, state, detail, checked_at) VALUES (?, ?, ?, NULL, 1000)`,
+  );
+  rows.forEach((row, index) =>
+    insert.run(index === 0 ? REPO : `example/app${index}`, row.lastHead, row.state),
+  );
+  return {
+    db,
+    upgrade: () => {
+      for (const statement of MIGRATIONS.slice(BEFORE_SPLIT)) db.exec(statement);
+    },
+    close: () => {
+      db.close();
+      rmSync(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+function watchOnce(db: Database.Database, head: string, journal: string) {
+  return runMainWatch({
+    db,
+    github: {
+      pull: async () => {
+        throw new Error("unused");
+      },
+      recentPulls: async () => ({ pulls: [], complete: true }),
+      mainHead: async () => head,
+    },
+    readJournal: async () => ({ status: "ok", text: journal, truncated: false }),
+    enabled: () => true,
+    policy: () => repoPolicy([{ repo: REPO, accounts: { mac: [], linux: [] } }], []),
+    questions: new QuestionStore(db),
+    now: 2_000,
+    signal: new AbortController().signal,
+  });
+}
+
+function answerBaseline(db: Database.Database) {
+  const questions = new QuestionStore(db);
+  const question = questions.waiting().find((candidate) => candidate.kind === "main_bypass");
+  if (question === undefined) throw new Error("no baseline question");
+  questions.markOpen(question.id, "thr_bot", "tok", 2_000);
+  return questions.answer(
+    question.id,
+    "tok",
+    "ok",
+    new Map([["main_bypass", bypassKind(db)]]),
+    2_000,
+  );
+}
+
+describe("main watch rows written before the confirmed head was kept apart", () => {
+  it.each(["needs_reconcile", "bypass"])(
+    "confirms nothing by itself after a %s row migrates, and asks the owner to set the baseline",
+    async (state) => {
+      const old = legacy([{ lastHead: B, state }]);
+      try {
+        old.upgrade();
+        await watchOnce(
+          old.db,
+          B,
+          [
+            line({ outcome: "push-intent", base: X, final_sha: B }),
+            line({ outcome: "merged", final_sha: B }),
+          ].join("\n"),
+        );
+        expect(mainWatchRows(old.db)[0]).toMatchObject({
+          anchor: null,
+          observedHead: B,
+          state: "needs_reconcile",
+        });
+        const asked = new QuestionStore(old.db).waiting();
+        expect(asked.map((question) => question.subject)).toEqual([`baseline:${REPO}@${B}`]);
+        expect(answerBaseline(old.db)).toBe("applied");
+        expect(mainWatchRows(old.db)[0]).toMatchObject({ anchor: B, observedHead: B, state: "ok" });
+      } finally {
+        old.close();
+      }
+    },
+  );
+
+  it("asks for the baseline again when main moves before the owner answers, and refuses the old answer", async () => {
+    const old = legacy([{ lastHead: B, state: "needs_reconcile" }]);
+    try {
+      old.upgrade();
+      await watchOnce(old.db, B, "");
+      const questions = new QuestionStore(old.db);
+      expect(questions.waiting().map((question) => question.subject)).toEqual([
+        `baseline:${REPO}@${B}`,
+      ]);
+      const first = questions.waiting()[0];
+      if (first === undefined) throw new Error("not asked");
+      questions.markOpen(first.id, "thr_bot", "tok", 2_000);
+      await watchOnce(old.db, C, "");
+      expect(
+        questions.answer(
+          first.id,
+          "tok",
+          "ok",
+          new Map([["main_bypass", bypassKind(old.db)]]),
+          2_000,
+        ),
+      ).toBe("unknown");
+      expect(questions.waiting().map((question) => question.subject)).toEqual([
+        `baseline:${REPO}@${C}`,
+      ]);
+      expect(mainWatchRows(old.db)[0]).toMatchObject({ anchor: null, state: "needs_reconcile" });
+    } finally {
+      old.close();
+    }
+  });
+
+  it("keeps an ok row as the confirmed head and judges the next train from it", async () => {
+    const old = legacy([{ lastHead: A, state: "ok" }]);
+    try {
+      old.upgrade();
+      await watchOnce(old.db, B, train(A, B));
+      expect(mainWatchRows(old.db)[0]).toMatchObject({ anchor: B, observedHead: B, state: "ok" });
+      expect(new QuestionStore(old.db).waiting()).toEqual([]);
+    } finally {
+      old.close();
+    }
+  });
+
+  it("cancels a rollback card versioned by one head and asks it again only for a transition from a confirmed head", async () => {
+    const old = legacy([{ lastHead: A, state: "needs_reconcile" }]);
+    try {
+      const card = {
+        title: "rollback",
+        observed: "observed",
+        affected: "nothing",
+        recommendation: "answer",
+        options: [{ id: "yes", label: "Yes", recommended: false }],
+      };
+      old.db
+        .prepare(
+          `INSERT INTO questions (id, key, kind, subject, expected_version, card, priority, state, created_at)
+           VALUES ('q_old', ?, 'main_rollback', ?, ?, ?, 50, 'queued', 1000)`,
+        )
+        .run(`main_rollback:${REPO}:${C}`, `${REPO}@${C}`, A, JSON.stringify(card));
+      old.upgrade();
+      expect(new QuestionStore(old.db).get("q_old")?.state).toBe("canceled");
+      const journal = [train(C, A), line({ outcome: "rolled-back", final_sha: A })].join("\n");
+      await watchOnce(old.db, C, journal);
+      const questions = new QuestionStore(old.db);
+      expect(questions.waiting().map((question) => question.kind)).toEqual(["main_bypass"]);
+      expect(answerBaseline(old.db)).toBe("applied");
+      expect(mainWatchRows(old.db)[0]).toMatchObject({ anchor: C, state: "ok" });
+      await watchOnce(old.db, A, journal);
+      expect(mainWatchRows(old.db)[0]).toMatchObject({ anchor: A, state: "ok" });
+      await watchOnce(old.db, C, journal);
+      expect(
+        questions.waiting().map((question) => [question.kind, question.expectedVersion]),
+      ).toEqual([["main_rollback", `${A}>${C}`]]);
+    } finally {
+      old.close();
+    }
   });
 });

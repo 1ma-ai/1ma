@@ -13,7 +13,7 @@ export type ReadJournal = (signal: AbortSignal) => Promise<JournalTail>;
 
 export interface MainWatchRow {
   repo: string;
-  anchor: string;
+  anchor: string | null;
   observedHead: string;
   state: "ok" | "needs_reconcile" | "bypass" | "unknown";
   detail: string | null;
@@ -36,15 +36,15 @@ export function mainWatchRows(db: Database.Database): MainWatchRow[] {
   const rows = db.prepare(`SELECT * FROM main_watch ORDER BY repo`).all() as Array<{
     repo: string;
     last_head: string;
-    observed_head: string | null;
+    anchor: string | null;
     state: string;
     detail: string | null;
     checked_at: number;
   }>;
   return rows.map((row) => ({
     repo: row.repo,
-    anchor: row.last_head,
-    observedHead: row.observed_head ?? row.last_head,
+    anchor: row.anchor,
+    observedHead: row.last_head,
     state:
       row.state === "ok" || row.state === "needs_reconcile" || row.state === "bypass"
         ? row.state
@@ -66,13 +66,13 @@ export const ROLLBACK_KIND = "main_rollback";
 
 function saver(db: Database.Database) {
   const statement = db.prepare(
-    `INSERT INTO main_watch (repo, last_head, observed_head, state, detail, checked_at) VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT (repo) DO UPDATE SET last_head = excluded.last_head, observed_head = excluded.observed_head,
+    `INSERT INTO main_watch (repo, anchor, last_head, state, detail, checked_at) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (repo) DO UPDATE SET anchor = excluded.anchor, last_head = excluded.last_head,
        state = excluded.state, detail = excluded.detail, checked_at = excluded.checked_at`,
   );
   return (
     repo: string,
-    anchor: string,
+    anchor: string | null,
     observed: string,
     state: MainWatchRow["state"],
     detail: string | null,
@@ -81,26 +81,78 @@ function saver(db: Database.Database) {
 }
 
 function transition(row: Pick<MainWatchRow, "anchor" | "observedHead">): string {
-  return `${row.anchor}>${row.observedHead}`;
+  return `${row.anchor ?? "?"}>${row.observedHead}`;
+}
+
+function headOf(subject: string) {
+  const at = subject.lastIndexOf("@");
+  return at < 0 ? null : { repo: subject.slice(0, at), sha: subject.slice(at + 1) };
+}
+
+function rowOf(db: Database.Database, repo: string) {
+  return mainWatchRows(db).find((candidate) => candidate.repo === repo);
+}
+
+const BASELINE = "baseline:";
+
+function baselineOf(subject: string) {
+  return subject.startsWith(BASELINE) ? headOf(subject.slice(BASELINE.length)) : null;
+}
+
+export function bypassKind(db: Database.Database): QuestionKind {
+  const save = saver(db);
+  return {
+    currentVersion(subject) {
+      const target = baselineOf(subject);
+      if (target === null) return "1";
+      const current = rowOf(db, target.repo);
+      return current === undefined ? null : transition(current);
+    },
+    onAnswer(question, _optionId, now) {
+      const target = baselineOf(question.subject);
+      if (target !== null)
+        save(target.repo, target.sha, target.sha, "ok", "baseline set by the owner", now);
+    },
+  };
+}
+
+function askBaseline(questions: QuestionStore, repo: string, head: string, now: number): void {
+  const key = `${BYPASS_KIND}:${BASELINE}${repo}:${head}`;
+  for (const waiting of questions.waiting())
+    if (waiting.subject.startsWith(`${BASELINE}${repo}@`) && waiting.key !== key)
+      questions.cancel(waiting.key);
+  if (questions.latest(key) !== null) return;
+  questions.ask(
+    {
+      key,
+      kind: BYPASS_KIND,
+      subject: `${BASELINE}${repo}@${head}`,
+      expectedVersion: transition({ anchor: null, observedHead: head }),
+      card: {
+        title: strings.baselineTitle(repo),
+        observed: strings.baselineObserved(repo, head),
+        affected: strings.baselineAffected,
+        recommendation: strings.baselineRecommendation,
+        options: [{ id: "ok", label: strings.baselineSet, recommended: false }],
+      },
+      priority: 50,
+    },
+    now,
+  );
 }
 
 export function rollbackKind(db: Database.Database): QuestionKind {
   const save = saver(db);
-  const head = (subject: string) => {
-    const at = subject.lastIndexOf("@");
-    return at < 0 ? null : { repo: subject.slice(0, at), sha: subject.slice(at + 1) };
-  };
-  const row = (repo: string) => mainWatchRows(db).find((candidate) => candidate.repo === repo);
   return {
     currentVersion(subject) {
-      const target = head(subject);
+      const target = headOf(subject);
       if (target === null) return null;
-      const current = row(target.repo);
+      const current = rowOf(db, target.repo);
       return current === undefined ? null : transition(current);
     },
     onAnswer(question, optionId, now) {
-      const target = head(question.subject);
-      const current = target === null ? undefined : row(target.repo);
+      const target = headOf(question.subject);
+      const current = target === null ? undefined : rowOf(db, target.repo);
       if (target === null || current === undefined || current.observedHead !== target.sha)
         return "stale";
       if (optionId === "yes")
@@ -163,8 +215,13 @@ export async function runMainWatch(deps: MainWatchDeps): Promise<string[]> {
       save(repo, head, head, "ok", "first observation", deps.now);
       continue;
     }
-    if (before.state !== "needs_reconcile" && before.observedHead === head) continue;
     const anchor = before.anchor;
+    if (anchor === null) {
+      save(repo, null, head, "needs_reconcile", "no confirmed head to compare with", deps.now);
+      askBaseline(deps.questions, repo, head, deps.now);
+      continue;
+    }
+    if (before.state !== "needs_reconcile" && before.observedHead === head) continue;
     const verdict = judgeMainMove(records, repo, anchor, head, journal.truncated);
     if (verdict.kind === "explained") {
       save(repo, head, head, "ok", null, deps.now);

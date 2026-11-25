@@ -122,7 +122,12 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE actions ADD COLUMN label TEXT`,
   `ALTER TABLE questions ADD COLUMN unrecorded_answer INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE pr_links ADD COLUMN conflict_chat TEXT`,
-  `ALTER TABLE main_watch ADD COLUMN observed_head TEXT`,
-  `UPDATE main_watch SET observed_head = last_head WHERE observed_head IS NULL`,
+  `ALTER TABLE main_watch ADD COLUMN anchor TEXT`,
+  `UPDATE main_watch SET anchor = last_head WHERE state = 'ok'`,
+  `UPDATE main_watch SET state = 'needs_reconcile',
+     detail = 'recorded before the confirmed head was kept apart from the observed one'
+   WHERE state <> 'ok'`,
+  `UPDATE questions SET state = 'canceled'
+   WHERE kind = 'main_rollback' AND state IN ('queued', 'open') AND instr(expected_version, '>') = 0`,
   `ALTER TABLE pr_links ADD COLUMN conflict_since INTEGER`,
 ];
