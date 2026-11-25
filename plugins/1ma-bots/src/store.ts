@@ -16,6 +16,7 @@ import {
 import { randomAppearance } from "./appearance.js";
 import { avatarDataUrl } from "./avatar.js";
 import { BotsError } from "./errors.js";
+import { agentText } from "../strings.js";
 
 export const MIGRATIONS = [
   `CREATE TABLE bots (
@@ -118,6 +119,11 @@ type ThreadPlace =
   | "last"
   | { before: string | undefined }
   | { after: string | undefined };
+
+export interface MoveTarget {
+  threadId: string;
+  placement: "before" | "after";
+}
 
 const PENDING_START_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -381,8 +387,16 @@ export class BotStore {
            VALUES (?, ?, 0, ?, NULL, ?)`,
         )
         .run(threadId, botId, Number(options.startedFromBot), this.now());
-      this.reorderThreads(botId, order);
+      this.writeOrder(order);
     })();
+  }
+
+  hasAssignmentDecision(threadId: string): boolean {
+    return (
+      this.db
+        .prepare("SELECT 1 FROM thread_assignment_decisions WHERE thread_id = ?")
+        .get(threadId) !== undefined
+    );
   }
 
   recordAssignmentDecision(threadId: string): boolean {
@@ -402,10 +416,7 @@ export class BotStore {
     startedFromBot: boolean,
   ): boolean {
     return this.transaction(() => {
-      const decided = this.db
-        .prepare("SELECT 1 FROM thread_assignment_decisions WHERE thread_id = ?")
-        .get(threadId);
-      if (decided) return false;
+      if (this.hasAssignmentDecision(threadId)) return false;
       const botId = this.botOfThread(sourceThreadId);
       if (botId === null) return false;
       this.recordAssignmentDecision(threadId);
@@ -428,22 +439,32 @@ export class BotStore {
     this.db.prepare("DELETE FROM bot_threads WHERE thread_id = ?").run(threadId);
   }
 
-  reorderThreads(botId: string, threadIds: readonly string[]): void {
-    this.db.transaction(() => {
-      this.requireRow(botId);
-      requireSameSet(
-        threadIds,
-        this.threadsOf(botId).map((thread) => thread.threadId),
-      );
-      threadIds.forEach((threadId, index) => {
-        if (this.botOfThread(threadId) !== botId) {
-          throw new BotsError("invalid", `Thread ${threadId} does not belong to this bot`);
-        }
-        this.db
-          .prepare("UPDATE bot_threads SET position = ? WHERE thread_id = ?")
-          .run(index, threadId);
-      });
-    })();
+  // The bot's order with these conversations beside the target, computed from
+  // its current members.
+  orderAfterMove(botId: string, threadIds: readonly string[], target: MoveTarget): string[] {
+    const order = this.get(botId).threads.map((thread) => thread.threadId);
+    const moved = new Set(threadIds);
+    if (
+      moved.has(target.threadId) ||
+      ![...moved, target.threadId].every((id) => order.includes(id))
+    )
+      throw new BotsError("invalid", agentText.moveElsewhere);
+    const rest = order.filter((id) => !moved.has(id));
+    rest.splice(
+      rest.indexOf(target.threadId) + Number(target.placement === "after"),
+      0,
+      ...order.filter((id) => moved.has(id)),
+    );
+    return rest;
+  }
+
+  moveThreads(botId: string, threadIds: readonly string[], target: MoveTarget): void {
+    this.transaction(() => this.writeOrder(this.orderAfterMove(botId, threadIds, target)));
+  }
+
+  private writeOrder(threadIds: readonly string[]): void {
+    const write = this.db.prepare("UPDATE bot_threads SET position = ? WHERE thread_id = ?");
+    threadIds.forEach((threadId, index) => write.run(index, threadId));
   }
 
   setCompleted(threadId: string, completed: boolean): boolean {

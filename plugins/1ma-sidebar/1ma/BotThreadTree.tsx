@@ -1,6 +1,6 @@
 import { useMemo, type ComponentProps } from "react";
 import { DndContext } from "@dnd-kit/core";
-import { experimental_useRpcMutation as useRpcMutation, useSdk } from "@get-bb/plugin-sdk/app";
+import { experimental_useRpcMutation as useRpcMutation } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import { useSectionThreadDnd } from "../app/dnd/useSectionThreadDnd.js";
 import { SectionThreadTreeItems, SectionThreadDragOverlayPortal } from "../app/list/ProjectRow.js";
@@ -33,19 +33,12 @@ export function BotThreadTree({
     () => buildProjectThreadGroups(threads, compareThreads, false),
     [threads, compareThreads],
   );
-  const reorder = useRpcMutation({
+  const move = useRpcMutation({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.reorderThreads",
+    method: "bots.v1.moveThreads",
   });
-  const sdk = useSdk();
   const order = bot.threads.map((member) => member.threadId);
-  const parentOf = new Map(threads.map((thread) => [thread.id, thread.parentThreadId]));
-  // The parent a conversation is drawn under in this tree.
-  const shownParentOf = (threadId: string) => {
-    const parentId = parentOf.get(threadId) ?? null;
-    return parentId !== null && parentOf.has(parentId) ? parentId : null;
-  };
   const dnd = useSectionThreadDnd({
     containerId: bot.id,
     enabled: true,
@@ -63,19 +56,12 @@ export function BotThreadTree({
       // Only the bot's own conversations have a place in its order.
       accepts: (ids, targetId) => [...ids, targetId].every((id) => order.includes(id)),
       async drop(ids, target) {
-        const moved = order.filter((id) => ids.includes(id));
-        const rest = order.filter((id) => !ids.includes(id));
-        rest.splice(
-          rest.indexOf(target.threadId) + Number(target.placement === "after"),
-          0,
-          ...moved,
-        );
-        const parentThreadId = shownParentOf(target.threadId);
         try {
-          for (const threadId of moved)
-            if (shownParentOf(threadId) !== parentThreadId)
-              await sdk.threads.update({ threadId, parentThreadId });
-          await reorder.mutate({ botId: bot.id, threadIds: rest });
+          await move.mutate({
+            botId: bot.id,
+            threadIds: [...ids],
+            target: { threadId: target.threadId, placement: target.placement },
+          });
         } catch (error) {
           toast.error(getMutationErrorMessage({ error, fallbackMessage: strings.reorderFailed }));
         }

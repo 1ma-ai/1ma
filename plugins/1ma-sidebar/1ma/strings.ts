@@ -7,6 +7,7 @@ export const strings = {
   newConversation: (name: string) => `New conversation with ${name}`,
   composerPlaceholder: (name: string) => `Message ${name}…`,
   openBot: (name: string) => `Open ${name}`,
+  openFailed: (name: string) => `Could not open ${name}`,
   expand: (name: string) => `Expand ${name} conversations`,
   collapse: (name: string) => `Collapse ${name} conversations`,
   botActions: (name: string) => `${name} actions`,

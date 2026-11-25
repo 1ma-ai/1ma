@@ -38,8 +38,8 @@ const THREADS = [
   makeSidebarThread({ id: "spawned", parentThreadId: "parent" }),
 ];
 
-function renderTree(update: () => Promise<unknown> = async () => undefined) {
-  const orders: unknown[] = [];
+function renderTree(answer: () => { ok: true } = () => ({ ok: true })) {
+  const moves: unknown[] = [];
   const { inspection } = renderSlot(
     { component: BotThreadTree as never },
     {
@@ -60,17 +60,16 @@ function renderTree(update: () => Promise<unknown> = async () => undefined) {
       collapsedThreadIds: new Set(),
     } as never,
     {
-      sdk: { threads: { update: update as never } },
       rpc: {
-        "bots.v1.reorderThreads": (input: unknown) => {
-          orders.push((input as { threadIds: string[] }).threadIds);
-          return { ok: true };
+        "bots.v1.moveThreads": (input: unknown) => {
+          moves.push(input);
+          return answer();
         },
       },
     },
   );
   const { accepts, drop } = (captured.dnd as DndArgs).botReorder!;
-  return { accepts, drop, orders, inspection };
+  return { accepts, drop, moves, inspection };
 }
 
 describe("a drop on the edge of a bot's conversation", () => {
@@ -82,55 +81,22 @@ describe("a drop on the edge of a bot's conversation", () => {
   });
 
   it.each([
-    ["before", ["main", "archived", "guest", "parent", "second", "first"]],
-    ["after", ["main", "archived", "guest", "parent", "first", "second"]],
-  ] as const)("%s a neighbour changes only the order", async (placement, order) => {
-    const { drop, orders, inspection } = renderTree();
-    drop(["second"], { threadId: "first", placement });
-    await waitFor(() => expect(orders).toEqual([order]));
+    [["second"], { threadId: "first", placement: "before" }],
+    [["second", "first"], { threadId: "main", placement: "after" }],
+    [["main"], { threadId: "guest", placement: "after" }],
+  ] as const)("sends %o to %o as it was dropped, in one call", async (threadIds, target) => {
+    const { drop, moves, inspection } = renderTree();
+    drop(threadIds, target);
+    await waitFor(() => expect(moves).toEqual([{ botId: "bot_m", threadIds, target }]));
     expect(inspection.sdkCalls).toEqual([]);
+    expect(captured.error).not.toHaveBeenCalled();
   });
 
-  it("next to a top-level conversation takes a sub-chat out of its parent", async () => {
-    const { drop, orders, inspection } = renderTree();
-    drop(["second", "first"], { threadId: "main", placement: "after" });
-    await waitFor(() =>
-      expect(orders).toEqual([["main", "first", "second", "archived", "guest", "parent"]]),
-    );
-    expect(inspection.sdkCalls).toEqual(
-      ["first", "second"].map((threadId) => ({
-        method: "threads.update",
-        args: [{ threadId, parentThreadId: null }],
-      })),
-    );
-  });
-
-  it("next to a sub-chat moves a conversation under the same parent", async () => {
-    const { drop, orders, inspection } = renderTree();
-    drop(["main", "first"], { threadId: "second", placement: "before" });
-    await waitFor(() =>
-      expect(orders).toEqual([["archived", "guest", "parent", "main", "first", "second"]]),
-    );
-    expect(inspection.sdkCalls).toEqual([
-      { method: "threads.update", args: [{ threadId: "main", parentThreadId: "parent" }] },
-    ]);
-  });
-
-  it("never touches a parent outside this bot's tree", async () => {
-    const { drop, orders, inspection } = renderTree();
-    drop(["main"], { threadId: "guest", placement: "after" });
-    await waitFor(() => expect(orders).toHaveLength(1));
-    drop(["guest"], { threadId: "parent", placement: "after" });
-    await waitFor(() => expect(orders).toHaveLength(2));
-    expect(inspection.sdkCalls).toEqual([]);
-  });
-
-  it("says when the move failed and leaves the order alone", async () => {
-    const { drop, orders } = renderTree(async () => {
+  it("says why the move failed", async () => {
+    const { drop } = renderTree(() => {
       throw new Error("The parent is archived");
     });
     drop(["second"], { threadId: "main", placement: "after" });
     await waitFor(() => expect(captured.error).toHaveBeenCalledWith("The parent is archived"));
-    expect(orders).toEqual([]);
   });
 });

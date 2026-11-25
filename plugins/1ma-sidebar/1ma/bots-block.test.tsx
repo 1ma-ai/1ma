@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
@@ -16,6 +17,7 @@ import { botDrop } from "./thread-drop.js";
 import { strings } from "./strings.js";
 
 const app = await loadPluginApp(() => import("../app"));
+const { useMainThread } = await import("./BotsBlock.js");
 const registration = app.threadLists[0]!;
 
 const PROJECTS = [makePluginProject({ id: "proj_app", name: "App" })];
@@ -60,6 +62,7 @@ function render(options: {
   setPreference?: (input: unknown) => unknown;
   setHidden?: (input: unknown) => unknown;
   assign?: (input: unknown) => unknown;
+  main?: () => { threadId: string | null };
   threads?: typeof THREADS;
   preferences?: Partial<ReturnType<typeof defaultPreferences>>;
 }) {
@@ -82,6 +85,7 @@ function render(options: {
         }),
         setPreference: options.setPreference ?? ((input: unknown) => input),
         "bots.v1.list": options.bots ?? (() => ({ bots: [] })),
+        "bots.v1.main": options.main ?? (() => ({ threadId: null })),
         "bots.v1.setHidden": options.setHidden ?? (() => ({ ok: true })),
         "bots.v1.assign": options.assign ?? (() => ({ botId: "bot_m", startedFromBot: false })),
       },
@@ -250,6 +254,7 @@ describe("a done conversation that is working again", () => {
         rpc: {
           listPreferences: () => ({ preferences: defaultPreferences() }),
           setPreference: (input: unknown) => input,
+          "bots.v1.main": () => ({ threadId: "thr_bot" }),
           "bots.v1.list": () => ({
             bots: [
               {
@@ -264,6 +269,72 @@ describe("a done conversation that is working again", () => {
     await screen.findByText("Marketer");
     expect(threadIdsIn(botElement("bot_m"))).toEqual(["thr_bot", "thr_bot_child"]);
     expect(screen.queryByText(strings.done(1))).toBeNull();
+  });
+});
+
+describe("a click on a bot", () => {
+  const open = () =>
+    fireEvent.click(screen.getByRole("button", { name: strings.openBot("Marketer") }));
+
+  it("opens the conversation 1ma Bots names at that moment", async () => {
+    let main = "thr_bot";
+    const view = render({
+      bots: () => ({ bots: [marketer()] }),
+      main: () => ({ threadId: main }),
+    });
+    await screen.findByText("Marketer");
+    main = "thr_plain";
+    open();
+    await waitFor(() =>
+      expect(view.inspection.navigateCalls).toContainEqual(
+        expect.objectContaining({ threadId: "thr_plain" }),
+      ),
+    );
+    expect(view.inspection.navigateCalls).toHaveLength(1);
+  });
+
+  it("offers a new conversation when the bot has no open one", async () => {
+    const view = render({ bots: () => ({ bots: [marketer()] }) });
+    await screen.findByText("Marketer");
+    open();
+    await screen.findByRole("dialog", { name: strings.newConversation("Marketer") });
+    expect(view.inspection.navigateCalls).toEqual([]);
+  });
+
+  it("says why it could not open", async () => {
+    const view = render({
+      bots: () => ({ bots: [marketer()] }),
+      main: () => {
+        throw new Error("1ma-bots is reloading");
+      },
+    });
+    await screen.findByText("Marketer");
+    open();
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith("1ma-bots is reloading"));
+    expect(view.inspection.navigateCalls).toEqual([]);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("the avatar's main conversation is read again when a conversation starts working", async () => {
+    let main = "thr_bot";
+    function Probe() {
+      const [status, setStatus] = useState<"idle" | "active">("idle");
+      const open = [THREADS[0]!, { ...THREADS[2]!, status }];
+      const thread = useMainThread(marketer(), {
+        open,
+        done: [],
+        doneCount: 0,
+        compare: () => 0,
+      });
+      return <button onClick={() => setStatus("active")}>{thread?.id ?? "none"}</button>;
+    }
+    renderSlot({ component: Probe as never }, {} as never, {
+      rpc: { "bots.v1.main": () => ({ threadId: main }) },
+    });
+    const button = await screen.findByText("thr_bot");
+    main = "thr_plain";
+    fireEvent.click(button);
+    await screen.findByText("thr_plain");
   });
 });
 
@@ -308,30 +379,6 @@ describe("nested conversations of a bot", () => {
       "thr_first",
       "thr_spawned",
     ]);
-  });
-
-  it("the bot opens its first top-level conversation, not a sub-chat ahead in the order", async () => {
-    const { view } = await rows([]);
-    fireEvent.click(screen.getByRole("button", { name: strings.openBot("Marketer") }));
-    expect(view.inspection.navigateCalls).toContainEqual(
-      expect.objectContaining({ threadId: "thr_main" }),
-    );
-  });
-
-  it("with the first conversation done the bot opens the next top-level one", async () => {
-    const { view } = await rows(["thr_main"]);
-    fireEvent.click(screen.getByRole("button", { name: strings.openBot("Marketer") }));
-    expect(view.inspection.navigateCalls).toContainEqual(
-      expect.objectContaining({ threadId: "thr_parent" }),
-    );
-  });
-
-  it("with the first conversation archived the bot opens the next top-level one", async () => {
-    const { view } = await rows([], changed("thr_main", { archivedAt: 1, isArchived: true }));
-    fireEvent.click(screen.getByRole("button", { name: strings.openBot("Marketer") }));
-    expect(view.inspection.navigateCalls).toContainEqual(
-      expect.objectContaining({ threadId: "thr_parent" }),
-    );
   });
 
   it("a parent goes to Done with its whole branch, counted once", async () => {
@@ -516,6 +563,7 @@ describe("the owner's review of 17.11: hiding a bot and its state at a glance", 
     });
     const items = [main, ...extra, failed];
     render({
+      main: () => ({ threadId: "thr_main" }),
       threads: [...THREADS, ...items],
       bots: () => ({
         bots: [
@@ -532,7 +580,7 @@ describe("the owner's review of 17.11: hiding a bot and its state at a glance", 
     });
     await screen.findByText("Marketer");
     const avatar = botElement("bot_m").querySelector("[data-1ma-bot-avatar]")!;
-    expect(avatar.querySelector("[data-1ma-bot-main-status]")).not.toBeNull();
+    await waitFor(() => expect(avatar.querySelector("[data-1ma-bot-main-status]")).not.toBeNull());
     expect(avatar.querySelectorAll("[data-1ma-bot-other-working]")).toHaveLength(2);
     expect(avatar.querySelector("[data-1ma-bot-other-working-more]")).not.toBeNull();
     expect(avatar.querySelector("[data-1ma-bot-unread-error]")).not.toBeNull();

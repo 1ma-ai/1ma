@@ -48,8 +48,16 @@ export const botsRpc = {
     input: z.object({ botId: z.string(), hidden: z.boolean() }),
     output: ok,
   },
-  "bots.v1.reorderThreads": {
-    input: z.object({ botId: z.string(), threadIds: z.array(z.string()) }),
+  "bots.v1.main": {
+    input: z.object({ botId: z.string() }),
+    output: z.object({ threadId: z.string().nullable() }),
+  },
+  "bots.v1.moveThreads": {
+    input: z.object({
+      botId: z.string(),
+      threadIds: z.array(z.string()).min(1),
+      target: z.object({ threadId: z.string(), placement: z.enum(["before", "after"]) }),
+    }),
     output: ok,
   },
   "bots.v1.setCompleted": {

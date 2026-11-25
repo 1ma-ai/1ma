@@ -148,8 +148,17 @@ export const botsRpc = {
     }),
     output: z.object({ botId: z.string().nullable(), startedFromBot: z.boolean() }),
   },
-  "bots.v1.reorderThreads": {
-    input: z.object({ botId: z.string(), threadIds: z.array(z.string()) }),
+  // The conversation a click on the bot opens; null when a click starts a new one.
+  "bots.v1.main": {
+    input: botId,
+    output: z.object({ threadId: z.string().nullable() }),
+  },
+  "bots.v1.moveThreads": {
+    input: z.object({
+      botId: z.string(),
+      threadIds: z.array(z.string()).min(1),
+      target: z.object({ threadId: z.string(), placement: z.enum(["before", "after"]) }),
+    }),
     output: ok,
   },
   "bots.v1.setCompleted": {

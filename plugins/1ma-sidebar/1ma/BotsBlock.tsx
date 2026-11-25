@@ -344,8 +344,6 @@ function keepsOpen(thread: PluginSidebarThread): boolean {
 }
 
 interface BotConversations {
-  // The conversation the bot row opens: the first open one at the top of its tree.
-  first: PluginSidebarThread | null;
   // Every conversation with its sub-threads. Done covers the whole branch,
   // unless something in the branch keeps it open.
   open: PluginSidebarThread[];
@@ -378,13 +376,10 @@ function useBotConversations(bots: readonly SidebarBot[]) {
       );
       const doneIds = new Set(done.map((thread) => thread.id));
       const open = shown.filter((thread) => !doneIds.has(thread.id));
-      const isTop = (thread: PluginSidebarThread) =>
-        !thread.isArchived && branchOf(thread.id).length === 1;
       const compare: ThreadComparator = (left, right) =>
         (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
           (order.get(right.id) ?? Number.MAX_SAFE_INTEGER) || right.createdAt - left.createdAt;
       byBot.set(bot.id, {
-        first: open.filter(isTop).sort(compare)[0] ?? null,
         open,
         done,
         doneCount: done.filter(
@@ -394,7 +389,6 @@ function useBotConversations(bots: readonly SidebarBot[]) {
       });
     }
     const empty: BotConversations = {
-      first: null,
       open: [],
       done: [],
       doneCount: 0,
@@ -407,17 +401,44 @@ function useBotConversations(bots: readonly SidebarBot[]) {
   }, [bots, threads]);
 }
 
+// 1ma-bots alone knows which conversation is main. A status in the tree can
+// change it, so it is read again when the bot's rows do.
+export function useMainThread(
+  bot: SidebarBot,
+  { open, done }: BotConversations,
+): PluginSidebarThread | null {
+  const { data, refetch } = useRpcQuery({
+    contract: botsRpc,
+    pluginId: BOTS_PLUGIN_ID,
+    method: "bots.v1.main",
+    input: { botId: bot.id },
+  });
+  const rows = [...open, ...done];
+  const state = rows.map((thread) =>
+    [thread.id, thread.parentThreadId, thread.isArchived, keepsOpen(thread)].join(":"),
+  );
+  const seen = state.sort().join();
+  const lastSeen = useRef(seen);
+  useEffect(() => {
+    if (lastSeen.current === seen) return;
+    lastSeen.current = seen;
+    void refetch();
+  }, [refetch, seen]);
+  return rows.find((thread) => thread.id === data?.threadId) ?? null;
+}
+
 // The bot's state at a glance, drawn on its image: the glyph bb draws for its
 // main conversation (the one a click opens) on the corner, a dot for each
 // other conversation that is working (two and a plus past three, the count in
 // the tooltip), and a red mark for an unread error elsewhere.
 function BotAvatar({ bot, conversations }: { bot: SidebarBot; conversations: BotConversations }) {
-  const { first, open } = conversations;
-  const main = useMemo(() => (first === null ? NO_THREADS : [first]), [first]);
-  const hasDraft = useThreadsHaveDraft(main);
-  const rowStatus = usePluginThreadRowStatusForThreads(main);
+  const { open } = conversations;
+  const main = useMainThread(bot, conversations);
+  const mainThreads = useMemo(() => (main === null ? NO_THREADS : [main]), [main]);
+  const hasDraft = useThreadsHaveDraft(mainThreads);
+  const rowStatus = usePluginThreadRowStatusForThreads(mainThreads);
   const status = resolveThreadStatus({
-    thread: first,
+    thread: main,
     hiddenThreads: NO_THREADS,
     hasUnsubmittedDraft: hasDraft,
     rowStatus,
@@ -434,13 +455,13 @@ function BotAvatar({ bot, conversations }: { bot: SidebarBot; conversations: Bot
     });
   const others = quiet
     ? 0
-    : open.filter((thread) => thread.id !== first?.id && own(thread).isWorking).length;
+    : open.filter((thread) => thread.id !== main?.id && own(thread).isWorking).length;
   const unreadError =
     !quiet &&
     status.indicator !== "unread-error" &&
     open.some((thread) => own(thread).indicator === "unread-error");
   const label = [
-    first === null ? null : strings.mainConversationStatus(status.label),
+    main === null ? null : strings.mainConversationStatus(status.label),
     others > 0 ? strings.othersWorking(others) : null,
     unreadError ? strings.unreadError : null,
   ]
@@ -527,7 +548,12 @@ function BotRow({
   const [showDone, setShowDone] = useState(false);
   const [composing, setComposing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const { first, open, done, doneCount, compare } = conversations;
+  const { open, done, doneCount, compare } = conversations;
+  const main = useRpcMutation({
+    contract: botsRpc,
+    pluginId: BOTS_PLUGIN_ID,
+    method: "bots.v1.main",
+  });
   // A hidden bot's conversations stay in their projects; shown here, it is
   // only a row to bring it back.
   const hasChildren = !bot.hidden && (open.length > 0 || doneCount > 0);
@@ -544,13 +570,21 @@ function BotRow({
     if (collapsed && inside.some((thread) => thread.id === selectedThreadId)) onToggle();
   }, [collapsed, done, onToggle, open, selectedThreadId, showDone]);
 
-  const openBot = () => {
-    if (first === null) {
-      setComposing(true);
-      return;
+  // Asked at the click, so it opens what a letter sent now would reach.
+  const openBot = async () => {
+    try {
+      const { threadId } = await main.mutate({ botId: bot.id });
+      if (threadId === null) {
+        setComposing(true);
+        return;
+      }
+      navigate.toThread(threadId);
+      onProjectSelect?.();
+    } catch (error) {
+      toast.error(
+        getMutationErrorMessage({ error, fallbackMessage: strings.openFailed(bot.name) }),
+      );
     }
-    navigate.toThread(first.id);
-    onProjectSelect?.();
   };
   const treeProps = {
     compareThreads: compare,
@@ -585,7 +619,7 @@ function BotRow({
           type="button"
           aria-label={strings.openBot(bot.name)}
           className="absolute inset-0 rounded-md outline-none"
-          onClick={openBot}
+          onClick={() => void openBot()}
         />
         <span
           className={cn(

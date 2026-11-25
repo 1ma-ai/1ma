@@ -192,31 +192,51 @@ describe("bot conversation menu", () => {
       })),
     ),
   ];
+  const row = (id: string, parentThreadId: string | null = null, state = {}) => ({
+    id,
+    parentThreadId,
+    isArchived: false,
+    isHidden: false,
+    ...state,
+  });
+  async function moveToTop(threads: ReturnType<typeof row>[], threadId = thread.id) {
+    const app = await loadPluginApp(() => import("./app.js"));
+    const move = { mutate: vi.fn() };
+    const item = app.threadActions
+      .find((action) => action.id === "move-to-top")!
+      .item({ thread: { ...thread, id: threadId }, data: { bots, move, threads } } as never);
+    return { item, move };
+  }
+  const placeBefore = (threadId: string, target: string) => ({
+    botId: "bot_a",
+    threadIds: [threadId],
+    target: { threadId: target, placement: "before" },
+  });
   it("moves the selected conversation ahead of the others without changing completion", async () => {
-    const app = await loadPluginApp(() => import("./app.js"));
-    const move = app.threadActions.find((action) => action.id === "move-to-top")!;
-    const mutate = vi.fn();
-    const action = move.item({ thread, data: { bots, reorder: { mutate } } } as never)!;
-    await action.run({} as never);
-    expect(mutate).toHaveBeenCalledExactlyOnceWith({
-      botId: "bot_a",
-      threadIds: ["thr_b", "thr_a", "thr_c"],
-    });
-    expect(
-      move.item({ thread: { ...thread, id: "thr_project" }, data: { bots } } as never),
-    ).toBeNull();
+    const { item, move } = await moveToTop([row("thr_a"), row("thr_b"), row("thr_c")]);
+    await item!.run({} as never);
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_b", "thr_a"));
+    expect((await moveToTop([row("thr_project")], "thr_project")).item).toBeNull();
   });
-  it("offers Move to top for a sub-chat too, and not where it already stands first", async () => {
-    const app = await loadPluginApp(() => import("./app.js"));
-    const move = app.threadActions.find((action) => action.id === "move-to-top")!;
-    const item = (id: string) =>
-      move.item({
-        thread: { ...thread, id, parentThreadId: "thr_a" },
-        data: { bots, reorder: { mutate: vi.fn() } },
-      } as never)!;
-    expect(item("thr_c").disabled).toBe(false);
-    expect(item("thr_a").disabled).toBe(true);
+  it("offers Move to top among the conversations under the same parent", async () => {
+    const tree = [row("thr_a"), row("thr_b", "thr_a"), row("thr_c", "thr_a")];
+    expect((await moveToTop(tree, "thr_b")).item!.disabled).toBe(true);
+    const { item, move } = await moveToTop(tree, "thr_c");
+    expect(item!.disabled).toBe(false);
+    await item!.run({} as never);
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_c", "thr_b"));
+    expect((await moveToTop(tree, "thr_a")).item!.disabled).toBe(true);
   });
+  it.each([{ isArchived: true }, { isHidden: true }])(
+    "does not count a conversation the list does not show (%o) as the top",
+    async (state) => {
+      const tree = [row("thr_a", null, state), row("thr_b", "thr_a"), row("thr_c")];
+      expect((await moveToTop(tree, "thr_b")).item!.disabled).toBe(true);
+      const { item, move } = await moveToTop(tree, "thr_c");
+      await item!.run({} as never);
+      expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore("thr_c", "thr_b"));
+    },
+  );
   it("reopens a completed conversation from the same menu", async () => {
     const app = await loadPluginApp(() => import("./app.js"));
     const toggle = app.threadActions.find((action) => action.id === "toggle-done")!;
@@ -245,10 +265,11 @@ describe("bot conversation menu", () => {
         data: {
           bots: [...bots, guestOwner],
           threads: [
-            { id: "thr_c", parentThreadId: "thr_spawned" },
-            { id: "thr_spawned", parentThreadId: "thr_b" },
-            { id: "thr_guest", parentThreadId: "thr_b" },
-            { id: "thr_a", parentThreadId: null },
+            row("thr_b"),
+            row("thr_c", "thr_spawned"),
+            row("thr_spawned", "thr_b"),
+            row("thr_guest", "thr_b"),
+            row("thr_a"),
           ],
           setCompleted: { mutate },
         },
@@ -258,5 +279,15 @@ describe("bot conversation menu", () => {
     expect(mutate).toHaveBeenCalledExactlyOnceWith({ threadId: "thr_c", completed: false });
     expect(item("thr_guest").label).toBe(strings.threadBot.markDone);
     expect(item("thr_a").label).toBe(strings.threadBot.markDone);
+  });
+  it("says Done for a conversation brought back under an archived done one", async () => {
+    const app = await loadPluginApp(() => import("./app.js"));
+    const toggle = app.threadActions.find((action) => action.id === "toggle-done")!;
+    const threads = [row("thr_b", null, { isArchived: true }), row("thr_c", "thr_b")];
+    const item = toggle.item({
+      thread: { ...thread, id: "thr_c" },
+      data: { bots, threads, setCompleted: { mutate: vi.fn() } },
+    } as never)!;
+    expect(item.label).toBe(strings.threadBot.markDone);
   });
 });

@@ -10,7 +10,7 @@ import { strings } from "./strings.js";
 import { BotsPanel, PANEL_PATH } from "./src/ui/bot-pages.js";
 import { assignToBotAction } from "./src/ui/assign-action.js";
 import { botsRpc } from "./src/contract.js";
-import { findBot, isDone, ThreadBotRow } from "./src/ui/thread-bot-row.js";
+import { findBot, isDone, shownSiblings, ThreadBotRow } from "./src/ui/thread-bot-row.js";
 
 export default definePluginApp((app) => {
   app.slots.navPanel({
@@ -34,21 +34,24 @@ export default definePluginApp((app) => {
     order: 61,
     useData() {
       const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
-      const reorder = useRpcMutation({ contract: botsRpc, method: "bots.v1.reorderThreads" });
-      return { bots: list.data?.bots ?? [], reorder };
+      const move = useRpcMutation({ contract: botsRpc, method: "bots.v1.moveThreads" });
+      const { threads } = useSidebarThreads();
+      return { bots: list.data?.bots ?? [], move, threads };
     },
     item({ thread, data }) {
       const member = findBot(data.bots, thread.id);
       if (!member || thread.archivedAt !== null) return null;
-      const ids = member.bot.threads.map((item) => item.threadId);
+      const [first] = shownSiblings(member.bot, data.bots, data.threads, thread.id);
+      if (first === undefined) return null;
       return {
         label: strings.threadBot.moveToTop,
         icon: "ArrowUp",
-        disabled: ids[0] === thread.id,
+        disabled: first === thread.id,
         run: async () => {
-          await data.reorder.mutate({
+          await data.move.mutate({
             botId: member.bot.id,
-            threadIds: [thread.id, ...ids.filter((id) => id !== thread.id)],
+            threadIds: [thread.id],
+            target: { threadId: first, placement: "before" },
           });
         },
       };

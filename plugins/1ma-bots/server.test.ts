@@ -73,6 +73,11 @@ function setup(settings: Record<string, number> = {}) {
   // Conversations with a question to the owner.
   const waiting = new Set<string>();
   const failedQueues = new Set<string>();
+  const threadOf = (id: string) => threads.get(id) ?? makeThreadResponse({ id });
+  // What happens elsewhere right before bb answers one of the plugin's calls.
+  const bbCalls: {
+    before?: (call: "list" | "interactions" | "update", ids: readonly string[]) => Promise<void>;
+  } = {};
   const host = createFakePluginHost({
     pluginId: "1ma-bots",
     agentSkillIds: ["1ma-bots"],
@@ -97,19 +102,57 @@ function setup(settings: Record<string, number> = {}) {
         },
         spawn: async () => ({ id: `thr_new${nextThread++}` }),
         fork: async () => ({ id: `thr_fork${nextThread++}` }),
-        get: async ({ threadId }: { threadId: string }) =>
-          threads.get(threadId) ?? makeThreadResponse({ id: threadId }),
-        list: async (filter = {}) =>
-          [
-            ...(filter.threadIds?.map((id) => threads.get(id) ?? makeThreadResponse({ id })) ??
-              threads.values()),
-          ]
+        get: async ({ threadId }: { threadId: string }) => threadOf(threadId),
+        experimental_listAncestors: async ({ threadIds }) => ({
+          threads: threadIds.map((threadId) => {
+            const ancestorIds: string[] = [];
+            let id = threadOf(threadId).parentThreadId;
+            for (; id !== null; id = threadOf(id).parentThreadId) ancestorIds.push(id);
+            return { threadId, ancestorIds };
+          }),
+        }),
+        experimental_listDescendants: async ({ threadIds }) => ({
+          threads: threadIds.map((threadId) => {
+            const below = [threadId];
+            for (const id of below)
+              for (const thread of threads.values())
+                if (thread.parentThreadId === id && thread.deletedAt === null)
+                  below.push(thread.id);
+            return {
+              threadId,
+              descendantIds: below
+                .slice(1)
+                .filter(
+                  (id) => threadOf(id).archivedAt === null && threadOf(id).visibility === "visible",
+                ),
+            };
+          }),
+        }),
+        // bb gives a conversation that leaves its parent the parent's section
+        // unless the call names one.
+        update: async ({ threadId, ...patch }) => {
+          await bbCalls.before?.("update", [threadId]);
+          const thread = threadOf(threadId);
+          const inherited =
+            patch.parentThreadId === null &&
+            thread.parentThreadId !== null &&
+            patch.sectionId === undefined
+              ? { sectionId: threadOf(thread.parentThreadId).sectionId }
+              : {};
+          const updated = { ...thread, ...patch, ...inherited } as typeof thread;
+          threads.set(threadId, updated);
+          return updated;
+        },
+        list: async (filter = {}) => {
+          await bbCalls.before?.("list", filter.threadIds ?? []);
+          return [...(filter.threadIds?.map(threadOf) ?? threads.values())]
             .filter(
               (thread) =>
                 (filter.parentThreadId === undefined ||
                   thread.parentThreadId === filter.parentThreadId) &&
                 (filter.archived === undefined ||
                   (thread.archivedAt !== null) === filter.archived) &&
+                thread.visibility === "visible" &&
                 thread.deletedAt === null,
             )
             .map((thread) => ({
@@ -120,10 +163,13 @@ function setup(settings: Record<string, number> = {}) {
                 : thread.queuedMessageCount > 0
                   ? "waiting"
                   : "none",
-            })),
+            }));
+        },
         interactions: {
-          list: async ({ threadId }: { threadId: string }) =>
-            waiting.has(threadId) ? [{ id: "int_1" }] : [],
+          list: async ({ threadId }: { threadId: string }) => {
+            await bbCalls.before?.("interactions", [threadId]);
+            return waiting.has(threadId) ? [{ id: "int_1" }] : [];
+          },
         },
         events: {
           list: async ({
@@ -215,6 +261,7 @@ function setup(settings: Record<string, number> = {}) {
     threads,
     waiting,
     failedQueues,
+    bbCalls,
     advance: (ms: number) => {
       clock += ms;
     },
@@ -1071,20 +1118,6 @@ describe("Codex review of stage 2", () => {
       "thr_2",
     ]);
   });
-
-  it("reordering refuses a repeated id and keeps the order", async () => {
-    const t = setup();
-    const bot = await t.create("Marketer");
-    await t.assign("thr_1", bot.id);
-    await t.assign("thr_2", bot.id);
-    await expect(
-      t.rpc("bots.v1.reorderThreads", { botId: bot.id, threadIds: ["thr_1", "thr_1"] }),
-    ).rejects.toThrow(/complete current list/);
-    expect((await t.list()).bots[0]!.threads.map((thread) => thread.threadId)).toEqual([
-      "thr_1",
-      "thr_2",
-    ]);
-  });
 });
 
 describe("Codex re-review of stage 2: the owner's message counts only once bb lets it through", () => {
@@ -1308,25 +1341,96 @@ describe("nested conversations", () => {
       );
     const mark = (threadId: string, completed = true) =>
       t.rpc("bots.v1.setCompleted", { threadId, completed });
-    return { ...t, bot, nest, grand, order, done, mark };
+    // Where a click on the bot goes.
+    const clicked = async () =>
+      (await t.rpc<{ threadId: string | null }>("bots.v1.main", { botId: bot.id })).threadId;
+    // Where a letter to the bot goes.
+    const lettered = async () => {
+      const sender = await t.create("Sender");
+      const from = `thr_from_${sender.id}`;
+      await t.assign(from, sender.id);
+      await t.letter(from, bot.id);
+      const [args] = t.harness.sdk.callsTo("threads.send").at(-1) as [{ threadId: string }];
+      return args.threadId;
+    };
+    const ask = async (thread = grand) => {
+      t.waiting.add(thread.id);
+      await t.harness.behavior.emitThreadEvent("interaction.pending", {
+        thread,
+        interaction: {} as never,
+      });
+    };
+    const move = (threadIds: string[], placement: "before" | "after", threadId: string) =>
+      t.rpc("bots.v1.moveThreads", { botId: bot.id, threadIds, target: { threadId, placement } });
+    const place = (id: string) => {
+      const { parentThreadId, sectionId, pinnedAt } = t.threads.get(id)!;
+      return { parentThreadId, sectionId, pinnedAt };
+    };
+    return { ...t, bot, nest, grand, order, done, mark, clicked, lettered, ask, move, place };
   }
 
   it("a letter goes to the first top-level open conversation", async () => {
     const t = await botWithBranch();
-    const sender = await t.create("Sender");
-    await t.assign("thr_sender", sender.id);
-    const target = async () => {
-      await t.letter("thr_sender", t.bot.id);
-      const [args] = t.harness.sdk.callsTo("threads.send").at(-1) as [{ threadId: string }];
-      return args.threadId;
-    };
+    const target = t.lettered;
     expect(await target()).toBe("thr_main");
     await t.mark("thr_main");
     expect(await target()).toBe("thr_parent");
     t.nest("thr_parent", null, { archivedAt: START });
+    for (const id of ["thr_child", "thr_sibling"]) t.nest(id, "thr_parent", { archivedAt: START });
     expect(await target()).toBe("thr_other");
     await t.mark("thr_other");
     expect(await target()).toBe("thr_main");
+  });
+
+  it.each(["working", "failed", "question", "failed queue"])(
+    "a %s sub-thread keeps its marked conversation the main one for a click and a letter",
+    async (state) => {
+      const t = await botWithBranch();
+      await t.mark("thr_main");
+      expect(await t.clicked()).toBe("thr_parent");
+      t.nest("thr_low", "thr_main", {
+        status: state === "working" ? "active" : state === "failed" ? "error" : "idle",
+      });
+      if (state === "question") t.waiting.add("thr_low");
+      if (state === "failed queue") t.failedQueues.add("thr_low");
+      expect(await t.clicked()).toBe("thr_main");
+      expect(await t.lettered()).toBe("thr_main");
+    },
+  );
+
+  it("a sub-thread brought back under an archived parent is the main conversation", async () => {
+    const t = await botWithBranch({ autoCompleteHours: 72 });
+    for (const id of ["thr_main", "thr_parent", "thr_other"])
+      t.nest(id, null, { archivedAt: START });
+    t.nest("thr_sibling", "thr_parent", { archivedAt: START });
+    t.nest("thr_grand", "thr_child", { archivedAt: START });
+    expect(await t.clicked()).toBe("thr_child");
+    await t.harness.behavior.runSchedule(AUTO_COMPLETE_SCHEDULE);
+    expect(await t.done()).not.toContain("thr_child");
+    expect(await t.lettered()).toBe("thr_child");
+  });
+
+  it("a hidden conversation between two of the bot's parts them both ways", async () => {
+    const t = await botWithBranch();
+    await t.assign("thr_low", t.bot.id);
+    t.nest("thr_child", "thr_parent", { visibility: "hidden" });
+    t.nest("thr_grand", "thr_child", { archivedAt: START });
+    const low = t.nest("thr_low", "thr_child", { status: "error" });
+    await t.mark("thr_parent");
+    await t.harness.behavior.emitThreadEvent("thread.failed", { thread: low, error: "boom" });
+    expect(await t.done()).toEqual(["thr_parent"]);
+    for (const id of ["thr_main", "thr_other"]) await t.mark(id);
+    expect(await t.clicked()).toBe("thr_low");
+    expect(await t.lettered()).toBe("thr_low");
+  });
+
+  it("with everything done a click starts a new conversation and a letter reopens the first one", async () => {
+    const t = await botWithBranch();
+    for (const id of ["thr_main", "thr_parent", "thr_other"]) await t.mark(id);
+    expect(await t.clicked()).toBeNull();
+    expect(await t.lettered()).toBe("thr_main");
+    expect(await t.done()).toEqual(["thr_parent", "thr_other"]);
+    expect(await t.clicked()).toBe("thr_main");
   });
 
   it("a bot whose conversations are all archived has nowhere to take a letter", async () => {
@@ -1450,6 +1554,235 @@ describe("nested conversations", () => {
       expect(await t.done()).toEqual(["thr_sibling"]);
     },
   );
+
+  it("a question that arrives while a branch is checked keeps it open", async () => {
+    const t = await botWithBranch();
+    t.bbCalls.before = async (call, ids) => {
+      if (call !== "list" || ids[0] !== "thr_parent") return;
+      t.bbCalls.before = undefined;
+      await t.ask();
+    };
+    await expect(t.mark("thr_parent")).rejects.toThrow(/waiting for the owner/);
+    expect(await t.done()).toEqual([]);
+  });
+
+  it("marking done checks again after something happened, and gives up when it goes on", async () => {
+    const t = await botWithBranch();
+    const other = makeThreadResponse({ id: "thr_other", status: "idle" });
+    let left = 1;
+    t.bbCalls.before = async (call, ids) => {
+      if (call !== "list" || ids[0] !== "thr_parent" || left === 0) return;
+      left -= 1;
+      await t.settle(other.id);
+    };
+    await t.mark("thr_parent");
+    expect(left).toBe(0);
+    await t.mark("thr_parent", false);
+    left = Infinity;
+    await expect(t.mark("thr_parent")).rejects.toThrow(/keeps happening/);
+    expect(await t.done()).toEqual([]);
+  });
+
+  it.each(["question", "turn", "failure"])(
+    "a %s that arrives during the auto-complete check keeps the branch open",
+    async (event) => {
+      const t = await botWithBranch({ autoCompleteHours: 72 });
+      t.bbCalls.before = async (call, ids) => {
+        if (call !== "interactions" || ids[0] !== "thr_child") return;
+        t.bbCalls.before = undefined;
+        if (event === "question") return t.ask();
+        if (event === "failure") {
+          const thread = t.nest("thr_grand", "thr_child", { status: "error" });
+          await t.harness.behavior.emitThreadEvent("thread.failed", { thread, error: "boom" });
+          return;
+        }
+        const thread = t.nest("thr_grand", "thr_child", { status: "active" });
+        await t.harness.behavior.emitThreadEvent("thread.active", { thread });
+      };
+      await t.harness.behavior.runSchedule(AUTO_COMPLETE_SCHEDULE);
+      expect(await t.done()).toEqual(["thr_sibling", "thr_other"]);
+    },
+  );
+
+  it("a bot that cannot be read does not stop auto-complete for the next one", async () => {
+    const t = await botWithBranch({ autoCompleteHours: 72 });
+    const next = await t.create("Editor");
+    for (const id of ["thr_first", "thr_second"]) {
+      await t.assign(id, next.id);
+      t.nest(id, null);
+    }
+    t.bbCalls.before = async (_call, ids) => {
+      if (ids.includes("thr_main")) throw new Error("bb is busy");
+    };
+    await t.harness.behavior.runSchedule(AUTO_COMPLETE_SCHEDULE);
+    const { threads } = (await t.list()).bots.find((bot) => bot.id === next.id)!;
+    expect(threads.map((thread) => thread.completed)).toEqual([false, true]);
+  });
+
+  it("a continuation bound when it was created is not read again before its first turn", async () => {
+    const t = await botWithBranch();
+    const reads = () =>
+      ["threads.get", "threads.list", "threads.experimental_listAncestors"].reduce(
+        (count, method) => count + t.harness.sdk.callsTo(method as "threads.get").length,
+        0,
+      );
+    const fork = {
+      id: "thr_fork",
+      sourceThreadId: "thr_child",
+      originKind: "fork" as const,
+      status: "pending" as const,
+    };
+    await t.harness.behavior.emitThreadEvent("thread.created", {
+      thread: makeThreadResponse(fork),
+    });
+    const before = reads();
+    expect(before).toBeGreaterThan(0);
+    await t.harness.registrations.hooks["message.dispatch"]?.(
+      makeMessageDispatchHookContext({ thread: fork }),
+    );
+    expect(reads()).toBe(before);
+    expect(await t.order()).toContain("thr_fork");
+  });
+
+  it.each(["sec_own", null])(
+    "a conversation that leaves its parent keeps its own section (%s) and its pin",
+    async (sectionId) => {
+      const t = await botWithBranch();
+      t.nest("thr_parent", null, { sectionId: "sec_parent" });
+      t.nest("thr_child", "thr_parent", { sectionId, pinnedAt: old });
+      await t.move(["thr_child"], "after", "thr_parent");
+      expect(t.place("thr_child")).toEqual({ parentThreadId: null, sectionId, pinnedAt: old });
+      expect(await t.order()).toEqual([
+        "thr_main",
+        "thr_parent",
+        "thr_child",
+        "thr_sibling",
+        "thr_other",
+      ]);
+    },
+  );
+
+  it("moves conversations together into another one's children, in the bot's order", async () => {
+    const t = await botWithBranch();
+    await t.move(["thr_other", "thr_main"], "before", "thr_sibling");
+    expect(await t.order()).toEqual([
+      "thr_child",
+      "thr_parent",
+      "thr_main",
+      "thr_other",
+      "thr_sibling",
+    ]);
+    for (const id of ["thr_main", "thr_other"])
+      expect(t.place(id).parentThreadId).toBe("thr_parent");
+    expect(t.place("thr_sibling").parentThreadId).toBe("thr_parent");
+  });
+
+  it("a conversation that joins the bot during a move keeps its place", async () => {
+    const t = await botWithBranch();
+    t.bbCalls.before = async (call) => {
+      if (call === "update") await t.assign("thr_late", t.bot.id);
+    };
+    await t.move(["thr_child"], "before", "thr_main");
+    expect(await t.order()).toEqual([
+      "thr_child",
+      "thr_main",
+      "thr_parent",
+      "thr_sibling",
+      "thr_other",
+      "thr_late",
+    ]);
+  });
+
+  it.each(["bb refuses the second conversation", "a conversation left the bot meanwhile"])(
+    "puts everything back when %s",
+    async (problem) => {
+      const t = await botWithBranch();
+      const places = {
+        thr_child: { parentThreadId: "thr_parent", sectionId: "sec_child", pinnedAt: null },
+        thr_sibling: { parentThreadId: "thr_parent", sectionId: null, pinnedAt: old },
+      };
+      t.nest("thr_parent", null, { sectionId: "sec_parent" });
+      for (const [id, place] of Object.entries(places)) t.nest(id, "thr_parent", place);
+      const refuses = problem === "bb refuses the second conversation";
+      t.bbCalls.before = async (call, [id]) => {
+        if (call !== "update" || id !== "thr_sibling") return;
+        t.bbCalls.before = undefined;
+        if (refuses) throw new Error("bb is busy");
+        await t.assign("thr_other", null);
+      };
+      await expect(t.move(["thr_child", "thr_sibling"], "before", "thr_other")).rejects.toThrow(
+        refuses ? /bb is busy/ : /not in this bot/,
+      );
+      for (const [id, place] of Object.entries(places)) expect(t.place(id)).toEqual(place);
+      expect(await t.order()).toEqual([
+        "thr_child",
+        "thr_main",
+        "thr_parent",
+        "thr_sibling",
+        ...(refuses ? ["thr_other"] : []),
+      ]);
+    },
+  );
+
+  it("puts a conversation back to the top level with its own section", async () => {
+    const t = await botWithBranch();
+    const place = { parentThreadId: null, sectionId: "sec_main", pinnedAt: null };
+    t.nest("thr_parent", null, { sectionId: "sec_parent" });
+    t.nest("thr_main", null, place);
+    t.bbCalls.before = async (call, [id]) => {
+      if (call === "update" && id === "thr_other") throw new Error("bb is busy");
+    };
+    await expect(t.move(["thr_main", "thr_other"], "before", "thr_sibling")).rejects.toThrow(
+      /bb is busy/,
+    );
+    expect(t.harness.sdk.callsTo("threads.update")[0]).toMatchObject([
+      { threadId: "thr_main", parentThreadId: "thr_parent" },
+    ]);
+    expect(t.place("thr_main")).toEqual(place);
+  });
+
+  it("a move inside one level leaves every parent alone", async () => {
+    const t = await botWithBranch();
+    t.nest("thr_plain", null, { archivedAt: START });
+    t.nest("thr_main", "thr_plain");
+    await t.move(["thr_main"], "after", "thr_other");
+    await t.move(["thr_sibling"], "before", "thr_child");
+    expect(t.harness.sdk.callsTo("threads.update")).toEqual([]);
+    expect(await t.order()).toEqual([
+      "thr_sibling",
+      "thr_child",
+      "thr_parent",
+      "thr_other",
+      "thr_main",
+    ]);
+  });
+
+  it("names the conversation that could not be put back", async () => {
+    const t = await botWithBranch();
+    t.nest("thr_child", "thr_parent", { title: "Landing copy" });
+    let updates = 0;
+    t.bbCalls.before = async (call) => {
+      if (call === "update" && ++updates > 1) throw new Error("bb is busy");
+    };
+    await expect(t.move(["thr_child", "thr_sibling"], "before", "thr_main")).rejects.toThrow(
+      "bb is busy. Could not be put back, so these stay where they were moved: Landing copy",
+    );
+    expect(t.place("thr_child").parentThreadId).toBeNull();
+    expect((await t.order())[0]).toBe("thr_child");
+  });
+
+  it.each([
+    ["a conversation of no bot", ["thr_child", "thr_plain"], "thr_main"],
+    ["a target of no bot", ["thr_child"], "thr_plain"],
+    ["the target among the moved", ["thr_child", "thr_main"], "thr_main"],
+  ])("refuses to move %s and changes nothing", async (_case, ids, target) => {
+    const t = await botWithBranch();
+    t.nest("thr_plain", null);
+    const order = await t.order();
+    await expect(t.move(ids, "before", target)).rejects.toMatchObject({ code: "invalid" });
+    expect(t.harness.sdk.callsTo("threads.update")).toEqual([]);
+    expect(await t.order()).toEqual(order);
+  });
 
   it("an archived sub-thread does not keep its branch open", async () => {
     const t = await botWithBranch();

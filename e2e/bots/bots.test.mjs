@@ -560,6 +560,91 @@ describe("1ma-sidebar with the bots block", () => {
     }
   });
 
+  it("leaves conversations where they are when dragged between the open list and Done", async () => {
+    const bot = await createBot("Order Bot");
+    const ids = [];
+    for (const name of ["one", "two", "three", "four"]) {
+      const id = await startConversation(bot, `[stub:reply order-${name}]`);
+      ids.push(id);
+      await rename(id, `Order ${name}`);
+      await waitTurns(id, 1);
+      await waitStatus(id, "idle");
+    }
+    const members = async () => (await rpc("bots.v1.get", { botId: bot.id })).threads;
+    const parents = () =>
+      Promise.all(ids.map(async (id) => (await thread(id)).parentThreadId ?? null));
+    const [open1, open2, done1, done2] = (await members()).map((member) => member.threadId);
+    for (const threadId of [done1, done2]) {
+      await rpc("bots.v1.setCompleted", { threadId, completed: true });
+    }
+    const before = await members();
+    const { context, page } = await openApp(browser, "light");
+    try {
+      await expandBot(page, "Order Bot");
+      const group = page.locator(`[data-bot-id="${bot.id}"]`);
+      await group.getByRole("button", { name: "Done: 2", exact: true }).click();
+      await threadLink(group, done2).waitFor();
+      const chip = page.locator(
+        "[data-sidebar-section-drag-overlay]:not([data-sidebar-touch-armed-chip])",
+      );
+      const drag = async (fromId, toId, offset, held) => {
+        const from = await threadLink(group, fromId).boundingBox();
+        const to = await threadLink(group, toId).boundingBox();
+        assert.ok(from && to);
+        await page.mouse.move(from.x + 36, from.y + from.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(from.x + 46, from.y + from.height / 2 + 3, { steps: 4 });
+        await page.mouse.move(to.x + 36, to.y + offset(to.height), { steps: 18 });
+        await chip.waitFor({ timeout: 10 * SECOND });
+        await held();
+        await page.mouse.up();
+        await chip.waitFor({ state: "detached" });
+      };
+      const hints = group.locator(
+        '[data-sidebar-reorder-placement], [data-sidebar-nest-target="valid"]',
+      );
+      const places = {
+        top: () => 2,
+        middle: (height) => height / 2,
+        bottom: (height) => height - 2,
+      };
+      for (const [from, to, shot] of [
+        [open2, done1, "bot-conversation-open-over-done"],
+        [done1, open2, "bot-conversation-done-over-open"],
+      ]) {
+        for (const [place, offset] of Object.entries(places)) {
+          await drag(from, to, offset, async () => {
+            // Longer than a row needs under the pointer to become the parent.
+            await page.waitForTimeout(SECOND);
+            if (place === "middle") await screenshot(page, shot);
+            assert.equal(await hints.count(), 0, `${shot} offers nothing at the ${place}`);
+          });
+        }
+      }
+      // The same gesture inside the open list does move, so the ones above were drags.
+      await drag(open1, open2, places.bottom, () =>
+        group.locator('[data-sidebar-reorder-placement="after"]').waitFor(),
+      );
+      await waitFor(
+        "the drag inside the open list is saved",
+        30 * SECOND,
+        async () => (await members())[0].threadId === open2,
+      );
+      const [first, second, ...rest] = before;
+      assert.deepEqual(await members(), [second, first, ...rest]);
+      assert.deepEqual(await parents(), [null, null, null, null]);
+      assert.equal(
+        await group.getByRole("button", { name: "Done: 2", exact: true }).count(),
+        1,
+        "both done conversations are still there",
+      );
+    } finally {
+      await context.close();
+      await rpc("bots.v1.remove", { botId: bot.id });
+      for (const id of ids) server.bb(["thread", "archive", id]);
+    }
+  });
+
   it("moves a conversation dragged from a project onto a bot's face to the top of that bot", async () => {
     const { context, page, problems } = await openApp(browser, "light");
     try {

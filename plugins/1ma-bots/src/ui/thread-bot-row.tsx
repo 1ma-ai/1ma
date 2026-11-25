@@ -18,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { strings } from "../../strings.js";
+import { branchOf } from "../branch.js";
 import { botsRpc, type BotSummary, type BotThread } from "../contract.js";
 
 export function findBot(
@@ -31,23 +32,50 @@ export function findBot(
   return null;
 }
 
+type TreeRow = Pick<PluginSidebarThread, "id" | "parentThreadId" | "isArchived" | "isHidden">;
+
+function isShown(threads: readonly TreeRow[], threadId: string): boolean {
+  const row = threads.find((thread) => thread.id === threadId);
+  return row !== undefined && !row.isArchived && !row.isHidden;
+}
+
+// The conversation and the ones it is drawn under in its bot's tree.
+function branchIn(bots: readonly BotSummary[], threads: readonly TreeRow[], threadId: string) {
+  const chain: string[] = [];
+  for (let id: string | null = threadId; id !== null && !chain.includes(id);) {
+    chain.push(id);
+    id = threads.find((thread) => thread.id === id)?.parentThreadId ?? null;
+  }
+  const branch = branchOf(
+    chain,
+    (id) => findBot(bots, id)?.bot.id ?? null,
+    (id) => isShown(threads, id),
+  );
+  return branch?.threadIds ?? [];
+}
+
 // Done covers the branch, so a sub-thread is done with the conversations above
 // it in its bot's tree.
 export function isDone(
   bots: readonly BotSummary[],
-  threads: readonly Pick<PluginSidebarThread, "id" | "parentThreadId">[],
+  threads: readonly TreeRow[],
   threadId: string,
 ): boolean {
-  const botId = findBot(bots, threadId)?.bot.id;
-  const seen = new Set<string>();
-  for (let id: string | null = threadId; id !== null && !seen.has(id);) {
-    seen.add(id);
-    const member = findBot(bots, id);
-    if (member !== null && member.bot.id !== botId) return false;
-    if (member?.thread.completed) return true;
-    id = threads.find((thread) => thread.id === id)?.parentThreadId ?? null;
-  }
-  return false;
+  return branchIn(bots, threads, threadId).some((id) => findBot(bots, id)?.thread.completed);
+}
+
+// The bot's own conversations shown under the same parent, in its order.
+export function shownSiblings(
+  bot: BotSummary,
+  bots: readonly BotSummary[],
+  threads: readonly TreeRow[],
+  threadId: string,
+): string[] {
+  const parentOf = (id: string) => branchIn(bots, threads, id)[1];
+  const parentId = parentOf(threadId);
+  return bot.threads
+    .map((member) => member.threadId)
+    .filter((id) => isShown(threads, id) && parentOf(id) === parentId);
 }
 
 function InstructionPreview({ bot, bots }: { bot: BotSummary; bots: readonly BotSummary[] }) {
