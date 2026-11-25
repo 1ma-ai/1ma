@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { pathspecs } from "./changed-paths.mjs";
 
 const directory = new URL("../../.github/workflows/", import.meta.url);
 const workflows = readdirSync(directory)
   .filter((name) => /\.ya?ml$/u.test(name))
-  .map((name) => ({ name, ...parse(readFileSync(new URL(name, directory), "utf8")) }));
+  .map((file) => ({ name: file, ...parse(readFileSync(new URL(file, directory), "utf8")), file }));
 const protection = JSON.parse(
   readFileSync(new URL("../../.github/main-protection.json", import.meta.url), "utf8"),
 );
@@ -16,11 +18,15 @@ const jobsOf = (workflow) => Object.entries(workflow.jobs);
 const needsOf = (job) => [job.needs ?? []].flat();
 const onPullRequests = (workflow) => Object.hasOwn(workflow.on, "pull_request");
 const gated = workflows.filter((workflow) => workflow.jobs.changes !== undefined);
+const asking = (workflow) => workflow.jobs.changes.steps.find((step) => step.env?.PATHS);
 const asked = (workflow) =>
-  workflow.jobs.changes.steps
-    .find((step) => step.env?.PATHS !== undefined)
+  asking(workflow)
     .env.PATHS.split("\n")
     .filter((line) => line !== "");
+const CHANGED = "needs.changes.outputs.changed == 'true'";
+const OFF_PULL_REQUESTS = "github.event_name != 'pull_request'";
+const scriptOf = (step) =>
+  /^node (?<script>scripts\/lib\/[\w-]+\.mjs)$/u.exec(step.run ?? "")?.groups.script;
 
 describe("workflows", () => {
   test("every action is pinned to a commit, not to a tag its owner can move", () => {
@@ -65,15 +71,71 @@ describe("workflows", () => {
       for (const id of others) {
         assert.ok(waits(id), `${workflow.name} ${id} runs without the answer`);
         if (needsOf(jobs[id]).includes("changes"))
-          assert.match(
-            jobs[id].if ?? "",
-            /needs\.changes\.outputs\.changed == 'true'/u,
-            `${workflow.name} ${id}`,
+          assert.equal(jobs[id].if, CHANGED, `${workflow.name} ${id}`);
+        else
+          assert.ok(
+            [undefined, OFF_PULL_REQUESTS].includes(jobs[id].if),
+            `${workflow.name} ${id}: the result job cannot tell when "${jobs[id].if}" skips it`,
           );
-        else assert.doesNotMatch(jobs[id].if ?? "", /always\(\)|failure\(\)|cancelled\(\)/u);
       }
       assert.equal(jobs.result.if, "always()", workflow.name);
       assert.deepEqual(needsOf(jobs.result).toSorted(), ["changes", ...others].toSorted());
+    }
+  });
+
+  test("the answer the jobs wait for is the one the script writes", () => {
+    for (const workflow of gated) {
+      const { changes } = workflow.jobs;
+      const checkout = changes.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
+      assert.equal(checkout.with["fetch-depth"], 2, `${workflow.name}: the merge needs its parent`);
+      const step = asking(workflow);
+      assert.equal(scriptOf(step), "scripts/lib/changed-paths.mjs", workflow.name);
+      assert.deepEqual(
+        changes.outputs,
+        { changed: `\${{ steps.${step.id}.outputs.changed }}` },
+        workflow.name,
+      );
+    }
+  });
+
+  test("the result job gives the verdict script every job and the jobs kept off pull requests", () => {
+    for (const workflow of gated) {
+      const { result, ...jobs } = workflow.jobs;
+      const step = result.steps.find((entry) => scriptOf(entry) !== undefined);
+      assert.equal(scriptOf(step), "scripts/lib/workflow-result.mjs", workflow.name);
+      assert.ok(
+        result.steps.indexOf(step) >
+          result.steps.findIndex((entry) => entry.uses?.startsWith("actions/checkout@")),
+        `${workflow.name}: the script is not checked out`,
+      );
+      assert.equal(step.env.NEEDS, "${{ toJSON(needs) }}", workflow.name);
+      assert.equal(step.if, undefined, workflow.name);
+      const off = Object.keys(jobs).filter((id) => jobs[id].if === OFF_PULL_REQUESTS);
+      assert.deepEqual(
+        (step.env.OFF_PULL_REQUESTS ?? "").split(" ").filter((id) => id !== ""),
+        off,
+        workflow.name,
+      );
+    }
+  });
+
+  test("a pull request that changes only what a workflow reads to decide still runs it", () => {
+    const root = fileURLToPath(new URL("../../", import.meta.url));
+    for (const workflow of gated) {
+      const steps = jobsOf(workflow).flatMap(([, job]) => job.steps ?? []);
+      const reads = [
+        `.github/workflows/${workflow.file}`,
+        ...steps.map((step) => step.with?.["node-version-file"]),
+        ...[workflow.jobs.changes, workflow.jobs.result].flatMap((job) => job.steps.map(scriptOf)),
+      ].filter((file) => file !== undefined);
+      assert.ok(reads.length >= 3, workflow.name);
+      const covered = execFileSync(
+        "git",
+        ["-C", root, "ls-files", "--", ...pathspecs(asked(workflow))],
+        { encoding: "utf8" },
+      ).split("\n");
+      for (const file of new Set(reads))
+        assert.ok(covered.includes(file), `${workflow.name} does not ask about ${file}`);
     }
   });
 });

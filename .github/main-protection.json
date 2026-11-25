@@ -1,5 +1,7 @@
 {
-  "$comment": "What GitHub enforces for main. Applied and compared by scripts/protect-main.mjs; scripts/lib/workflows.test.mjs holds the check names equal to the job names in the workflows.",
+  "$comment": "What GitHub enforces for main of this repository. Compared and applied by scripts/protect-main.mjs, which says what is covered; scripts/lib/workflows.test.mjs holds the check names equal to the job names in the workflows. An on/off setting of the branch that is not named here is expected to be off.",
+  "repository": "1ma-ai/1ma",
+  "branch": "main",
   "actions": {
     "enabled": true,
     "allowed_actions": "all",
@@ -22,6 +24,11 @@
     "required_linear_history": false,
     "allow_force_pushes": false,
     "allow_deletions": false,
-    "required_conversation_resolution": false
-  }
+    "required_conversation_resolution": false,
+    "block_creations": false,
+    "lock_branch": false,
+    "allow_fork_syncing": false
+  },
+  "required_signatures": false,
+  "rules": []
 }

@@ -20,6 +20,8 @@ on:
       - "pnpm-lock.yaml"
       - ".github/workflows/desktop.yml"
       - ".github/workflows/desktop-tests.yml"
+      - "scripts/lib/changed-paths.mjs"
+      - "scripts/lib/workflow-result.mjs"
       - "!desktop/**/*.md"
   pull_request:
   workflow_dispatch:
@@ -65,6 +67,8 @@ jobs:
             pnpm-lock.yaml
             .github/workflows/desktop.yml
             .github/workflows/desktop-tests.yml
+            scripts/lib/changed-paths.mjs
+            scripts/lib/workflow-result.mjs
             !desktop/**/*.md
         run: node scripts/lib/changed-paths.mjs
 
@@ -91,7 +95,7 @@ jobs:
             curl -fsSL --retry 3 "https://raw.githubusercontent.com/get-bb/bb/${commit}/scripts/${file}" -o "$planner/scripts/${file}"
           done
           (cd "$planner" && node scripts/plan-ci.mjs --full) > "$RUNNER_TEMP/selection.json"
-          echo "tests=$(node -e 'process.stdout.write(JSON.stringify(require(process.argv[1]).tests))' "$RUNNER_TEMP/selection.json")" >> "$GITHUB_OUTPUT"
+          node desktop/scripts/shard-matrix.mjs "$RUNNER_TEMP/selection.json"
 
   static:
     name: bb lint and typecheck
@@ -228,8 +232,9 @@ jobs:
         run: xvfb-run -a pnpm exec turbo run smoke:browser-address --filter=@bb/desktop --output-logs=new-only
 
   # The one check of this workflow that a merge into main requires: it reports on
-  # every pull request, also when the paths above are untouched and the jobs are
-  # skipped.
+  # every pull request. Touched paths need every job to succeed, untouched paths
+  # need every job skipped; scripts/lib/workflow-result.mjs spells the verdict out,
+  # because GitHub itself takes a skipped job for a passed one.
   result:
     name: Desktop bb tests result
     if: always()
@@ -237,17 +242,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: The paths were read, and no job failed or was cancelled
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Every job the event calls for passed, or the paths are untouched
         env:
-          CHANGES: ${{ needs.changes.result }}
-          RESULTS: ${{ toJSON(needs.*.result) }}
-        run: |
-          echo "$RESULTS"
-          if [[ "$CHANGES" != "success" ]]; then
-            echo "::error::the changed paths were not read"
-            exit 1
-          fi
-          if grep -qE '"(failure|cancelled)"' <<< "$RESULTS"; then
-            echo "::error::a job of this workflow failed or was cancelled"
-            exit 1
-          fi
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/lib/workflow-result.mjs
