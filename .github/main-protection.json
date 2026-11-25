@@ -30,5 +30,8 @@
     "allow_fork_syncing": false
   },
   "required_signatures": false,
+  "required_deployment_environments": [],
+  "bypass_force_push_allowances": [],
+  "merge_queue": false,
   "rules": []
 }

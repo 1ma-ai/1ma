@@ -11,6 +11,12 @@ import { isDeepStrictEqual } from "node:util";
 //   later, or somebody switches on by hand, shows up as a difference;
 // - `required_signatures`: reported with the branch, written through its own
 //   address;
+// - what the REST answer for the branch leaves out, read through GraphQL and
+//   only read: `required_deployment_environments`, the deployments the classic
+//   rules that match the branch require before a merge;
+//   `bypass_force_push_allowances`, who those rules let force push although
+//   force pushes are off; `merge_queue`, whether merges into the branch go
+//   through a merge queue;
 // - `rules`: what the repository's rulesets add for the branch. They are only
 //   read: a ruleset is removed by hand in the settings.
 //
@@ -24,19 +30,110 @@ export class GitHubError extends Error {
   }
 }
 
+const command = (method, address, body) => {
+  const args = ["api", "-X", method, address];
+  return body === undefined ? args : [...args, "--input", "-"];
+};
+
+// gh names the HTTP status of an answer it got as "(HTTP 404)"; status 0 means
+// no answer came.
+function refusal(method, address, done) {
+  let message = (done.stderr ?? "").trim();
+  try {
+    message = JSON.parse(done.stdout).message ?? message;
+  } catch {
+    // gh printed no response body: its own message stands.
+  }
+  const status = Number(/\(HTTP (?<status>\d+)\)/u.exec(done.stderr ?? "")?.groups.status ?? 0);
+  return new GitHubError(`${method} ${address}: ${message}`, status);
+}
+
 function client(gh) {
   return (method, address, body) => {
-    const args = ["api", "-X", method, address];
-    const done = gh(body === undefined ? args : [...args, "--input", "-"], JSON.stringify(body));
+    const done = gh(command(method, address, body), JSON.stringify(body));
     if (done.status === 0) return done.stdout.trim() === "" ? null : JSON.parse(done.stdout);
-    let message = done.stderr.trim();
-    try {
-      message = JSON.parse(done.stdout).message ?? message;
-    } catch {
-      // gh printed no response body: its own message stands.
+    throw refusal(method, address, done);
+  };
+}
+
+// What became of one write: GitHub answered that it succeeded, GitHub refused it
+// with an HTTP status of its own, or no answer says either, so it may or may not
+// be done. A 5xx status is of the second kind: a server on the way reports that
+// it failed, not that the write was not done.
+function attempt(gh, { method, address, body }) {
+  let done;
+  try {
+    done = gh(command(method, address, body), JSON.stringify(body));
+  } catch (error) {
+    return { outcome: "unknown", message: error.message };
+  }
+  if (done.status === 0) return { outcome: "written" };
+  const error = refusal(method, address, done);
+  const refused = error.status >= 400 && error.status < 500;
+  return { outcome: refused ? "refused" : "unknown", message: error.message };
+}
+
+const OUTSIDE_REST = `query($owner: String!, $name: String!, $branch: String!) {
+  repository(owner: $owner, name: $name) {
+    mergeQueue(branch: $branch) { id }
+    branchProtectionRules(first: 100) {
+      pageInfo { hasNextPage }
+      nodes {
+        pattern
+        requiresDeployments
+        requiredDeploymentEnvironments
+        bypassForcePushAllowances(first: 100) {
+          pageInfo { hasNextPage }
+          nodes { actor { kind: __typename ... on App { slug } ... on Team { combinedSlug } ... on User { login } } }
+        }
+        matchingRefs(query: $branch, first: 100) { pageInfo { hasNextPage } nodes { name } }
+      }
     }
-    const status = Number(/\(HTTP (?<status>\d+)\)/u.exec(done.stderr)?.groups.status ?? 0);
-    throw new GitHubError(`${method} ${address}: ${message}`, status);
+  }
+}`;
+
+// GitHub answers null for an actor the token may not see; it is an allowance
+// all the same.
+const actorName = (actor) =>
+  `${actor?.kind ?? "Actor"}:${actor?.login ?? actor?.combinedSlug ?? actor?.slug ?? "unknown"}`;
+
+// What the REST answer for the branch leaves out, in the shape of the file.
+// `matchingRefs` is GitHub's own matching of a rule's pattern; its query only
+// narrows the refs by name, so the branch is looked for among them.
+function outsideRest(api, { repository, branch }) {
+  const [owner, name] = repository.split("/");
+  const answer = api("POST", "graphql", {
+    query: OUTSIDE_REST,
+    variables: { owner, name, branch },
+  });
+  const unreadable = () =>
+    new Error(`GraphQL: the branch protection rules of ${repository} could not be read`);
+  const found = answer?.data?.repository;
+  const rules = found?.branchProtectionRules;
+  if (
+    answer?.errors !== undefined ||
+    found?.mergeQueue === undefined ||
+    !Array.isArray(rules?.nodes) ||
+    rules.pageInfo?.hasNextPage
+  )
+    throw unreadable();
+  const environments = new Set();
+  const actors = new Set();
+  for (const rule of rules.nodes) {
+    const refs = rule?.matchingRefs;
+    if (!Array.isArray(refs?.nodes) || refs.pageInfo?.hasNextPage) throw unreadable();
+    if (!refs.nodes.some((ref) => ref?.name === branch)) continue;
+    const allowances = rule.bypassForcePushAllowances;
+    if (!Array.isArray(allowances?.nodes) || allowances.pageInfo?.hasNextPage) throw unreadable();
+    for (const allowance of allowances.nodes) actors.add(actorName(allowance?.actor));
+    if (rule.requiresDeployments !== true) continue;
+    if (!Array.isArray(rule.requiredDeploymentEnvironments)) throw unreadable();
+    for (const environment of rule.requiredDeploymentEnvironments) environments.add(environment);
+  }
+  return {
+    required_deployment_environments: [...environments].toSorted(),
+    bypass_force_push_allowances: [...actors].toSorted(),
+    merge_queue: found.mergeQueue !== null,
   };
 }
 
@@ -99,6 +196,7 @@ export function read(gh, wanted) {
           },
     required_signatures: signatures,
     rules: api("GET", at.rules).map(({ type, ruleset_id: ruleset }) => ({ type, ruleset })),
+    ...outsideRest(api, wanted),
   };
 }
 
@@ -128,6 +226,9 @@ export function differences(found, wanted) {
   }
   compare("required_signatures", found.required_signatures, wanted.required_signatures);
   compare("rules", found.rules, wanted.rules);
+  for (const name of ["required_deployment_environments", "bypass_force_push_allowances"])
+    compare(name, found[name], wanted[name].toSorted());
+  compare("merge_queue", found.merge_queue, wanted.merge_queue);
   return list;
 }
 
@@ -161,6 +262,16 @@ export function writes(list, wanted) {
     });
   return steps;
 }
+
+// Where the parts this script only reads are changed, by hand.
+const READ_ONLY = {
+  rules: "Rules come from the repository's rulesets",
+  required_deployment_environments:
+    "Required deployments come from the classic branch protection rules",
+  bypass_force_push_allowances:
+    "Who may force push past the protection comes from the classic branch protection rules",
+  merge_queue: "The merge queue comes from the classic branch protection rules",
+};
 
 const show = (value) => JSON.stringify(value);
 const lines = (list) =>
@@ -197,33 +308,38 @@ export function run({ apply, gh, text, log }) {
     return 1;
   }
 
-  const steps = writes(before, wanted);
-  const applied = [];
-  let failure = null;
-  for (const step of steps) {
-    try {
-      api(step.method, step.address, step.body);
-      applied.push(step.part);
-    } catch (error) {
-      if (!(error instanceof GitHubError)) throw error;
-      failure = { part: step.part, message: error.message };
-      break;
+  const written = [];
+  let stop = null;
+  for (const step of writes(before, wanted)) {
+    const { outcome, message } = attempt(gh, step);
+    if (outcome === "written") {
+      written.push(step.part);
+      continue;
     }
+    stop = { part: step.part, outcome, message };
+    break;
   }
-  if (failure !== null) {
-    log(`Writing ${failure.part} failed: ${failure.message}`);
-    log(applied.length > 0 ? `Already written: ${applied.join(", ")}.` : "Nothing was written.");
+  if (stop === null) {
+    log(`Written: ${written.join(", ") || "nothing"}.`);
   } else {
-    log(`Written: ${applied.join(", ") || "nothing"}.`);
+    log(
+      stop.outcome === "refused"
+        ? `Writing ${stop.part} failed: ${stop.message}`
+        : `Writing ${stop.part}: no answer says whether it succeeded (${stop.message}), ` +
+            "so it is unknown whether it was written.",
+    );
+    if (written.length > 0) log(`Already written: ${written.join(", ")}.`);
+    else if (stop.outcome === "refused") log("Nothing was written.");
   }
   const after = differences(read(gh, wanted), wanted);
   if (after.length === 0) {
     log(`${where} is now protected as the file says`);
-    return failure === null ? 0 : 1;
+    return stop === null ? 0 : 1;
   }
   log("GitHub still differs from the file:");
   for (const line of lines(after)) log(line);
-  if (after.some((entry) => entry.name === "rules"))
-    log("Rules come from the repository's rulesets; this script does not change them.");
+  for (const { name } of after)
+    if (Object.hasOwn(READ_ONLY, name))
+      log(`${READ_ONLY[name]}; this script does not change them.`);
   return 1;
 }
