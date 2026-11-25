@@ -10,7 +10,9 @@ name: Desktop release
 # does the publishing; a dry run makes every check it does short of writing,
 # including the comparison with the files a release of the tag already holds.
 # A publication is started from main; a dry run may be started from a branch,
-# to try its copy of this file and of the tool.
+# to try its copy of this file and of the tool. Both take the files of the
+# run's latest attempt, the one whose result is checked here; a dry run is a
+# check, not an approval of the bytes, and a publication repeats every check.
 
 on:
   workflow_dispatch:
@@ -58,6 +60,9 @@ jobs:
           [[ "$(field .head_repository.full_name)" == "$GITHUB_REPOSITORY" ]] ||
             fail "run $RUN_ID built code from $(field .head_repository.full_name)"
           [[ "$(field .conclusion)" == "success" ]] || fail "run $RUN_ID did not succeed"
+          # The conclusion is the latest attempt's; release.mjs takes only its files.
+          attempt="$(field .run_attempt)"
+          [[ "$attempt" =~ ^[1-9][0-9]*$ ]] || fail "run $RUN_ID has no attempt number"
           commit="$(field .head_sha)"
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "run $RUN_ID has no commit"
           gh api "repos/$GITHUB_REPOSITORY/compare/$commit...main" --jq .status > ancestry
@@ -68,6 +73,7 @@ jobs:
           [[ "$tests" == "success" ]] ||
             fail "the latest push run of desktop-tests.yml on main for $commit is '$tests'; bb's tests must pass on the 1ma tree before publishing"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "attempt=$attempt" >> "$GITHUB_OUTPUT"
       # The tools come from the commit this workflow runs at, not from the build
       # commit, which is an ancestor of main (checked above) and may predate
       # them. release.mjs publishes only in a run started from main, so the
@@ -93,6 +99,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ inputs.run_id }}
+          ATTEMPT: ${{ steps.build.outputs.attempt }}
           COMMIT: ${{ steps.build.outputs.commit }}
           DRY_RUN: ${{ inputs.dry_run }}
           DIST: dist

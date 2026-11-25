@@ -81,6 +81,56 @@ function isVersion(version) {
 
 const said = (done) => (done.stderr ?? "").trim();
 
+// gh ends the message of a failed API call with the HTTP status; a status
+// quoted earlier in the text is GitHub's wording, not the answer.
+const notFound = (done) => said(done).endsWith("(HTTP 404)");
+
+const UPLOADED = "uploaded";
+
+// The commit refs/tags/<tag> points at, through annotated tags, or null when
+// there is no such tag. Read as a tag, so a branch of the same name cannot
+// answer.
+function readTag(gh, repository, tag) {
+  let found = gh(["api", `repos/${repository}/git/ref/tags/${tag}`]);
+  if (found.status !== 0) {
+    if (notFound(found)) return null;
+    fail(`cannot read the tag ${tag}: ${said(found)}`);
+  }
+  for (;;) {
+    let object;
+    try {
+      ({ object } = JSON.parse(found.stdout));
+    } catch (error) {
+      fail(`cannot read the tag ${tag}: ${error.message}`);
+    }
+    if (!/^[0-9a-f]{40}$/u.test(String(object?.sha)))
+      fail(`cannot read the tag ${tag}: GitHub names no object it points at`);
+    if (object.type === "commit") return object.sha;
+    if (object.type !== "tag") fail(`${tag} points at a ${object.type}, not at a commit`);
+    found = gh(["api", `repos/${repository}/git/tags/${object.sha}`]);
+    if (found.status !== 0) fail(`cannot read the tag ${tag}: ${said(found)}`);
+  }
+}
+
+// The release under the tag, draft or not, with its files by name, or null
+// when there is none.
+function readRelease(gh, repository, tag) {
+  const view = gh(["release", "view", tag, "--json", "isDraft,assets", "--repo", repository]);
+  if (view.status !== 0) {
+    if (said(view).includes("release not found")) return null;
+    fail(`cannot read release ${tag}: ${said(view)}`);
+  }
+  try {
+    const { isDraft, assets } = JSON.parse(view.stdout);
+    return {
+      draft: isDraft === true,
+      assets: new Map(assets.map(({ name, digest, state }) => [name, { digest, state }])),
+    };
+  } catch (error) {
+    return fail(`cannot read the files of ${tag}: ${error.message}`);
+  }
+}
+
 function notes(version, upstream, commit) {
   return `Test build of 1ma ${version} for macOS on Apple Silicon, built from bb ${upstream} with the 1ma patches at ${commit}. Download the .dmg; SHA256SUMS lists the checksums.
 
@@ -98,6 +148,7 @@ Quit bb completely before opening 1ma: both use port 38886. 1ma keeps its data i
 // may try another branch's version of them.
 export function release({
   runId,
+  attempt,
   commit,
   dryRun,
   ref,
@@ -113,6 +164,7 @@ export function release({
       `a publication is started from main; this run is at ${ref}. Only a dry run may start from another branch`,
     );
   if (!/^[0-9]+$/u.test(runId ?? "")) fail("run_id must be a run number");
+  if (!/^[0-9]+$/u.test(attempt ?? "")) fail(`run ${runId} has no attempt number`);
   if (!/^[0-9a-f]{40}$/u.test(commit ?? "")) fail(`run ${runId} has no build commit`);
   const records = [dist, distServer].map((folder) => {
     const file = path.join(folder, "1ma-provenance.json");
@@ -127,8 +179,14 @@ export function release({
   const app = path.join(dist, "apps", "desktop", "release");
   const { version } = readJson(path.join(app, "desktop-version.json"));
   if (!isVersion(version)) fail(`unexpected version '${version}'`);
-  if (!version.includes(`-1ma.${runId}.`))
-    fail(`run ${runId} built version '${version}', which does not name the run`);
+  // The green result checked is the run's latest attempt, while GitHub may
+  // hand over the artifacts of an earlier one.
+  const built = new RegExp(`-1ma\\.${runId}\\.([0-9]+)$`, "u").exec(version);
+  if (built === null) fail(`run ${runId} built version '${version}', which does not name the run`);
+  if (built[1] !== attempt)
+    fail(
+      `run ${runId} is at attempt ${attempt}, but the files are of attempt ${built[1]} (version ${version}); rerun all jobs of the build, or start a new build, and publish that`,
+    );
   for (const { file, record } of records) {
     if (record.version !== version)
       fail(`${file} is for version ${record.version}, not ${version}`);
@@ -175,31 +233,37 @@ export function release({
   const notesFile = path.join(work, "notes.md");
   writeFileSync(notesFile, notes(version, upstream, commit));
 
-  // Fails on any error other than a missing release, so a dry run cannot pass
-  // on a check that never ran.
-  const view = gh(["release", "view", tag, "--json", "assets", "--repo", repository]);
-  let published = null;
-  if (view.status === 0) {
-    const tagged = gh(["api", `repos/${repository}/commits/${tag}`, "--jq", ".sha"]);
-    if (tagged.status !== 0) fail(`cannot read the commit of ${tag}: ${said(tagged)}`);
-    const sha = tagged.stdout.trim();
-    if (sha !== commit) fail(`${tag} points at ${sha}, not at the build commit ${commit}`);
-    let assets;
-    try {
-      ({ assets } = JSON.parse(view.stdout));
-    } catch (error) {
-      fail(`cannot read the files of ${tag}: ${error.message}`);
-    }
-    published = new Map(assets.map(({ name, digest }) => [name, digest]));
-  } else if (!said(view).includes("release not found")) {
-    fail(`cannot read release ${tag}: ${said(view)}`);
-  }
+  // Every read fails on any error other than a missing tag or release, so a
+  // dry run cannot pass on a check that never ran.
+  const digests = new Map(
+    files.map((name) => [name, `sha256:${sha256File(path.join(upload, name))}`]),
+  );
+  const tagged = readTag(gh, repository, tag);
+  if (tagged !== null && tagged !== commit)
+    fail(`${tag} points at ${tagged}, not at the build commit ${commit}`);
+  const published = readRelease(gh, repository, tag);
+  if (published?.draft)
+    fail(
+      `${tag} is a draft release, left by an interrupted publication and never public; delete it with 'gh release delete ${tag} --yes --repo ${repository}', then run again`,
+    );
+  if (published !== null && tagged === null) fail(`release ${tag} has no tag refs/tags/${tag}`);
   // A published file is never replaced: one that is already there must be the
-  // same file, and the missing ones are uploaded only when none differs.
-  const missing = [];
+  // same file, and the missing ones are uploaded only when none differs. A
+  // file GitHub did not finish storing was never published: it is removed and
+  // uploaded again.
+  const pending = [];
+  const unfinished = [];
   for (const name of published === null ? [] : files) {
-    if (!published.has(name)) missing.push(name);
-    else if (published.get(name) !== `sha256:${sha256File(path.join(upload, name))}`)
+    const found = published.assets.get(name);
+    if (found === undefined) pending.push(name);
+    else if (found.state !== UPLOADED) {
+      unfinished.push({ name, state: found.state });
+      pending.push(name);
+    } else if (typeof found.digest !== "string")
+      fail(
+        `${tag} already has ${name} without a digest to compare; refusing to replace a published file`,
+      );
+    else if (found.digest !== digests.get(name))
       fail(`${tag} already has a different ${name}; refusing to replace a published file`);
   }
 
@@ -207,24 +271,32 @@ export function release({
   // Every feed this run replaces is checked, since a release that failed
   // halfway can leave one feed ahead of another.
   // A feed can be lost by a failed upload (--clobber removes the old file
-  // first); a published release cannot, so the newest release tag is the
-  // floor as well.
+  // first, and an upload may stop unfinished); a published release cannot, so
+  // the newest release tag is the floor as well.
+  const latest = readRelease(gh, repository, FEEDS);
+  if (latest === null)
+    fail(`the ${FEEDS} release is missing; a maintainer creates it once (desktop/README.md)`);
+  if (latest.draft)
+    fail(
+      `the ${FEEDS} release is a draft, which nobody can download; a maintainer publishes it with 'gh release edit ${FEEDS} --draft=false --prerelease --repo ${repository}', then runs again`,
+    );
   const feedFiles = readdirSync(feeds).toSorted();
-  const download = gh([
-    "release",
-    "download",
-    FEEDS,
-    ...feedFiles.flatMap((name) => ["--pattern", name]),
-    "--dir",
-    announced,
-    "--repo",
-    repository,
-  ]);
-  if (download.status !== 0) {
-    if (said(download).includes("release not found"))
-      fail(`the ${FEEDS} release is missing; a maintainer creates it once (desktop/README.md)`);
-    if (!/no assets (match|to download)/u.test(said(download)))
-      fail(`cannot read ${FEEDS}: ${said(download)}`);
+  const lost = feedFiles
+    .map((name) => ({ name, state: latest.assets.get(name)?.state }))
+    .filter(({ state }) => state !== undefined && state !== UPLOADED);
+  const announcedFiles = feedFiles.filter((name) => latest.assets.get(name)?.state === UPLOADED);
+  if (announcedFiles.length > 0) {
+    const download = gh([
+      "release",
+      "download",
+      FEEDS,
+      ...announcedFiles.flatMap((name) => ["--pattern", name]),
+      "--dir",
+      announced,
+      "--repo",
+      repository,
+    ]);
+    if (download.status !== 0) fail(`cannot read ${FEEDS}: ${said(download)}`);
   }
   const list = gh([
     "release",
@@ -246,14 +318,20 @@ export function release({
   }
 
   if (dryRun) {
-    log(`dry run: would publish ${tag} at ${commit} with:`);
+    log(`dry run: would publish ${tag} at ${commit} from attempt ${attempt} of run ${runId} with:`);
     log(sums.trimEnd());
+    if (published === null && tagged !== null)
+      log(`${tag} exists at the build commit; would create the pre-release on it`);
+    for (const { name, state } of unfinished)
+      log(`${tag} has an unfinished ${name} (state ${state}); would remove it and upload it again`);
     if (published !== null)
       log(
-        missing.length === 0
+        pending.length === 0
           ? `${tag} already holds all of them`
-          : `${tag} already exists; would upload ${missing.join(", ")}`,
+          : `${tag} already exists; would upload ${pending.join(", ")}`,
       );
+    for (const { name, state } of lost)
+      log(`${FEEDS} has an unfinished ${name} (state ${state}), counted as lost; would remove it`);
     log(`and point ${FEEDS} at it:`);
     log(serverFeed.trimEnd());
     return { tag, published: false };
@@ -263,11 +341,19 @@ export function release({
     const done = gh([...args, "--repo", repository]);
     if (done.status !== 0) fail(`${what}: ${said(done)}`);
   };
+  const remove = (from, { name, state }) => {
+    write(
+      ["release", "delete-asset", from, name, "--yes"],
+      `cannot remove the unfinished ${name} (state ${state}) from ${from}`,
+    );
+    log(`removed the unfinished ${name} (state ${state}) from ${from}`);
+  };
   const paths = (names) => names.map((name) => path.join(upload, name));
   if (published === null) {
     // GITHUB_TOKEN may not create a release on a commit that changes workflow
-    // files (HTTP 403). A maintainer then creates the pre-release with the tag
-    // at the build commit, and a rerun uploads the files into it.
+    // files (HTTP 403). A maintainer then pushes the tag at the build commit
+    // and either creates the pre-release on it or runs this again, which
+    // creates it there.
     write(
       [
         "release",
@@ -284,13 +370,39 @@ export function release({
       ],
       `cannot create the pre-release ${tag}`,
     );
-  } else if (missing.length > 0) {
-    write(
-      ["release", "upload", tag, ...paths(missing)],
-      `cannot upload ${missing.join(", ")} to ${tag}`,
-    );
+  } else {
+    for (const file of unfinished) remove(tag, file);
+    if (pending.length > 0)
+      write(
+        ["release", "upload", tag, ...paths(pending)],
+        `cannot upload ${pending.join(", ")} to ${tag}`,
+      );
   }
+
+  // The feeds announce only a public pre-release that holds every file.
+  const problems = [];
+  const after = readRelease(gh, repository, tag);
+  const afterTag = readTag(gh, repository, tag);
+  if (afterTag !== commit)
+    problems.push(afterTag === null ? `there is no tag ${tag}` : `${tag} points at ${afterTag}`);
+  if (after === null) problems.push(`there is no release ${tag}`);
+  else {
+    if (after.draft) problems.push(`${tag} is a draft`);
+    for (const name of files) {
+      const found = after.assets.get(name);
+      if (found === undefined) problems.push(`${name} is missing`);
+      else if (found.state !== UPLOADED)
+        problems.push(`${name} is not fully uploaded (state ${found.state})`);
+      else if (found.digest !== digests.get(name))
+        problems.push(`${name} has the digest ${found.digest}, not ${digests.get(name)}`);
+    }
+  }
+  if (problems.length > 0)
+    fail(
+      `${tag} does not read back as a published pre-release of the build with every file:\n${problems.join("\n")}\nThe feeds in ${FEEDS} were not touched; a rerun checks the release again`,
+    );
   log(`published ${tag}`);
+  for (const file of lost) remove(FEEDS, file);
   write(
     ["release", "upload", FEEDS, ...feedFiles.map((name) => path.join(feeds, name)), "--clobber"],
     `cannot upload the feeds to ${FEEDS}`,
@@ -311,6 +423,7 @@ export function fromEnvironment(env) {
     fail(`DRY_RUN must be true or false, got '${flag ?? ""}'`);
   return {
     runId: required(env, "RUN_ID"),
+    attempt: required(env, "ATTEMPT"),
     commit: required(env, "COMMIT"),
     dryRun: flag === "true",
     ref: required(env, "GITHUB_REF"),
