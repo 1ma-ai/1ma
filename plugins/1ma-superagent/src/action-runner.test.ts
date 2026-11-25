@@ -742,3 +742,117 @@ describe("a stop answered before the chat stopped", () => {
     expect(titles()).toEqual(["Отменённый чат всё-таки создан"]);
   });
 });
+
+describe("the owner's Keep this chat during a pass", () => {
+  function keepRace() {
+    const db = new Database(":memory:");
+    for (const statement of MIGRATIONS) db.exec(statement);
+    const actions = new ActionStore(db);
+    const questions = new QuestionStore(db);
+    const kinds = new Map([[REVIVED_KIND, revivedKind(actions)]]);
+    const action = actions.propose("linux", params, "thr_bot", 1_000_000);
+    actions.transition(action.id, ["proposed"], "confirmed", 1_000_000);
+    actions.claim(action.id, "gen_a", 1_000_000);
+    actions.transition(action.id, ["sending"], "canceled", 1_000_000, {
+      threadId: "thr_late",
+      result: "stopped late",
+    });
+    const thread = { ...remoteThread("thr_late", "active"), queuedWork: "none" };
+    const hooks: {
+      onMetadata?: () => void;
+      onQueueRead?: () => void;
+      onDelete?: (path: string) => void;
+    } = {};
+    let queued = [{ id: "queued_1" }, { id: "queued_2" }];
+    const changes: string[] = [];
+    const executor = createRemoteHttpExecutor({
+      serverId: "linux",
+      baseUrl: "http://linux.test",
+      fetch: async (url, { method }) => {
+        const path = new URL(url).pathname;
+        if (path === "/api/v1/threads") return Response.json([thread]);
+        if (path.endsWith("/plugin-metadata")) {
+          hooks.onMetadata?.();
+          return Response.json({
+            threads: [{ threadId: "thr_late", metadata: { spawn: { nonce: action.label } } }],
+          });
+        }
+        if (method === "GET" && path.endsWith("/queued-messages")) {
+          hooks.onQueueRead?.();
+          return Response.json(queued);
+        }
+        changes.push(`${method} ${path}`);
+        if (method === "DELETE") hooks.onDelete?.(path);
+        return Response.json({});
+      },
+    });
+    const settings = (): PluginSettings => ({
+      generation: 0,
+      active: true,
+      executors: new Map([["linux", executor]]),
+      policy: repoPolicy([], []),
+    });
+    const run = () =>
+      runActions({
+        actions,
+        questions,
+        read: settings(),
+        settings,
+        observed: new Map([["linux", "complete"]]),
+        claimant: "gen_a",
+        now: () => 1_000_000 + 1_000,
+        signal: new AbortController().signal,
+        warn: () => {},
+      });
+    const keep = () => {
+      const card = questions.waiting().find((question) => question.kind === REVIVED_KIND);
+      if (card === undefined) throw new Error("no revived card");
+      questions.markOpen(card.id, "thr_bot", "token_keep", 1_000_000);
+      expect(questions.answer(card.id, "token_keep", "keep", kinds, 1_000_000)).toBe("applied");
+    };
+    const result = () => actions.get(action.id)?.result;
+    const reset = (rows: Array<{ id: string }>) => {
+      changes.length = 0;
+      queued = rows;
+    };
+    return { questions, thread, hooks, changes, run, keep, result, reset };
+  }
+
+  it("deletes and stops nothing once the owner keeps the chat while its queue is read", async () => {
+    const t = keepRace();
+    await t.run();
+    expect(t.result()).toBe("stopping late");
+    t.reset([{ id: "queued_3" }]);
+    t.hooks.onQueueRead = t.keep;
+    await t.run();
+    expect({ changes: t.changes, result: t.result() }).toEqual({
+      changes: [],
+      result: "kept by the owner",
+    });
+  });
+
+  it("sends no further delete and no stop once the owner keeps the chat between two deletes", async () => {
+    const t = keepRace();
+    await t.run();
+    t.reset([{ id: "queued_3" }, { id: "queued_4" }]);
+    t.hooks.onDelete = (path) => {
+      if (path.endsWith("/queued_3")) t.keep();
+    };
+    await t.run();
+    expect({ changes: t.changes, result: t.result() }).toEqual({
+      changes: ["DELETE /api/v1/threads/thr_late/queued-messages/queued_3"],
+      result: "kept by the owner",
+    });
+  });
+
+  it("does not confirm a stop over the owner's keep recorded while the chats were read", async () => {
+    const t = keepRace();
+    await t.run();
+    t.thread.status = "idle";
+    t.reset([]);
+    t.hooks.onMetadata = t.keep;
+    await t.run();
+    expect(t.result()).toBe("kept by the owner");
+    expect(t.questions.waiting().map((question) => question.kind)).toEqual([]);
+  });
+});

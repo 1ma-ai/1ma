@@ -37,6 +37,11 @@ const STATES: readonly ActionState[] = [
   "canceled",
 ];
 
+export interface ActionPosition {
+  readonly states: readonly ActionState[];
+  readonly result: string | null;
+}
+
 export interface ActionRow {
   id: string;
   kind: "spawn_thread";
@@ -169,9 +174,14 @@ export class ActionStore {
     return rows.map(toRow);
   }
 
+  isAt(id: string, position: ActionPosition): boolean {
+    const row = this.get(id);
+    return row !== null && position.states.includes(row.state) && row.result === position.result;
+  }
+
   transition(
     id: string,
-    from: readonly ActionState[],
+    from: readonly ActionState[] | ActionPosition,
     to: ActionState,
     now: number,
     fields: {
@@ -181,7 +191,8 @@ export class ActionStore {
       replacedBy?: string;
     } = {},
   ): boolean {
-    const placeholders = from.map(() => "?").join(", ");
+    const states = "states" in from ? from.states : from;
+    const placeholders = states.map(() => "?").join(", ");
     const sets = ["state = ?", "updated_at = ?"];
     const values: Array<string | number | null> = [to, now];
     if (fields.threadId !== undefined) {
@@ -200,12 +211,16 @@ export class ActionStore {
       sets.push("replaced_by = ?");
       values.push(fields.replacedBy);
     }
+    const where = [`id = ?`, `state IN (${placeholders})`];
+    const expected: Array<string | null> = [id, ...states];
+    if ("states" in from) {
+      where.push("result IS ?");
+      expected.push(from.result);
+    }
     return (
       this.#db
-        .prepare(
-          `UPDATE actions SET ${sets.join(", ")} WHERE id = ? AND state IN (${placeholders})`,
-        )
-        .run(...values, id, ...from).changes === 1
+        .prepare(`UPDATE actions SET ${sets.join(", ")} WHERE ${where.join(" AND ")}`)
+        .run(...values, ...expected).changes === 1
     );
   }
 

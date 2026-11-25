@@ -220,6 +220,16 @@ function matchingRows(rows: readonly SpawnedThread[], action: ActionRow): Spawne
   });
 }
 
+function isLate(action: ActionRow, now: number): boolean {
+  return (
+    action.state === "canceled" &&
+    action.sentAt !== null &&
+    (action.result === STOPPING_LATE ||
+      action.result === STOPPED_LATE ||
+      (action.threadId === null && now - action.sentAt < LATE_WINDOW_MS))
+  );
+}
+
 export async function runActions(deps: ActionDeps): Promise<void> {
   const admit = guardOf(deps.read, deps.settings);
   if (deps.signal.aborted || !admit()) return;
@@ -236,15 +246,7 @@ export async function runActions(deps: ActionDeps): Promise<void> {
   if (deps.signal.aborted || !admit()) return;
 
   const unknown = deps.actions.inStates(["unknown"]);
-  const late = deps.actions
-    .inStates(["canceled"])
-    .filter(
-      (action) =>
-        action.sentAt !== null &&
-        (action.result === STOPPING_LATE ||
-          action.result === STOPPED_LATE ||
-          (action.threadId === null && deps.now() - action.sentAt < LATE_WINDOW_MS)),
-    );
+  const late = deps.actions.inStates(["canceled"]).filter((action) => isLate(action, deps.now()));
   const servers = new Set([...unknown, ...late].map((action) => action.serverId));
   const spawned = new Map<ServerId, SpawnedThread[]>();
   await Promise.all(
@@ -261,15 +263,17 @@ export async function runActions(deps: ActionDeps): Promise<void> {
   if (deps.signal.aborted || !admit()) return;
 
   const now = deps.now();
-  for (const action of unknown) {
+  for (const listed of unknown) {
+    const action = deps.actions.get(listed.id);
+    if (action?.state !== "unknown") continue;
     const rows = spawned.get(action.serverId);
     const found = rows === undefined ? [] : matching(rows, action);
     const [only] = found;
     if (found.length === 1 && only !== undefined) {
-      deps.actions.transition(action.id, ["unknown"], "bound", now, { threadId: only });
-      deps.questions.cancel(`${UNKNOWN_KIND}:${action.id}`);
+      if (deps.actions.transition(action.id, ["unknown"], "bound", now, { threadId: only }))
+        deps.questions.cancel(`${UNKNOWN_KIND}:${action.id}`);
     } else if (found.length > 1) {
-      deps.actions.transition(action.id, ["unknown"], "ambiguous", now);
+      if (!deps.actions.transition(action.id, ["unknown"], "ambiguous", now)) continue;
       deps.questions.cancel(`${UNKNOWN_KIND}:${action.id}`);
       deps.questions.ask(
         {
@@ -322,7 +326,9 @@ export async function runActions(deps: ActionDeps): Promise<void> {
   }
 
   await Promise.all(
-    late.map(async (action) => {
+    late.map(async (listed) => {
+      const action = deps.actions.get(listed.id);
+      if (action === null || !isLate(action, deps.now())) return;
       const rows = spawned.get(action.serverId);
       const executor = deps.read.executors.get(action.serverId);
       if (rows === undefined || executor === undefined) return;
@@ -332,13 +338,18 @@ export async function runActions(deps: ActionDeps): Promise<void> {
       const live = matching.filter(isLive);
       const chats = (list: readonly SpawnedThread[]) =>
         list.map((row) => chatRef(action.serverId, row.threadId)).join(", ");
+      const position = { states: ["canceled"], result: action.result } as const;
+      const stillAsRead = () => admit() && deps.actions.isAt(action.id, position);
       if (live.length === 0 && action.result === STOPPED_LATE) return;
       if (live.length === 0 && action.result === STOPPING_LATE) {
-        if (!admit()) return;
-        deps.actions.transition(action.id, ["canceled"], "canceled", deps.now(), {
-          threadId: first,
-          result: STOPPED_LATE,
-        });
+        if (
+          !admit() ||
+          !deps.actions.transition(action.id, position, "canceled", deps.now(), {
+            threadId: first,
+            result: STOPPED_LATE,
+          })
+        )
+          return;
         deps.questions.ask(
           {
             key: `${NOTICE_KIND}:late:${action.id}`,
@@ -362,7 +373,7 @@ export async function runActions(deps: ActionDeps): Promise<void> {
       const requested = await Promise.all(
         targets.map(async (row) => {
           try {
-            return (await executor.clearQueueAndStop(row.threadId, admit, deps.signal))
+            return (await executor.clearQueueAndStop(row.threadId, stillAsRead, deps.signal))
               ? true
               : null;
           } catch (error) {
@@ -373,11 +384,15 @@ export async function runActions(deps: ActionDeps): Promise<void> {
           }
         }),
       );
-      if (requested.includes(null) || !admit()) return;
-      deps.actions.transition(action.id, ["canceled"], "canceled", deps.now(), {
-        threadId: first,
-        result: STOPPING_LATE,
-      });
+      if (
+        requested.includes(null) ||
+        !admit() ||
+        !deps.actions.transition(action.id, position, "canceled", deps.now(), {
+          threadId: first,
+          result: STOPPING_LATE,
+        })
+      )
+        return;
       if (revived)
         deps.questions.ask(
           {
