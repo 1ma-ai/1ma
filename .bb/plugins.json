@@ -30,6 +30,10 @@
     {
       "name": "1ma-sidebar",
       "source": "./plugins/1ma-sidebar"
+    },
+    {
+      "name": "1ma-memory-gate",
+      "source": "./plugins/1ma-memory-gate"
     }
   ]
 }
