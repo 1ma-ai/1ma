@@ -85,6 +85,7 @@ jobs:
         run: |
           base=$(node -p "require('./desktop/upstream.json').commit")
           cd "$RUNNER_TEMP/bb"
+          node scripts/check-source-nul.mjs
           node scripts/check-provider-literal-ratchet.mjs --base "$base"
           node scripts/check-test-process-identity.mjs
           node scripts/check-branch-ref-owner.mjs

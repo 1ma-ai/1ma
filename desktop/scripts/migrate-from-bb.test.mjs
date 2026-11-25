@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   exportBb,
   hostCopyPlan,
@@ -42,6 +43,7 @@ function bbFolder() {
   write(from, "auth.json", '{"credential":"c"}');
   write(from, "thread-storage/thr_1/page.html", "<p>notes</p>");
   write(from, "local-plugins/demo/package.json", "{}");
+  write(from, "pi-bridge-sessions/thr_1.jsonl", '{"type":"session"}\n');
   write(from, "plugins/automations/data.db", "plugin db");
   write(from, "plugins/browser-automation/host-data/profile/Cookies", "cookies");
   write(from, "plugins/provider-claude-code/bridge-data/session.json", "{}");
@@ -147,11 +149,29 @@ describe("the machine data an export leaves behind", () => {
         "auth.json",
         "thread-storage",
         "local-plugins",
+        "pi-bridge-sessions",
         "plugins/browser-automation/host-data",
         "plugins/environment-git-worktree/host-data",
         "plugins/environment-personal-workspace/host-data",
         "plugins/provider-claude-code/bridge-data",
       ],
+    );
+  });
+});
+
+describe("Pi sessions of a bb older than 0.50", () => {
+  test("are copied into the folder where 1ma's Pi plugin looks for them", () => {
+    const patches = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "patches");
+    const dataDirPatch = readdirSync(patches).find((name) => name.includes("data-directory"));
+    const lookup =
+      /^\+\s*const legacyFile = join\(homedir\(\), "\.1ma", "([^"]+)", fileName\);$/m.exec(
+        readFileSync(path.join(patches, dataDirPatch), "utf8"),
+      );
+    assert.ok(lookup, "the data directory patch no longer names the folder of earlier Pi sessions");
+    assert.ok(
+      hostCopyPlan(bbFolder()).some(
+        (entry) => entry.relative === lookup[1] && entry.kind === "directory",
+      ),
     );
   });
 });
@@ -166,6 +186,10 @@ describe("importing into 1ma", () => {
     assert.equal(readFileSync(path.join(to, "bb.db"), "utf8"), "imported");
     assert.equal(readFileSync(path.join(to, "host-id"), "utf8"), "host-1\n");
     assert.ok(existsSync(path.join(to, "thread-storage/thr_1/page.html")));
+    assert.equal(
+      readFileSync(path.join(to, "pi-bridge-sessions/thr_1.jsonl"), "utf8"),
+      '{"type":"session"}\n',
+    );
     assert.ok(existsSync(path.join(to, "plugins/browser-automation/host-data/profile/Cookies")));
     assert.ok(existsSync(path.join(to, "plugins/environment-git-worktree/host-data/state.json")));
     assert.ok(!existsSync(path.join(to, "plugins/environment-git-worktree/host-data/worktrees")));

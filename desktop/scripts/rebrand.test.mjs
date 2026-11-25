@@ -659,12 +659,72 @@ describe("prepare stops when a rule for all of bb matches nothing", () => {
     );
   });
 
+  test("a keep rule that decides only a test counts as matching", () => {
+    const whole = { text: "Please Restart bb server now", reason: "test" };
+    const inside = { text: "Restart bb server", reason: "test" };
+    const root = tree({
+      "apps/app/package.json": manifest("@bb/app"),
+      "apps/app/src/hint.tsx": 'export const hint = "Please Restart bb server now";\n',
+      "apps/app/src/hint.test.tsx": 'expect(hint).toContain("Restart bb server");\n',
+    });
+    after(() => rmSync(root, { recursive: true, force: true }));
+    const { unmatched } = rebrandTree(root, only({ product: [whole], keep: [inside] }), {
+      write: true,
+    });
+    assert.match(
+      readFileSync(path.join(root, "apps/app/src/hint.tsx"), "utf8"),
+      /"Please Restart 1ma server now"/,
+    );
+    assert.match(
+      readFileSync(path.join(root, "apps/app/src/hint.test.tsx"), "utf8"),
+      /"Restart bb server"/,
+    );
+    assert.deepEqual(unmatched, []);
+    requireEveryRuleMatches(unmatched);
+  });
+
+  test("a keep rule inside a longer rule that no test quotes is still named", () => {
+    const whole = { text: "Please Restart bb server now", reason: "test" };
+    const inside = { text: "Restart bb server", reason: "test" };
+    const root = tree({
+      "apps/app/package.json": manifest("@bb/app"),
+      "apps/app/src/hint.tsx": 'export const hint = "Please Restart bb server now";\n',
+      "apps/app/src/hint.test.tsx": "expect(hint).toBeTruthy();\n",
+    });
+    after(() => rmSync(root, { recursive: true, force: true }));
+    const { unmatched } = rebrandTree(root, only({ product: [whole], keep: [inside] }));
+    assert.deepEqual(unmatched, [{ kind: "keep", text: inside.text }]);
+  });
+
   test("rules that all match pass", () => {
     const root = tree(files);
     after(() => rmSync(root, { recursive: true, force: true }));
     const { unmatched } = rebrandTree(root, only({ replace: [live] }));
     assert.deepEqual(unmatched, []);
     requireEveryRuleMatches(unmatched);
+  });
+});
+
+describe("a test of a package the rebrand leaves alone", () => {
+  const files = (asserted) => ({
+    "packages/shared/package.json": manifest("@bb/shared"),
+    "packages/shared/src/title.ts": 'export const title = "Restart bb server";\n',
+    "apps/mobile/package.json": manifest("@bb/mobile", { "@bb/shared": "workspace:*" }),
+    "apps/mobile/src/hint.ts": 'export const hint = "Restart bb server for upstream testing";\n',
+    "apps/mobile/src/hint.test.ts": `expect(hint).toContain(${JSON.stringify(asserted)});\n`,
+  });
+  const run = (asserted) => {
+    const root = tree(files(asserted));
+    after(() => rmSync(root, { recursive: true, force: true }));
+    rebrandTree(root, { ...rules, testReplace: [], testKeep: [] }, { write: true });
+    return (file) => readFileSync(path.join(root, file), "utf8");
+  };
+
+  test("follows its own package for three words, though a renamed text reads the same in full", () => {
+    const read = run("Restart bb server");
+    assert.match(read("packages/shared/src/title.ts"), /"Restart 1ma server"/);
+    assert.match(read("apps/mobile/src/hint.ts"), /"Restart bb server for upstream testing"/);
+    assert.match(read("apps/mobile/src/hint.test.ts"), /"Restart bb server"/);
   });
 });
 

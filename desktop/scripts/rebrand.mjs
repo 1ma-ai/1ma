@@ -569,7 +569,7 @@ export function createIndex(rules) {
       byKey.set(key, list);
     }
   };
-  const variants = (text, product, kept, scope, explicit, rebranded) => {
+  const variants = (text, product, kept, scope, explicit, rebranded, rule = null) => {
     const base = { text, map: Array.from({ length: text.length }, (_, i) => i) };
     const squashed = collapsed(text);
     const cut = trimmed(squashed.text);
@@ -583,6 +583,7 @@ export function createIndex(rules) {
         scope,
         explicit,
         rebranded,
+        rule,
         match: lowered(form.text),
         product: move(product),
         kept: move(kept),
@@ -659,13 +660,14 @@ export function createIndex(rules) {
         if (followable(from)) replaceEntry(from, decision.to, scope);
       }
     },
-    keep(text, scope = null, explicit = false) {
-      variants(text, [], occurrences(text), scope, explicit, false);
+    keep(text, scope = null, explicit = false, rule = null) {
+      variants(text, [], occurrences(text), scope, explicit, false, rule);
     },
+    used: rules.used,
   };
   for (const entry of rules.keep)
     if (entry.file === undefined)
-      index.keep(entry.text.replaceAll("${…}", PLACEHOLDER), null, true);
+      index.keep(entry.text.replaceAll("${…}", PLACEHOLDER), null, true, entry);
   return index;
 }
 
@@ -675,11 +677,12 @@ export function createIndex(rules) {
 // least 8 characters, so a test can repeat a source text, quote part of it, or cut
 // through a template value. When neither string contains the other, the overlap
 // rests on where both happen to end and needs three words. Only sources of the test's package and its
-// dependencies count (scope). Explicit rules win; then the longest overlap; then
-// a source the test repeats in full, over one that merely contains the same
-// characters (a label "bb update" beside a command line "bb updates app …"); then,
+// dependencies count (scope). Explicit rules win; then the longest overlap; then,
 // for an overlap of three words or more, sources treated like the test's own
-// package (renamed or left alone); a remaining tie keeps bb. A bb the rules
+// package (renamed or left alone); then a source the test repeats in full, over
+// one that merely contains the same characters (a label "bb update" beside a
+// command line "bb updates app …"); a remaining tie keeps bb. A keep rule that
+// decides a bb of a test counts as used. A bb the rules
 // would keep in the test itself (a command, code, an identifier, a bb cloud
 // service) is never changed (veto). The relaxed mode, used only to flag
 // suspicious negative assertions, accepts two-word partial overlaps and lets a
@@ -696,8 +699,8 @@ export function propagate(
   const rank = (found) => [
     found.explicit ? 1 : 0,
     found.length,
-    found.repeated ? 1 : 0,
     found.explicit || (found.words >= 3 && found.rebranded === rebranded) ? 1 : 0,
+    found.repeated ? 1 : 0,
     (found.kind === "kept") !== relaxed ? 1 : 0,
   ];
   const consider = (offset, found) => {
@@ -765,6 +768,7 @@ export function propagate(
             repeated,
             explicit: entry.explicit,
             rebranded: entry.rebranded,
+            rule: entry.rule,
           });
         }
       }
@@ -802,6 +806,7 @@ export function propagate(
     if (veto?.(text, offset)) continue;
     decisions.push({ index: offset, kind: "product" });
   }
+  for (const found of evidence.values()) if (found.rule) index.used?.add(found.rule);
   return { result: compose(text, decisions, index.replacement), decisions };
 }
 

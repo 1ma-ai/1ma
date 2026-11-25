@@ -6,7 +6,8 @@
 //   import  (bb and 1ma stopped)  installs that export into 1ma's data folder
 //                         with 1ma's CLI, then copies what an export leaves on
 //                         the machine: its identity (host-id, auth.json), thread
-//                         files, local plugins and the plugins' machine data.
+//                         files, local plugins, Pi's earlier conversations and
+//                         the plugins' machine data.
 //
 // The export carries the server: the database, settings, attachments, skills,
 // theme and installed plugins. 1ma rewrites the plugin paths under ~/.bb at its
@@ -40,7 +41,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const HOST_FILES = ["host-id", "auth.json"];
-export const HOST_DIRECTORIES = ["thread-storage", "local-plugins"];
+// pi-bridge-sessions is where bb before 0.50 kept Pi's conversations; 1ma's Pi
+// plugin picks each one up from the same folder of its own data.
+export const HOST_DIRECTORIES = ["thread-storage", "local-plugins", "pi-bridge-sessions"];
 export const PLUGIN_HOST_DIRECTORIES = ["host-data", "bridge-data"];
 // Copying these would leave stale duplicates: the database points at the
 // originals, and 1ma removes them there when their threads are archived.
