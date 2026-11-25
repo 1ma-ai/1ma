@@ -1,9 +1,11 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import {
+  REVIVED_KIND,
   UNKNOWN_AFTER_MS,
   UNKNOWN_KIND,
   WAIT_MS,
+  revivedKind,
   runActions,
   unknownKind,
 } from "./action-runner.js";
@@ -337,54 +339,59 @@ describe("spawn actions", () => {
     });
     await t.run();
     expect(t.stopped).toEqual(["thr_first_late"]);
+    expect(t.questions.waiting()).toEqual([]);
+    await t.run();
     expect(t.questions.waiting().map((item) => item.kind)).toEqual(["notice"]);
     await t.run();
     expect(t.stopped).toEqual(["thr_first_late"]);
   });
 
-  it("keeps stopping a late chat until a stop is confirmed", async () => {
-    const t = setup();
+  function lateChat(t: ReturnType<typeof setup>) {
     const id = t.confirmed();
     t.setSpawn(async () => {
       throw new Error("timeout");
     });
-    await t.run();
-    const action = t.actions.get(id);
-    if (action === null) throw new Error("no action");
-    t.actions.transition(id, ["unknown"], "canceled", t.now(), { result: "replaced" });
-    t.existing.push({
-      threadId: "thr_late",
-      metadata: { spawn: { nonce: action.label } },
-    });
+    return (async () => {
+      await t.run();
+      const action = t.actions.get(id);
+      if (action === null) throw new Error("no action");
+      t.actions.transition(id, ["unknown"], "canceled", t.now(), { result: "replaced" });
+      const chat: { threadId: string; metadata: unknown; status?: string; queuedWork?: string } = {
+        threadId: "thr_late",
+        metadata: { spawn: { nonce: action.label } },
+      };
+      t.existing.push(chat);
+      return { id, chat };
+    })();
+  }
+
+  const titles = (t: ReturnType<typeof setup>) =>
+    t.questions.waiting().map((item) => item.card.title);
+
+  it("keeps stopping a late chat until it is seen stopped", async () => {
+    const t = setup();
+    const { id, chat } = await lateChat(t);
+    chat.status = "active";
     t.stopping.failures = 1;
     await t.run();
     expect(t.stopped).toEqual([]);
     expect(t.actions.get(id)).toMatchObject({ threadId: "thr_late", result: "stopping late" });
-    expect(t.questions.waiting().map((item) => item.card.title)).toEqual([
-      "Отменённый чат создан, остановить пока не удалось",
-    ]);
+    expect(titles(t)).toEqual(["Отменённый чат создан, остановить пока не удалось"]);
     await t.run();
     expect(t.stopped).toEqual(["thr_late"]);
+    expect(t.actions.get(id)?.result).toBe("stopping late");
+    chat.status = "idle";
+    await t.run();
     expect(t.actions.get(id)?.result).toBe("stopped late");
     await t.run();
     expect(t.stopped).toEqual(["thr_late"]);
   });
 
-  it("stops a late chat again whenever it runs or has a queue after a confirmed stop, and tells the owner", async () => {
+  it("stops a late chat again whenever it runs or has a queue after it was seen stopped, and tells the owner", async () => {
     const t = setup();
-    const id = t.confirmed();
-    t.setSpawn(async () => {
-      throw new Error("timeout");
-    });
+    const { id, chat } = await lateChat(t);
     await t.run();
-    const action = t.actions.get(id);
-    if (action === null) throw new Error("no action");
-    t.actions.transition(id, ["unknown"], "canceled", t.now(), { result: "replaced" });
-    const chat: { threadId: string; metadata: unknown; status?: string; queuedWork?: string } = {
-      threadId: "thr_late",
-      metadata: { spawn: { nonce: action.label } },
-    };
-    t.existing.push(chat);
+    expect(t.actions.get(id)?.result).toBe("stopping late");
     await t.run();
     expect(t.actions.get(id)?.result).toBe("stopped late");
     for (const question of t.questions.waiting()) t.questions.cancel(question.key);
@@ -392,19 +399,82 @@ describe("spawn actions", () => {
     chat.status = "active";
     await t.run();
     expect(t.stopped).toEqual(["thr_late", "thr_late"]);
-    expect(t.actions.get(id)).toMatchObject({ state: "canceled", result: "stopped late" });
-    expect(t.questions.waiting().map((item) => item.card.title)).toEqual([
-      "Остановленный чат отменённого запуска снова ожил",
-    ]);
+    expect(t.actions.get(id)).toMatchObject({ state: "canceled", result: "stopping late" });
+    expect(titles(t)).toEqual(["Остановленный чат отменённого запуска снова ожил"]);
 
     chat.status = "idle";
     chat.queuedWork = "waiting";
     await t.run();
     expect(t.stopped).toEqual(["thr_late", "thr_late", "thr_late"]);
+    expect(titles(t)).toEqual(["Остановленный чат отменённого запуска снова ожил"]);
 
     chat.queuedWork = "none";
     await t.run();
+    await t.run();
     expect(t.stopped).toEqual(["thr_late", "thr_late", "thr_late"]);
+    expect(t.actions.get(id)?.result).toBe("stopped late");
+  });
+
+  it("never stops a late chat again after the owner chose to keep it", async () => {
+    const t = setup();
+    const { id, chat } = await lateChat(t);
+    await t.run();
+    await t.run();
+    for (const question of t.questions.waiting()) t.questions.cancel(question.key);
+    chat.status = "active";
+    await t.run();
+    const card = t.questions
+      .waiting()
+      .find((item) => item.card.title === "Остановленный чат отменённого запуска снова ожил");
+    if (card === undefined) throw new Error("no revived card");
+    expect(card.card.options.map((option) => [option.id, option.label])).toEqual([
+      ["ok", "Понятно"],
+      ["keep", "Оставить этот чат"],
+    ]);
+    t.questions.markOpen(card.id, "thr_bot", "tok", t.now());
+    expect(
+      t.questions.answer(
+        card.id,
+        "tok",
+        "keep",
+        new Map([[REVIVED_KIND, revivedKind(t.actions)]]),
+        t.now(),
+      ),
+    ).toBe("applied");
+    const before = t.stopped.length;
+    await t.run();
+    await t.run();
+    chat.status = "idle";
+    chat.queuedWork = "waiting";
+    await t.run();
+    expect(t.stopped).toHaveLength(before);
+    expect(t.actions.get(id)?.result).toBe("kept by the owner");
+    expect(t.questions.waiting().filter((item) => item.kind === REVIVED_KIND)).toEqual([]);
+  });
+
+  it("stops a revived chat again when the owner only acknowledges the card", async () => {
+    const t = setup();
+    const { chat } = await lateChat(t);
+    await t.run();
+    await t.run();
+    for (const question of t.questions.waiting()) t.questions.cancel(question.key);
+    chat.status = "active";
+    await t.run();
+    const card = t.questions
+      .waiting()
+      .find((item) => item.card.title === "Остановленный чат отменённого запуска снова ожил");
+    if (card === undefined) throw new Error("no revived card");
+    t.questions.markOpen(card.id, "thr_bot", "tok", t.now());
+    t.questions.answer(
+      card.id,
+      "tok",
+      "ok",
+      new Map([[REVIVED_KIND, revivedKind(t.actions)]]),
+      t.now(),
+    );
+    const before = t.stopped.length;
+    await t.run();
+    expect(t.stopped).toHaveLength(before + 1);
   });
 });
 
@@ -605,5 +675,70 @@ describe("a spawn over HTTP whose answer is an error", () => {
     await run(1_000_000 + UNKNOWN_AFTER_MS);
     expect(actions.get(action.id)).toMatchObject({ state: "bound", threadId: "thr_new" });
     expect(posts).toHaveLength(1);
+  });
+});
+
+describe("a stop answered before the chat stopped", () => {
+  it("reports a late chat stopped only once a later observation shows it idle with an empty queue", async () => {
+    const db = new Database(":memory:");
+    for (const statement of MIGRATIONS) db.exec(statement);
+    const actions = new ActionStore(db);
+    const questions = new QuestionStore(db);
+    const action = actions.propose("linux", params, "thr_bot", 1_000_000);
+    actions.transition(action.id, ["proposed"], "confirmed", 1_000_000);
+    actions.claim(action.id, "gen_a", 1_000_000);
+    actions.transition(action.id, ["sending"], "unknown", 1_000_000);
+    actions.transition(action.id, ["unknown"], "canceled", 1_000_000, { result: "replaced" });
+    const thread = { ...remoteThread("thr_late", "active"), queuedWork: "none" };
+    const stops: string[] = [];
+    const executor = createRemoteHttpExecutor({
+      serverId: "linux",
+      baseUrl: "http://linux.test",
+      fetch: async (url, { method }) => {
+        const path = new URL(url).pathname;
+        if (path === "/api/v1/threads") return Response.json([thread]);
+        if (path.endsWith("/plugin-metadata"))
+          return Response.json({
+            threads: [{ threadId: "thr_late", metadata: { spawn: { nonce: action.label } } }],
+          });
+        if (path.endsWith("/queued-messages")) return Response.json([]);
+        if (method === "POST" && path.endsWith("/stop")) {
+          stops.push(path);
+          return Response.json({ ok: true });
+        }
+        if (path.endsWith("/thr_late")) return Response.json(thread);
+        throw new Error(`unexpected ${method} ${path}`);
+      },
+    });
+    const settings = (): PluginSettings => ({
+      generation: 0,
+      active: true,
+      executors: new Map([["linux", executor]]),
+      policy: repoPolicy([], []),
+    });
+    const run = () =>
+      runActions({
+        actions,
+        questions,
+        read: settings(),
+        settings,
+        observed: new Map([["linux", "complete"]]),
+        claimant: "gen_a",
+        now: () => 1_000_000 + 1_000,
+        signal: new AbortController().signal,
+        warn: () => {},
+      });
+    const titles = () => questions.waiting().map((question) => question.card.title);
+    await run();
+    expect(stops).toHaveLength(1);
+    expect(actions.get(action.id)?.result).toBe("stopping late");
+    expect(titles()).toEqual([]);
+    thread.status = "idle";
+    await run();
+    expect(actions.get(action.id)?.result).toBe("stopped late");
+    expect(titles()).toEqual(["Отменённый чат всё-таки создан"]);
+    await run();
+    expect(stops).toHaveLength(1);
+    expect(titles()).toEqual(["Отменённый чат всё-таки создан"]);
   });
 });

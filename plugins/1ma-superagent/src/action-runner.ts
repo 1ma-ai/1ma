@@ -23,6 +23,8 @@ export const AMBIGUOUS_KIND = "ambiguous_spawn";
 export const NOTICE_KIND = "notice";
 export const STOPPING_LATE = "stopping late";
 export const STOPPED_LATE = "stopped late";
+export const RELEASED_LATE = "kept by the owner";
+export const REVIVED_KIND = "revived_chat";
 
 export interface ActionDeps {
   readonly actions: ActionStore;
@@ -71,6 +73,21 @@ function ackCard(title: string, observed: string, affected: string, recommendati
 
 export function noticeKind(): QuestionKind {
   return { currentVersion: () => "1", onAnswer: () => {} };
+}
+
+export function revivedKind(actions: ActionStore): QuestionKind {
+  return {
+    currentVersion: (subject) => {
+      const action = actions.get(subject);
+      return action?.state === "canceled" && action.result !== RELEASED_LATE ? "1" : null;
+    },
+    onAnswer(question, optionId, now) {
+      if (optionId === "keep")
+        actions.transition(question.subject, ["canceled"], "canceled", now, {
+          result: RELEASED_LATE,
+        });
+    },
+  };
 }
 
 export function startKind(actions: ActionStore): QuestionKind {
@@ -309,33 +326,80 @@ export async function runActions(deps: ActionDeps): Promise<void> {
       const rows = spawned.get(action.serverId);
       const executor = deps.read.executors.get(action.serverId);
       if (rows === undefined || executor === undefined) return;
+      const matching = matchingRows(rows, action);
+      const first = matching[0]?.threadId;
+      if (first === undefined) return;
+      const live = matching.filter(isLive);
+      const chats = (list: readonly SpawnedThread[]) =>
+        list.map((row) => chatRef(action.serverId, row.threadId)).join(", ");
+      if (live.length === 0 && action.result === STOPPED_LATE) return;
+      if (live.length === 0 && action.result === STOPPING_LATE) {
+        if (!admit()) return;
+        deps.actions.transition(action.id, ["canceled"], "canceled", deps.now(), {
+          threadId: first,
+          result: STOPPED_LATE,
+        });
+        deps.questions.ask(
+          {
+            key: `${NOTICE_KIND}:late:${action.id}`,
+            kind: NOTICE_KIND,
+            subject: action.id,
+            expectedVersion: "1",
+            card: ackCard(
+              strings.lateTitle,
+              strings.lateObserved(chats(matching)),
+              strings.lateAffected,
+              strings.lateRecommendation,
+            ),
+            priority: 40,
+          },
+          deps.now(),
+        );
+        return;
+      }
       const revived = action.result === STOPPED_LATE;
-      const found = matchingRows(rows, action)
-        .filter((row) => !revived || isLive(row))
-        .map((row) => row.threadId);
-      if (found.length === 0) return;
-      const stopped = await Promise.all(
-        found.map(async (threadId) => {
+      const targets = revived || action.result === STOPPING_LATE ? live : matching;
+      const requested = await Promise.all(
+        targets.map(async (row) => {
           try {
-            if (!(await executor.clearQueueAndStop(threadId, admit, deps.signal))) return null;
-            const empty = (await executor.queuedWaits(threadId, deps.signal)).length === 0;
-            return admit() ? empty : null;
+            return (await executor.clearQueueAndStop(row.threadId, admit, deps.signal))
+              ? true
+              : null;
           } catch (error) {
             deps.warn(
-              `stopping late chat ${chatRef(action.serverId, threadId)}: ${describeError(error)}`,
+              `stopping late chat ${chatRef(action.serverId, row.threadId)}: ${describeError(error)}`,
             );
             return false;
           }
         }),
       );
-      if (stopped.includes(null) || !admit()) return;
-      const first = found[0] ?? "";
-      const chats = found.map((id) => chatRef(action.serverId, id)).join(", ");
-      if (!stopped.every(Boolean)) {
-        deps.actions.transition(action.id, ["canceled"], "canceled", deps.now(), {
-          threadId: first,
-          result: STOPPING_LATE,
-        });
+      if (requested.includes(null) || !admit()) return;
+      deps.actions.transition(action.id, ["canceled"], "canceled", deps.now(), {
+        threadId: first,
+        result: STOPPING_LATE,
+      });
+      if (revived)
+        deps.questions.ask(
+          {
+            key: `${REVIVED_KIND}:${action.id}`,
+            kind: REVIVED_KIND,
+            subject: action.id,
+            expectedVersion: "1",
+            card: {
+              title: strings.revivedTitle,
+              observed: strings.revivedObserved(chats(live)),
+              affected: strings.lateAffected,
+              recommendation: strings.revivedRecommendation,
+              options: [
+                { id: "ok", label: strings.acknowledge, recommended: true },
+                { id: "keep", label: strings.revivedKeep, recommended: false },
+              ],
+            },
+            priority: 40,
+          },
+          deps.now(),
+        );
+      if (!requested.every(Boolean))
         deps.questions.ask(
           {
             key: `${NOTICE_KIND}:stopping:${action.id}`,
@@ -344,7 +408,7 @@ export async function runActions(deps: ActionDeps): Promise<void> {
             expectedVersion: "1",
             card: ackCard(
               strings.stoppingTitle,
-              strings.stoppingObserved(chats),
+              strings.stoppingObserved(chats(targets)),
               strings.lateAffected,
               strings.stoppingRecommendation,
             ),
@@ -352,35 +416,6 @@ export async function runActions(deps: ActionDeps): Promise<void> {
           },
           deps.now(),
         );
-        return;
-      }
-      deps.actions.transition(action.id, ["canceled"], "canceled", deps.now(), {
-        threadId: first,
-        result: STOPPED_LATE,
-      });
-      deps.questions.ask(
-        {
-          key: `${NOTICE_KIND}:${revived ? "revived" : "late"}:${action.id}`,
-          kind: NOTICE_KIND,
-          subject: action.id,
-          expectedVersion: "1",
-          card: revived
-            ? ackCard(
-                strings.revivedTitle,
-                strings.revivedObserved(chats),
-                strings.lateAffected,
-                strings.revivedRecommendation,
-              )
-            : ackCard(
-                strings.lateTitle,
-                strings.lateObserved(chats),
-                strings.lateAffected,
-                strings.lateRecommendation,
-              ),
-          priority: 40,
-        },
-        deps.now(),
-      );
     }),
   );
 }
