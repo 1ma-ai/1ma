@@ -292,7 +292,8 @@ bb и 1ma хранят базу и настройки отдельно (`~/.bb` 
    импорт откажет (`--archive-is-current`, если ничего важного не менялось).
 3. Команда ставит экспорт в `~/.1ma` командой `bb server import` самого 1ma и
    докопирует то, чего в экспорте нет: личность машины (`host-id`,
-   `auth.json`), файлы тредов, локальные плагины и машинные данные плагинов:
+   `auth.json`), файлы тредов, локальные плагины, разговоры Pi из bb до 0.50
+   (`pi-bridge-sessions`) и машинные данные плагинов:
 
    ```sh
    node desktop/scripts/migrate-from-bb.mjs import --archive ~/1ma-migration/bb-server.tar --cli <bb.js из 1ma>
