@@ -1,6 +1,5 @@
 import { z } from "zod";
 import {
-  DefiniteSpawnFailure,
   type EnvironmentSummary,
   type Executor,
   type ObservationResult,
@@ -13,17 +12,6 @@ import {
 } from "../observation.js";
 import { type PagingLimits, DEFAULT_LIMITS, collectOnce, collectPages } from "./paging.js";
 import { METADATA_BATCH, chunks, combineSnapshot, toThreadSummary } from "./snapshot.js";
-
-const DEFINITE_REFUSALS = new Set([400, 401, 403, 404, 422]);
-
-const serverErrorSchema = z
-  .object({
-    code: z.string().regex(/^[a-z][a-z0-9_]*$/),
-    message: z.string(),
-    details: z.unknown().optional(),
-    retryable: z.boolean().optional(),
-  })
-  .strict();
 
 const threadSchema = z.object({
   id: z.string().regex(/^thr_/),
@@ -80,27 +68,11 @@ export const SPAWN_TIMEOUT_MS = 30_000;
 
 export class RemoteHttpError extends Error {
   readonly status: number | null;
-  readonly serverCode: string | null;
-
-  constructor(message: string, status: number | null, serverCode: string | null = null) {
+  constructor(message: string, status: number | null) {
     super(message);
     this.name = "RemoteHttpError";
     this.status = status;
-    this.serverCode = serverCode;
   }
-}
-
-async function serverErrorCode(response: Response): Promise<string | null> {
-  if (response.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json")
-    return null;
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    return null;
-  }
-  const parsed = serverErrorSchema.safeParse(body);
-  return parsed.success ? parsed.data.code : null;
 }
 
 export type Fetch = (
@@ -140,14 +112,8 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
       method,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    if (!response.ok) {
-      const code = await serverErrorCode(response);
-      throw new RemoteHttpError(
-        `${method} ${path} answered ${response.status}${code === null ? "" : ` (${code})`}`,
-        response.status,
-        code,
-      );
-    }
+    if (!response.ok)
+      throw new RemoteHttpError(`${method} ${path} answered ${response.status}`, response.status);
     const parsed = schema.safeParse(await response.json());
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
@@ -229,37 +195,25 @@ export function createRemoteHttpExecutor(options: RemoteHttpOptions): Executor {
       return project.gitRemoteUrl;
     },
     async spawn(request, signal) {
-      try {
-        const thread = await getJson(
-          "/threads",
-          spawnedSchema,
-          signal,
-          {
-            projectId: request.projectId,
-            providerId: request.providerId,
-            model: request.model,
-            title: request.title,
-            origin: "plugin",
-            originPluginId: PLUGIN_ID,
-            pluginMetadata: { spawn: { ...request.label } },
-            environment: { type: "project-default" },
-            input: [{ type: "text", text: request.prompt }],
-          },
-          undefined,
-          SPAWN_TIMEOUT_MS,
-        );
-        return { threadId: thread.id };
-      } catch (error) {
-        if (
-          error instanceof RemoteHttpError &&
-          error.status !== null &&
-          error.serverCode !== null &&
-          DEFINITE_REFUSALS.has(error.status)
-        ) {
-          throw new DefiniteSpawnFailure(error.message);
-        }
-        throw error;
-      }
+      const thread = await getJson(
+        "/threads",
+        spawnedSchema,
+        signal,
+        {
+          projectId: request.projectId,
+          providerId: request.providerId,
+          model: request.model,
+          title: request.title,
+          origin: "plugin",
+          originPluginId: PLUGIN_ID,
+          pluginMetadata: { spawn: { ...request.label } },
+          environment: { type: "project-default" },
+          input: [{ type: "text", text: request.prompt }],
+        },
+        undefined,
+        SPAWN_TIMEOUT_MS,
+      );
+      return { threadId: thread.id };
     },
     async findSpawned(signal) {
       const listed = await collectPages(

@@ -424,24 +424,24 @@ describe("ActionStore.claim", () => {
   });
 });
 
-describe("admission of changes made by a pass", () => {
-  const remoteThread = (id: string, status: string) => ({
-    id,
-    projectId: "proj_app",
-    environmentId: null,
-    title: null,
-    titleFallback: null,
-    providerId: "claude-code",
-    status,
-    visibility: "visible",
-    parentThreadId: null,
-    originPluginId: "1ma-superagent",
-    createdAt: 1_000_000,
-    updatedAt: 1_000_000,
-    queuedWork: "waiting",
-    hasPendingInteraction: false,
-  });
+const remoteThread = (id: string, status: string) => ({
+  id,
+  projectId: "proj_app",
+  environmentId: null,
+  title: null,
+  titleFallback: null,
+  providerId: "claude-code",
+  status,
+  visibility: "visible",
+  parentThreadId: null,
+  originPluginId: "1ma-superagent",
+  createdAt: 1_000_000,
+  updatedAt: 1_000_000,
+  queuedWork: "waiting",
+  hasPendingInteraction: false,
+});
 
+describe("admission of changes made by a pass", () => {
   function lateRun(hooks: {
     readonly onQueueRead?: () => void;
     readonly onDelete?: () => Promise<void>;
@@ -543,5 +543,67 @@ describe("admission of changes made by a pass", () => {
     await t.run("gen_a", new AbortController().signal, { active: false });
     expect(t.spawned).toEqual([]);
     expect(t.actions.get(id)?.state).toBe("confirmed");
+  });
+});
+
+describe("a spawn over HTTP whose answer is an error", () => {
+  it("binds the chat found by its label after an error answer, without a second request", async () => {
+    const db = new Database(":memory:");
+    for (const statement of MIGRATIONS) db.exec(statement);
+    const actions = new ActionStore(db);
+    const questions = new QuestionStore(db);
+    const action = actions.propose("linux", params, "thr_bot", 1_000_000);
+    actions.transition(action.id, ["proposed"], "confirmed", 1_000_000);
+    const posts: string[] = [];
+    let created = false;
+    const executor = createRemoteHttpExecutor({
+      serverId: "linux",
+      baseUrl: "http://linux.test",
+      fetch: async (url, { method, body }) => {
+        const path = new URL(url).pathname;
+        if (path === "/api/v1/projects/proj_app")
+          return Response.json({ id: "proj_app", gitRemoteUrl: "https://github.com/example/app" });
+        if (method === "POST" && path === "/api/v1/threads") {
+          posts.push(body ?? "");
+          created = true;
+          return Response.json(
+            { code: "project_not_found", message: "Project not found", retryable: false },
+            { status: 404 },
+          );
+        }
+        if (path === "/api/v1/threads")
+          return Response.json(created ? [remoteThread("thr_new", "idle")] : []);
+        if (path.endsWith("/plugin-metadata"))
+          return Response.json({
+            threads: created
+              ? [{ threadId: "thr_new", metadata: { spawn: { nonce: action.label } } }]
+              : [],
+          });
+        return Response.json([]);
+      },
+    });
+    const current = (): PluginSettings => ({
+      generation: 0,
+      active: true,
+      executors: new Map([["linux", executor]]),
+      policy: repoPolicy([{ repo: "example/app", accounts: { mac: [], linux: [] } }], []),
+    });
+    const run = (now: number) =>
+      runActions({
+        actions,
+        questions,
+        read: current(),
+        settings: current,
+        observed: new Map([["linux", "complete"]]),
+        claimant: "gen_a",
+        now: () => now,
+        signal: new AbortController().signal,
+        warn: () => {},
+      });
+    await run(1_000_000);
+    expect(actions.get(action.id)).toMatchObject({ state: "bound", threadId: "thr_new" });
+    await run(1_000_000 + UNKNOWN_AFTER_MS);
+    expect(actions.get(action.id)).toMatchObject({ state: "bound", threadId: "thr_new" });
+    expect(posts).toHaveLength(1);
   });
 });

@@ -228,40 +228,31 @@ describe("remote-http time limits", () => {
     await expect(executor.clearQueueAndStop("thr_t", () => true, signal)).rejects.toBeDefined();
   });
 
-  it("treats only refusals that prove nothing was written as final, every other answer as unknown", async () => {
-    const definite = [400, 401, 403, 404, 422];
-    const other = [408, 409, 425, 429, 500, 502];
-    expect(await Promise.all(definite.map((status) => outcomeOf(status)))).toEqual(
-      definite.map(() => "failed"),
-    );
-    expect(await Promise.all(other.map((status) => outcomeOf(status)))).toEqual(
-      other.map(() => "unknown"),
+  it("treats every answer to a started spawn request as an unknown outcome", async () => {
+    const statuses = [400, 401, 403, 404, 408, 409, 422, 425, 429, 500, 502];
+    expect(await Promise.all(statuses.map((status) => outcomeOf(status)))).toEqual(
+      statuses.map(() => "unknown"),
     );
   });
 
-  it("treats a refusal as final only when the 1ma server itself answered it", async () => {
+  it("never takes an error body as proof that no chat was created", async () => {
     const fromServer = (status: number) =>
       Response.json(
         { code: "project_not_found", message: "Project not found", retryable: false },
         { status },
       );
+    const unauthorized = (status: number) =>
+      Response.json({ code: "unauthorized", message: "Unauthorized" }, { status });
+    const foreignJson = (status: number) =>
+      Response.json({ code: "route_not_found", message: "No matching route" }, { status });
     const html = (status: number) =>
       new Response("<html><body><h1>404 Not Found</h1></body></html>", {
         status,
         headers: { "content-type": "text/html" },
       });
-    const plain = (status: number) => new Response("404 Not Found", { status });
-    const foreignJson = (status: number) =>
-      Response.json({ error: "not found", requestId: "r1" }, { status });
-    const wrongType = (status: number) =>
-      new Response(JSON.stringify({ code: "invalid_request", message: "refused" }), {
-        status,
-        headers: { "content-type": "text/plain" },
-      });
-    expect(await outcomeOf(404, fromServer)).toBe("failed");
+    expect(await outcomeOf(404, fromServer)).toBe("unknown");
+    expect(await outcomeOf(401, unauthorized)).toBe("unknown");
+    expect(await outcomeOf(404, foreignJson)).toBe("unknown");
     expect(await outcomeOf(404, html)).toBe("unknown");
-    expect(await outcomeOf(404, plain)).toBe("unknown");
-    expect(await outcomeOf(403, foreignJson)).toBe("unknown");
-    expect(await outcomeOf(400, wrongType)).toBe("unknown");
   });
 });
