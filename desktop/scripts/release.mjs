@@ -115,20 +115,55 @@ function readTag(gh, repository, tag) {
 // The release under the tag, draft or not, with its files by name, or null
 // when there is none.
 function readRelease(gh, repository, tag) {
-  const view = gh(["release", "view", tag, "--json", "isDraft,assets", "--repo", repository]);
+  const view = gh([
+    "release",
+    "view",
+    tag,
+    "--json",
+    "isDraft,isPrerelease,assets",
+    "--repo",
+    repository,
+  ]);
   if (view.status !== 0) {
     if (said(view).includes("release not found")) return null;
     fail(`cannot read release ${tag}: ${said(view)}`);
   }
   try {
-    const { isDraft, assets } = JSON.parse(view.stdout);
+    const { isDraft, isPrerelease, assets } = JSON.parse(view.stdout);
     return {
       draft: isDraft === true,
-      assets: new Map(assets.map(({ name, digest, state }) => [name, { digest, state }])),
+      prerelease: isPrerelease === true,
+      assets: new Map(
+        assets.map(({ name, digest, state, apiUrl }) => [name, { digest, state, address: apiUrl }]),
+      ),
     };
   } catch (error) {
     return fail(`cannot read the files of ${tag}: ${error.message}`);
   }
+}
+
+// The tags of the releases that are not drafts: a draft was never public.
+function readPublishedTags(gh, repository) {
+  const list = gh([
+    "release",
+    "list",
+    "--limit",
+    "1000",
+    "--json",
+    "tagName,isDraft",
+    "--repo",
+    repository,
+  ]);
+  if (list.status !== 0) fail(`cannot list the published releases: ${said(list)}`);
+  let entries;
+  try {
+    entries = JSON.parse(list.stdout);
+  } catch (error) {
+    fail(`cannot list the published releases: ${error.message}`);
+  }
+  if (!Array.isArray(entries) || entries.some((entry) => typeof entry?.tagName !== "string"))
+    fail("cannot list the published releases: GitHub names no tag of one");
+  return entries.filter((entry) => entry.isDraft !== true).map((entry) => entry.tagName);
 }
 
 function notes(version, upstream, commit) {
@@ -200,8 +235,7 @@ export function release({
   if (readdirSync(work).length > 0) fail(`the work folder ${work} is not empty`);
   const upload = path.join(work, "upload");
   const feeds = path.join(work, "feeds");
-  const announced = path.join(work, "announced");
-  for (const folder of [upload, feeds, announced]) mkdirSync(folder);
+  for (const folder of [upload, feeds]) mkdirSync(folder);
   const appFiles = readdirSync(app).filter((name) => isFile(path.join(app, name)));
   for (const extension of [".dmg", ".zip"]) {
     const found = appFiles.filter((name) => name.endsWith(extension));
@@ -241,31 +275,56 @@ export function release({
   const tagged = readTag(gh, repository, tag);
   if (tagged !== null && tagged !== commit)
     fail(`${tag} points at ${tagged}, not at the build commit ${commit}`);
-  const published = readRelease(gh, repository, tag);
-  if (published?.draft)
-    fail(
-      `${tag} is a draft release, left by an interrupted publication and never public; delete it with 'gh release delete ${tag} --yes --repo ${repository}', then run again`,
-    );
+  const prerelease = `'gh release edit ${tag} --prerelease --repo ${repository}'`;
+  const readOwn = () => {
+    const found = readRelease(gh, repository, tag);
+    if (found?.draft)
+      fail(
+        `${tag} is a draft release, left by an interrupted publication and never public; delete it with 'gh release delete ${tag} --yes --repo ${repository}', then run again`,
+      );
+    if (found !== null && !found.prerelease)
+      fail(
+        `${tag} is a release, not a pre-release; a maintainer makes it one with ${prerelease}, then runs again`,
+      );
+    return found;
+  };
+  const published = readOwn();
   if (published !== null && tagged === null) fail(`release ${tag} has no tag refs/tags/${tag}`);
+  // An unfinished file is removed later by the address it was read at, which
+  // names that file and not a later one of the same name.
+  const unfinishedOf = (from, name, { state, address }) => {
+    const prefix = `https://api.github.com/repos/${repository}/releases/assets/`;
+    if (
+      typeof address !== "string" ||
+      !address.startsWith(prefix) ||
+      !/^[0-9]+$/u.test(address.slice(prefix.length))
+    )
+      fail(`${from} has an unfinished ${name} without the address of it`);
+    return { name, state, address };
+  };
   // A published file is never replaced: one that is already there must be the
   // same file, and the missing ones are uploaded only when none differs. A
   // file GitHub did not finish storing was never published: it is removed and
   // uploaded again.
-  const pending = [];
-  const unfinished = [];
-  for (const name of published === null ? [] : files) {
-    const found = published.assets.get(name);
-    if (found === undefined) pending.push(name);
-    else if (found.state !== UPLOADED) {
-      unfinished.push({ name, state: found.state });
-      pending.push(name);
-    } else if (typeof found.digest !== "string")
-      fail(
-        `${tag} already has ${name} without a digest to compare; refusing to replace a published file`,
-      );
-    else if (found.digest !== digests.get(name))
-      fail(`${tag} already has a different ${name}; refusing to replace a published file`);
-  }
+  const planRelease = (found) => {
+    const pending = [];
+    const unfinished = [];
+    for (const name of files) {
+      const file = found.assets.get(name);
+      if (file === undefined) pending.push(name);
+      else if (file.state !== UPLOADED) {
+        unfinished.push(unfinishedOf(tag, name, file));
+        pending.push(name);
+      } else if (typeof file.digest !== "string")
+        fail(
+          `${tag} already has ${name} without a digest to compare; refusing to replace a published file`,
+        );
+      else if (file.digest !== digests.get(name))
+        fail(`${tag} already has a different ${name}; refusing to replace a published file`);
+    }
+    return { pending, unfinished };
+  };
+  let own = published === null ? null : planRelease(published);
 
   // The feeds only move forward: an older run never replaces a newer one.
   // Every feed this run replaces is checked, since a release that failed
@@ -273,67 +332,83 @@ export function release({
   // A feed can be lost by a failed upload (--clobber removes the old file
   // first, and an upload may stop unfinished); a published release cannot, so
   // the newest release tag is the floor as well.
-  const latest = readRelease(gh, repository, FEEDS);
-  if (latest === null)
-    fail(`the ${FEEDS} release is missing; a maintainer creates it once (desktop/README.md)`);
-  if (latest.draft)
-    fail(
-      `the ${FEEDS} release is a draft, which nobody can download; a maintainer publishes it with 'gh release edit ${FEEDS} --draft=false --prerelease --repo ${repository}', then runs again`,
-    );
+  const readFeeds = () => {
+    const found = readRelease(gh, repository, FEEDS);
+    if (found === null)
+      fail(`the ${FEEDS} release is missing; a maintainer creates it once (desktop/README.md)`);
+    if (found.draft)
+      fail(
+        `the ${FEEDS} release is a draft, which nobody can download; a maintainer publishes it with 'gh release edit ${FEEDS} --draft=false --prerelease --repo ${repository}', then runs again`,
+      );
+    return found;
+  };
+  const latest = readFeeds();
+  const publishedTags = readPublishedTags(gh, repository);
   const feedFiles = readdirSync(feeds).toSorted();
-  const lost = feedFiles
-    .map((name) => ({ name, state: latest.assets.get(name)?.state }))
-    .filter(({ state }) => state !== undefined && state !== UPLOADED);
-  const announcedFiles = feedFiles.filter((name) => latest.assets.get(name)?.state === UPLOADED);
-  if (announcedFiles.length > 0) {
-    const download = gh([
-      "release",
-      "download",
-      FEEDS,
-      ...announcedFiles.flatMap((name) => ["--pattern", name]),
-      "--dir",
-      announced,
-      "--repo",
-      repository,
-    ]);
-    if (download.status !== 0) fail(`cannot read ${FEEDS}: ${said(download)}`);
-  }
-  const list = gh([
-    "release",
-    "list",
-    "--limit",
-    "1000",
-    "--json",
-    "tagName",
-    "--jq",
-    ".[].tagName",
-    "--repo",
-    repository,
-  ]);
-  if (list.status !== 0) fail(`cannot list the published releases: ${said(list)}`);
-  try {
-    checkFeedsMoveForward(version, announced, list.stdout.split("\n").filter(Boolean));
-  } catch (error) {
-    fail(`the feeds in ${FEEDS} only move forward:\n${error.message}`);
-  }
+  let reads = 0;
+  // A feed that already holds the bytes to write is left alone, so a rerun
+  // of a finished publication does not risk a working feed.
+  const planFeeds = (found) => {
+    const announced = path.join(work, `announced-${(reads += 1)}`);
+    mkdirSync(announced);
+    const unfinished = [];
+    const current = [];
+    for (const name of feedFiles) {
+      const file = found.assets.get(name);
+      if (file === undefined) continue;
+      if (file.state === UPLOADED) current.push(name);
+      else unfinished.push(unfinishedOf(FEEDS, name, file));
+    }
+    if (current.length > 0) {
+      const download = gh([
+        "release",
+        "download",
+        FEEDS,
+        ...current.flatMap((name) => ["--pattern", name]),
+        "--dir",
+        announced,
+        "--repo",
+        repository,
+      ]);
+      if (download.status !== 0) fail(`cannot read ${FEEDS}: ${said(download)}`);
+    }
+    try {
+      checkFeedsMoveForward(version, announced, publishedTags);
+    } catch (error) {
+      fail(`the feeds in ${FEEDS} only move forward:\n${error.message}`);
+    }
+    const stale = feedFiles.filter(
+      (name) =>
+        !current.includes(name) ||
+        !readFileSync(path.join(announced, name)).equals(readFileSync(path.join(feeds, name))),
+    );
+    return { unfinished, stale };
+  };
+  let announcing = planFeeds(latest);
 
   if (dryRun) {
     log(`dry run: would publish ${tag} at ${commit} from attempt ${attempt} of run ${runId} with:`);
     log(sums.trimEnd());
     if (published === null && tagged !== null)
       log(`${tag} exists at the build commit; would create the pre-release on it`);
-    for (const { name, state } of unfinished)
-      log(`${tag} has an unfinished ${name} (state ${state}); would remove it and upload it again`);
-    if (published !== null)
+    if (own !== null) {
+      for (const { name, state } of own.unfinished)
+        log(
+          `${tag} has an unfinished ${name} (state ${state}); would remove it and upload it again`,
+        );
       log(
-        pending.length === 0
+        own.pending.length === 0
           ? `${tag} already holds all of them`
-          : `${tag} already exists; would upload ${pending.join(", ")}`,
+          : `${tag} already exists; would upload ${own.pending.join(", ")}`,
       );
-    for (const { name, state } of lost)
+    }
+    for (const { name, state } of announcing.unfinished)
       log(`${FEEDS} has an unfinished ${name} (state ${state}), counted as lost; would remove it`);
-    log(`and point ${FEEDS} at it:`);
-    log(serverFeed.trimEnd());
+    if (announcing.stale.length === 0) log(`the feeds in ${FEEDS} already point at it`);
+    else {
+      log(`and point ${FEEDS} at it:`);
+      log(serverFeed.trimEnd());
+    }
     return { tag, published: false };
   }
 
@@ -341,12 +416,42 @@ export function release({
     const done = gh([...args, "--repo", repository]);
     if (done.status !== 0) fail(`${what}: ${said(done)}`);
   };
-  const remove = (from, { name, state }) => {
-    write(
-      ["release", "delete-asset", from, name, "--yes"],
-      `cannot remove the unfinished ${name} (state ${state}) from ${from}`,
-    );
+  // Removes the file only while its address still answers with an unfinished
+  // upload; false when it was finished or removed meanwhile.
+  const removed = (from, { name, address }) => {
+    const now = gh(["api", address]);
+    if (now.status !== 0) {
+      if (notFound(now)) return false;
+      fail(`cannot read the unfinished ${name} in ${from} again: ${said(now)}`);
+    }
+    let state;
+    try {
+      ({ state } = JSON.parse(now.stdout));
+    } catch (error) {
+      fail(`cannot read the unfinished ${name} in ${from} again: ${error.message}`);
+    }
+    if (state === UPLOADED) return false;
+    const done = gh(["api", "-X", "DELETE", address]);
+    if (done.status !== 0) {
+      if (notFound(done)) return false;
+      fail(`cannot remove the unfinished ${name} (state ${state}) from ${from}: ${said(done)}`);
+    }
     log(`removed the unfinished ${name} (state ${state}) from ${from}`);
+    return true;
+  };
+  // A file that changed meanwhile makes the plan be made anew from a fresh
+  // read, by the same rules; a second change stops the run.
+  const clear = (from, plan, replan) => {
+    for (let again = false; ; again = true) {
+      const changed = plan.unfinished.find((file) => !removed(from, file));
+      if (changed === undefined) return plan;
+      if (again)
+        fail(
+          `the unfinished ${changed.name} in ${from} changed meanwhile, also after ${from} was read again; a rerun reads it again`,
+        );
+      log(`the unfinished ${changed.name} in ${from} changed meanwhile; reading ${from} again`);
+      plan = replan();
+    }
   };
   const paths = (names) => names.map((name) => path.join(upload, name));
   if (published === null) {
@@ -371,11 +476,15 @@ export function release({
       `cannot create the pre-release ${tag}`,
     );
   } else {
-    for (const file of unfinished) remove(tag, file);
-    if (pending.length > 0)
+    own = clear(tag, own, () => {
+      const found = readOwn();
+      if (found === null) fail(`release ${tag} was deleted meanwhile; a rerun creates it`);
+      return planRelease(found);
+    });
+    if (own.pending.length > 0)
       write(
-        ["release", "upload", tag, ...paths(pending)],
-        `cannot upload ${pending.join(", ")} to ${tag}`,
+        ["release", "upload", tag, ...paths(own.pending)],
+        `cannot upload ${own.pending.join(", ")} to ${tag}`,
       );
   }
 
@@ -388,6 +497,8 @@ export function release({
   if (after === null) problems.push(`there is no release ${tag}`);
   else {
     if (after.draft) problems.push(`${tag} is a draft`);
+    else if (!after.prerelease)
+      problems.push(`${tag} is not a pre-release; ${prerelease} makes it one`);
     for (const name of files) {
       const found = after.assets.get(name);
       if (found === undefined) problems.push(`${name} is missing`);
@@ -402,9 +513,19 @@ export function release({
       `${tag} does not read back as a published pre-release of the build with every file:\n${problems.join("\n")}\nThe feeds in ${FEEDS} were not touched; a rerun checks the release again`,
     );
   log(`published ${tag}`);
-  for (const file of lost) remove(FEEDS, file);
+  announcing = clear(FEEDS, announcing, () => planFeeds(readFeeds()));
+  if (announcing.stale.length === 0) {
+    log(`the feeds in ${FEEDS} already point at ${tag}; nothing uploaded`);
+    return { tag, published: true };
+  }
   write(
-    ["release", "upload", FEEDS, ...feedFiles.map((name) => path.join(feeds, name)), "--clobber"],
+    [
+      "release",
+      "upload",
+      FEEDS,
+      ...announcing.stale.map((name) => path.join(feeds, name)),
+      "--clobber",
+    ],
     `cannot upload the feeds to ${FEEDS}`,
   );
   log(`${FEEDS} now announces ${version}`);
