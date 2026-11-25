@@ -21,6 +21,7 @@ import {
   stubCall,
   stubRecords,
   thread,
+  turnsDone,
   waitStatus,
   waitTurns,
 } from "./harness.mjs";
@@ -502,6 +503,7 @@ describe("1ma-sidebar with the bots block", () => {
           (await rpc("bots.v1.get", { botId: fixture.visible.id })).threads[0].threadId ===
             fixture.v1 && (await order())[0] === fixture.v1,
       );
+      const parentTurns = await turnsDone(fixture.v1);
       await drag(
         "inside",
         overParent('[data-sidebar-nest-target="valid"]'),
@@ -512,6 +514,10 @@ describe("1ma-sidebar with the bots block", () => {
         30 * SECOND,
         async () => (await thread(fixture.v2)).parentThreadId === fixture.v1,
       );
+      // bb tells the new parent about its child two seconds later; a turn taken
+      // after a done mark clears the mark.
+      await waitTurns(fixture.v1, parentTurns + 1);
+      await waitStatus(fixture.v1, "idle");
       await page.reload();
       await expandBot(page, "Visual Bot");
       await group
