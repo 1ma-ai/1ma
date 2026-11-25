@@ -11,6 +11,7 @@ import {
   type GateSettings,
   type Sample,
 } from "./gate.js";
+import { withDeadline } from "./deadline.js";
 import { createRetryTimer } from "./retry.js";
 import { createSampler, READ_TIMEOUT_MS } from "./sampler.js";
 import { strings } from "./strings.js";
@@ -55,17 +56,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Bounds a call by the plugin's own timer, whether or not it honours its abort signal. */
-function within<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const late = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`no answer in ${String(ms / 1000)} s`)), ms);
-  });
-  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
-}
-
 function readingLine(sample: Sample | undefined): string {
-  if (sample === undefined) return strings.statusNoReading;
+  if (sample === undefined || sample.reading === null) return strings.statusNoReading;
   if (!sample.reading.supported) return strings.statusUnsupported;
   return strings.statusReading(
     freeBytes(sample.reading),
@@ -104,6 +96,8 @@ export default function plugin(bb: BbPluginApi): void {
       default: DEFAULTS.minRunning,
     },
   });
+  const lifetime = new AbortController();
+  bb.onDispose(() => lifetime.abort());
   const client = bb.hosts.experimental_client({ contract: memoryHostContract });
   const gate = createGate(monotonic);
   const sampler = createSampler({
@@ -122,10 +116,11 @@ export default function plugin(bb: BbPluginApi): void {
   }
 
   async function runningOn(hostId: string): Promise<string[]> {
-    const running = await within(
-      bb.sdk.threads.listRunning({ signal: AbortSignal.timeout(RUNNING_TIMEOUT_MS) }),
+    const running = await withDeadline(
+      (signal) => bb.sdk.threads.listRunning({ signal }),
+      lifetime.signal,
       RUNNING_TIMEOUT_MS,
-    );
+    ).answer;
     return running.filter((thread) => thread.hostId === hostId).map((thread) => thread.id);
   }
 
@@ -190,7 +185,8 @@ export default function plugin(bb: BbPluginApi): void {
       retry.book(verdict.retryInMs);
       return { action: "wait", reason: verdict.reason, sendAt: Date.now() + verdict.retryInMs };
     } catch (error) {
-      bb.log.warn(`memory check failed, the turn goes ahead: ${errorMessage(error)}`);
+      if (!lifetime.signal.aborted)
+        bb.log.warn(`memory check failed, the turn goes ahead: ${errorMessage(error)}`);
       return { action: "proceed" };
     }
   });
@@ -238,7 +234,10 @@ export default function plugin(bb: BbPluginApi): void {
                     name: host.name,
                     status,
                     reading: sample?.reading ?? null,
-                    ageMs: sample === undefined ? null : Math.round(monotonic() - sample.takenAt),
+                    ageMs:
+                      sample === undefined || sample.reading === null
+                        ? null
+                        : Math.round(monotonic() - sample.takenAt),
                     answer:
                       verdict.action === "proceed"
                         ? { action: "start", why: verdict.why }

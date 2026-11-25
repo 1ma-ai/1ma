@@ -426,6 +426,44 @@ it("lets the turn through with a warning when the running list never answers", a
   }
 });
 
+it("leaves no timer behind when disposed while the running list is being asked", async () => {
+  const { harness } = setup({ running: () => new Promise(() => {}) });
+  const service = await startSampler(harness);
+  const answer = harness.registrations.hooks["message.dispatch"]!(newChat());
+  await vi.advanceTimersByTimeAsync(0);
+  await harness.lifecycle.dispose();
+  await service.done;
+  expect(vi.getTimerCount()).toBe(0);
+  await expect(answer).resolves.toEqual({ action: "proceed" });
+});
+
+it("stops taking a machine for non-Linux once it connects again, until it answers anew", async () => {
+  let answering = true;
+  const { harness, hostChanged } = setup({
+    settings: { minRunning: 0 },
+    readMemory: () => {
+      if (!answering) throw new Error("daemon is starting");
+      return { supported: false };
+    },
+  });
+  try {
+    await startSampler(harness);
+    const decide = harness.registrations.hooks["message.dispatch"]!;
+    answering = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await decide(newChat())).toEqual({ action: "proceed" });
+    for (const callback of hostChanged) callback({ id: "hst_1", changes: ["host-connected"] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await decide(newChat())).toMatchObject({ action: "wait" });
+    answering = true;
+    for (const callback of hostChanged) callback({ id: "hst_1", changes: ["host-connected"] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await decide(newChat())).toEqual({ action: "proceed" });
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
 it("decides from a fresh reading after the wall clock jumps", async () => {
   const { harness } = setup();
   try {

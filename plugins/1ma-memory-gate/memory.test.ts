@@ -246,6 +246,34 @@ it("finds the container budget on an ancestor when the process sits in a child g
   expect(freeBytes(reading)).toBe(96 * MIB);
 });
 
+it("keeps an ancestor's limit when the process's own group has no memory files", async () => {
+  const read = (own: Files) =>
+    readMemory(
+      reader({
+        ...machine,
+        [MEMORY_FILES.meminfo]: "MemAvailable: 8000000 kB\n",
+        ...placed("/tenant/agent"),
+        ...group(`${MOUNT}/tenant`, {
+          max: bytes(1024 * MIB),
+          current: bytes(928 * MIB),
+          stat: "inactive_file 0\n",
+          pressure: PRESSURE_SOME,
+        }),
+        ...own,
+      }),
+    );
+  const undelegated = await read({});
+  expect(undelegated).toMatchObject({
+    cgroup: { limitBytes: 1024 * MIB, workingSetBytes: 928 * MIB },
+    pressureFullAvg10: 3.5,
+  });
+  expect(freeBytes(undelegated)).toBe(96 * MIB);
+  expect(await read(group(`${MOUNT}/tenant/agent`, { pressure: PRESSURE_CALM }))).toMatchObject({
+    cgroup: { limitBytes: 1024 * MIB },
+    pressureFullAvg10: 3.5,
+  });
+});
+
 it("reads the mount point when the process sits at the root of its cgroup namespace", async () => {
   const reading = await readMemory(reader({ ...container(), ...placed("/") }));
   expect(reading).toMatchObject({

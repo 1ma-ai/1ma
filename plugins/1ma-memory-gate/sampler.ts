@@ -1,4 +1,5 @@
 import type { MemoryReading } from "./contract.js";
+import { withDeadline } from "./deadline.js";
 import { freeBytes, type GateHost, type Sample } from "./gate.js";
 
 export const SAMPLE_INTERVAL_MS = 5_000;
@@ -29,35 +30,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/**
- * Starts a call that is aborted on `outer` or after READ_DEADLINE_MS. `answer`
- * settles by then at the latest; `call` settles whenever the call itself does.
- */
-function withDeadline<T>(
-  start: (signal: AbortSignal) => Promise<T>,
-  outer: AbortSignal,
-): { call: Promise<T>; answer: Promise<T> } {
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  outer.addEventListener("abort", abort, { once: true });
-  const call = Promise.resolve().then(() => start(controller.signal));
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const answer = new Promise<T>((resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`no answer in ${String(READ_DEADLINE_MS / 1000)} s`));
-      controller.abort();
-    }, READ_DEADLINE_MS);
-    controller.signal.addEventListener("abort", () => reject(new Error("stopped")), {
-      once: true,
-    });
-    call.then(resolve, reject);
-  }).finally(() => {
-    clearTimeout(timer);
-    outer.removeEventListener("abort", abort);
-  });
-  return { call, answer };
-}
-
 export function createSampler(deps: SamplerDeps) {
   const machines = new Map<string, Machine>();
   let active: AbortSignal | null = null;
@@ -84,7 +56,11 @@ export function createSampler(deps: SamplerDeps) {
     if (machine.pending === machine.connection || deps.now() < machine.retryAt) return;
     const connection = machine.connection;
     machine.pending = connection;
-    const { call, answer } = withDeadline((callSignal) => deps.read(id, callSignal), signal);
+    const { call, answer } = withDeadline(
+      (callSignal) => deps.read(id, callSignal),
+      signal,
+      READ_DEADLINE_MS,
+    );
     const settled = () => {
       if (machine.pending === connection) machine.pending = null;
     };
@@ -118,7 +94,11 @@ export function createSampler(deps: SamplerDeps) {
   async function sampleAll(signal: AbortSignal): Promise<void> {
     let hosts: GateHost[];
     try {
-      hosts = await withDeadline((callSignal) => deps.connectedHosts(callSignal), signal).answer;
+      hosts = await withDeadline(
+        (callSignal) => deps.connectedHosts(callSignal),
+        signal,
+        READ_DEADLINE_MS,
+      ).answer;
     } catch (error) {
       // The list is the plugin's own server, asked at the usual pace: a slower
       // pace would leave turns unchecked for longer once the server answers again.
@@ -162,11 +142,16 @@ export function createSampler(deps: SamplerDeps) {
       requested = true;
       wake?.();
     },
-    /** The machine connected again: forget its backoff and read it now. */
+    /**
+     * The machine connected again: what answers under its id may be another
+     * daemon, so the reading it gave before no longer speaks for it. Forget
+     * its backoff and read it now.
+     */
     reconnected(hostId: string): void {
       if (active === null) return;
       const machine = machineFor(hostId, hostId);
       machine.connection += 1;
+      if (machine.sample !== undefined) machine.sample = { ...machine.sample, reading: null };
       machine.failures = 0;
       machine.retryAt = 0;
       startRead(hostId, machine, active);

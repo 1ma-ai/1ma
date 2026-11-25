@@ -17,7 +17,8 @@ export interface GateSettings {
 }
 
 export interface Sample {
-  reading: MemoryReading;
+  /** Null from the moment the machine connected again until it answers anew. */
+  reading: MemoryReading | null;
   takenAt: number;
   /** When the last reading with a free-memory figure was taken, if ever. */
   usableAt: number | null;
@@ -86,8 +87,8 @@ function bounded(reason: string): string {
   return reason.length <= MAX_REASON_LENGTH ? reason : `${reason.slice(0, MAX_REASON_LENGTH - 1)}…`;
 }
 
-export function freeBytes(reading: MemoryReading): number | null {
-  if (!reading.supported) return null;
+export function freeBytes(reading: MemoryReading | null): number | null {
+  if (reading === null || !reading.supported) return null;
   const room = [
     reading.cgroup === null ? null : reading.cgroup.limitBytes - reading.cgroup.workingSetBytes,
     reading.machineAvailableBytes,
@@ -150,7 +151,7 @@ export function createGate(now: () => number) {
     const { question, settings, sample } = input;
     if (!isNewTurnOnHost(question)) return { action: "proceed", why: "not-a-new-turn" };
     if (!settings.enabled) return { action: "proceed", why: "disabled" };
-    if (sample?.reading.supported === false) return { action: "proceed", why: "unsupported" };
+    if (sample?.reading?.supported === false) return { action: "proceed", why: "unsupported" };
     const others = chatsOnHost(question, input.runningOnHost, at);
     if (others.count < settings.minRunning) return { action: "proceed", why: "few-running" };
     const host = hostLabel(question.host);
@@ -178,7 +179,7 @@ export function createGate(now: () => number) {
         reason: bounded(strings.waitingForMemory(host, free, needed)),
         retryInMs: MEMORY_RETRY_MS,
       };
-    const pressure = sample?.reading.supported ? sample.reading.pressureFullAvg10 : null;
+    const pressure = sample?.reading?.supported ? sample.reading.pressureFullAvg10 : null;
     if (pressure != null && pressure >= settings.pressurePercent)
       return {
         action: "wait",

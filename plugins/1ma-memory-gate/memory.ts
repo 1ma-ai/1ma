@@ -172,7 +172,9 @@ export async function readMemory(read: ReadFile): Promise<LinuxReading> {
   ]);
   const dirs = cgroupLevels(cgroupFile, mountinfo);
   let levels = dirs === null ? [] : await Promise.all(dirs.map((dir) => readLevel(read, dir)));
-  if (levels[0]?.readable !== true) levels = [await readLevel(read, CGROUP_MOUNT)];
+  // A group the memory controller is not delegated to has no memory files of
+  // its own; its ancestors' limits bind it all the same.
+  if (!levels.some((level) => level.readable)) levels = [await readLevel(read, CGROUP_MOUNT)];
   const binding = levels
     .filter((level): level is Level & { budget: Budget } => level.budget !== null)
     .reduce<(Level & { budget: Budget }) | null>(

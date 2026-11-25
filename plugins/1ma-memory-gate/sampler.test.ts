@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { MemoryReading } from "./contract.js";
 import type { GateHost } from "./gate.js";
@@ -133,6 +134,47 @@ it("does not store a result of the previous connection that arrives after a reco
     old.resolve(linux(100 * MIB));
     await vi.advanceTimersByTimeAsync(0);
     expect(run.sampler.get(HEALTHY.id)?.reading).toEqual(linux(4096 * MIB));
+  } finally {
+    await run.stop();
+  }
+});
+
+it("drops the reading of the previous connection when the machine connects again", async () => {
+  const next = deferred();
+  let calls = 0;
+  const run = setup({
+    read: () => (++calls === 1 ? Promise.resolve(linux(MIB)) : next.promise),
+  });
+  try {
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(run.sampler.get(HEALTHY.id)?.reading).toEqual(linux(MIB));
+    run.sampler.reconnected(HEALTHY.id);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(run.sampler.get(HEALTHY.id)).toEqual({ reading: null, takenAt: 0, usableAt: 0 });
+    next.resolve({ supported: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(run.sampler.get(HEALTHY.id)).toEqual({
+      reading: { supported: false },
+      takenAt: 1_000,
+      usableAt: 0,
+    });
+  } finally {
+    await run.stop();
+  }
+});
+
+it("leaves no listener on a read's signal once the read answered", async () => {
+  const signals: AbortSignal[] = [];
+  const run = setup({
+    read: async (_hostId, signal) => {
+      signals.push(signal);
+      return linux(MIB);
+    },
+  });
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(signals).toHaveLength(1);
+    expect(getEventListeners(signals[0]!, "abort")).toHaveLength(0);
   } finally {
     await run.stop();
   }
