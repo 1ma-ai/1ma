@@ -155,13 +155,17 @@ function overrideRanges(text, rules, file) {
   return ranges;
 }
 
+function mentionLength(decision) {
+  return decision.kind === "product" ? 2 : decision.length;
+}
+
 function compose(text, decisions, replacement) {
   let result = text;
   const edits = decisions
     .filter((decision) => ["product", "replace", "name"].includes(decision.kind))
     .toSorted((a, b) => b.index - a.index);
   for (const edit of edits) {
-    const length = edit.kind === "product" ? 2 : edit.length;
+    const length = mentionLength(edit);
     const value = edit.kind === "product" ? replacement : edit.to;
     result = result.slice(0, edit.index) + value + result.slice(edit.index + length);
   }
@@ -291,9 +295,55 @@ function contextOf(node) {
   return { kind: "value" };
 }
 
-function editsFor(file, text, segment, decisions, replacement) {
+function rawOffsets(segment) {
   const map = segment.escapes ? cookedToRaw(segment.raw) : null;
-  const toRaw = (index) => segment.rawStart + (map ? map[index] : index);
+  return (index) => segment.rawStart + (map ? map[index] : index);
+}
+
+// Where the range [start, end) of a text is once the edits are applied. A start
+// inside an edit moves to the edit's new start, an end inside it to its new end;
+// an insertion at either boundary stays outside the range.
+function moveRange([start, end], edits) {
+  const sorted = edits.toSorted((a, b) => a.start - b.start);
+  const move = (position, isEnd) => {
+    let shift = 0;
+    for (const edit of sorted) {
+      if (edit.start < position && position < edit.end)
+        return edit.start + shift + (isEnd ? edit.text.length : 0);
+      if (edit.end > position || (isEnd && edit.start === position)) break;
+      shift += edit.text.length - (edit.end - edit.start);
+    }
+    return position + shift;
+  };
+  return [move(start, false), move(end, true)];
+}
+
+// The edits replaceAll makes for a test rule, each with the span it changes:
+// the match without what find and replace share at either end.
+function ruleEdits(text, find, replace) {
+  let prefix = 0;
+  while (prefix < find.length && prefix < replace.length && find[prefix] === replace[prefix])
+    prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < find.length - prefix &&
+    suffix < replace.length - prefix &&
+    find[find.length - 1 - suffix] === replace[replace.length - 1 - suffix]
+  )
+    suffix += 1;
+  const edits = [];
+  for (let at = text.indexOf(find); at !== -1; at = text.indexOf(find, at + find.length))
+    edits.push({
+      start: at,
+      end: at + find.length,
+      text: replace,
+      changed: [at + prefix, at + find.length - suffix],
+    });
+  return edits;
+}
+
+function editsFor(file, text, segment, decisions, replacement) {
+  const toRaw = rawOffsets(segment);
   const edits = [];
   for (const decision of decisions) {
     if (decision.kind === "product") {
@@ -355,19 +405,24 @@ function literalEdits(file, text, options) {
     const full = segments.map((segment) => segment.cooked).join(PLACEHOLDER);
     if (!/bb/i.test(full)) return;
     if (context.kind === "module" || context.kind === "key") return;
-    const { result, decisions } = decide(full, { ...context, file });
-    record?.(
-      file,
-      display ? full.replaceAll(PLACEHOLDER, "${…}") : full,
-      display ? result.replaceAll(PLACEHOLDER, "${…}") : result,
-      decisions,
-    );
     let offset = 0;
     const local = segments.map((segment) => {
       const start = offset;
       offset += segment.cooked.length + PLACEHOLDER.length;
       return { segment, start, end: start + segment.cooked.length, decisions: [] };
     });
+    const position = (index) => {
+      const part = local.find((item) => item.start <= index && index <= item.end);
+      part.toRaw ??= rawOffsets(part.segment);
+      return part.toRaw(index - part.start);
+    };
+    const { result, decisions } = decide(full, { ...context, file, position });
+    record?.(
+      file,
+      display ? full.replaceAll(PLACEHOLDER, "${…}") : full,
+      display ? result.replaceAll(PLACEHOLDER, "${…}") : result,
+      decisions,
+    );
     for (const decision of decisions) {
       if (decision.index === undefined) continue;
       const part = local.find((item) => item.start <= decision.index && decision.index < item.end);
@@ -400,22 +455,18 @@ function literalEdits(file, text, options) {
       const literal = node.getText(source);
       const pattern = literal.slice(1, literal.lastIndexOf("/"));
       if (/bb/i.test(pattern)) {
-        const { decisions } = regexes(pattern, { negative: negativeAssertion(node) });
-        edits.push(
-          ...editsFor(
-            file,
-            text,
-            {
-              cooked: pattern,
-              rawStart: node.getStart(source) + 1,
-              raw: pattern,
-              escapes: false,
-              regex: true,
-            },
-            decisions,
-            rules.replacement,
-          ),
-        );
+        const segment = {
+          cooked: pattern,
+          rawStart: node.getStart(source) + 1,
+          raw: pattern,
+          escapes: false,
+          regex: true,
+        };
+        const { decisions } = regexes(pattern, {
+          negative: negativeAssertion(node),
+          position: rawOffsets(segment),
+        });
+        edits.push(...editsFor(file, text, segment, decisions, rules.replacement));
       }
       return;
     }
@@ -687,7 +738,8 @@ export function createIndex(rules) {
 // service) is never changed (veto). The relaxed mode, used only to flag
 // suspicious negative assertions, accepts two-word partial overlaps, puts a
 // renamed source the test repeats in full before the test's own kind, and lets
-// a renamed source win a tie.
+// a renamed source win a tie. A decision on a mention settled elsewhere (settled,
+// given its index and length) is left out, so no rule counts as used for it.
 export function propagate(text, index, options = {}) {
   const {
     regex = false,
@@ -697,6 +749,7 @@ export function propagate(text, index, options = {}) {
     rebranded = true,
     relaxed = false,
     without = null,
+    settled = null,
   } = options;
   const haystack = lowered(text);
   const marks = occurrences(haystack);
@@ -814,12 +867,15 @@ export function propagate(text, index, options = {}) {
     if (veto?.(text, offset)) continue;
     decisions.push({ index: offset, kind: "product" });
   }
-  const result = compose(text, decisions, index.replacement);
+  const open = settled
+    ? decisions.filter((decision) => !settled(decision.index, mentionLength(decision)))
+    : decisions;
+  const result = compose(text, open, index.replacement);
   if (without === null)
     for (const rule of new Set([...evidence.values()].map((found) => found.rule)))
       if (rule && propagate(text, index, { ...options, without: rule }).result !== result)
         index.used?.add(rule);
-  return { result, decisions };
+  return { result, decisions: open };
 }
 
 // A template part aligned on a bb of the test string, with the template parts
@@ -1316,43 +1372,75 @@ export function rebrandTree(root, rules, { write = false } = {}) {
     const options = { scope, veto, keep, rebranded };
     const byAlternative = (pattern, more) => {
       const decisions = [];
-      for (const { start, text: part } of alternatives(pattern))
-        for (const decision of propagate(part, index, { ...options, regex: true, ...more })
-          .decisions)
+      for (const { start, text: part } of alternatives(pattern)) {
+        const settled = more.settled && ((at, length) => more.settled(at + start, length));
+        for (const decision of propagate(part, index, {
+          ...options,
+          regex: true,
+          ...more,
+          settled,
+        }).decisions)
           decisions.push({ ...decision, index: decision.index + start });
+      }
       return { result: compose(pattern, decisions, rules.replacement), decisions };
     };
-    const flag = (literal, decided, relax) => {
-      if ((testEdits.get(file) ?? []).some((entry) => entry.find.includes(literal))) return;
-      const relaxed = relax();
-      if (relaxed.result !== decided.result)
-        suspicious.push(
-          `${file}: ${JSON.stringify(literal)} stays as is, but a renamed source suggests ${JSON.stringify(relaxed.result)}`,
-        );
-    };
+    // A negative assertion is checked once the file's testReplace rules ran: a
+    // rule settles the mentions of the literal whose text it changes.
+    const negatives = [];
     const edits = literalEdits(file, text, {
       rules,
       decide: (cooked, context) => {
         const decided = named(cooked) ?? propagate(cooked, index, options);
         if (context.negative && !named(cooked))
-          flag(cooked, decided, () => propagate(cooked, index, { ...options, relaxed: true }));
+          negatives.push({
+            literal: cooked,
+            decided,
+            position: context.position,
+            relax: (settled) => propagate(cooked, index, { ...options, relaxed: true, settled }),
+          });
         return decided;
       },
       regexes: (pattern, context) => {
         const decided = byAlternative(pattern, {});
         if (context.negative)
-          flag(pattern, decided, () => byAlternative(pattern, { relaxed: true }));
+          negatives.push({
+            literal: pattern,
+            decided,
+            position: context.position,
+            relax: (settled) => byAlternative(pattern, { relaxed: true, settled }),
+          });
         return decided;
       },
     });
     text = rewrite(file, edits, text, testsChanged);
+    const stages = [];
     for (const entry of testEdits.get(file) ?? []) {
       if (!text.includes(entry.find))
         throw new Error(`${file}: testReplace "${entry.find}" no longer matches; review it`);
+      stages.push(ruleEdits(text, entry.find, entry.replace));
       const next = text.replaceAll(entry.find, entry.replace);
       if (!testsChanged.includes(file)) testsChanged.push(file);
       if (write) writeFileSync(path.join(root, file), next);
       text = next;
+    }
+    for (const { literal, decided, position, relax } of negatives) {
+      const settled = (at, length) => {
+        let range = moveRange([position(at), position(at + length)], edits);
+        for (const stage of stages) {
+          if (stage.some(({ changed: [start, end] }) => range[0] < end && start < range[1]))
+            return true;
+          range = moveRange(range, stage);
+        }
+        return false;
+      };
+      const relaxed = relax(settled);
+      const open = decided.decisions.filter(
+        (decision) => !settled(decision.index, mentionLength(decision)),
+      );
+      if (relaxed.result !== compose(literal, open, rules.replacement))
+        suspicious.push(
+          `${file}: ${JSON.stringify(literal)} stays as is, but a renamed source suggests ${JSON.stringify(relaxed.result)}`,
+        );
     }
   }
   for (const file of [...testEdits.keys(), ...testKeeps.keys()])

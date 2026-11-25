@@ -744,6 +744,122 @@ describe("prepare stops when a rule for all of bb matches nothing", () => {
     assert.deepEqual(alone.unmatched, []);
   });
 
+  const whole = { text: "Please Restart bb", reason: "test" };
+  const inside = { text: "Restart bb", reason: "test" };
+  const file = "apps/app/src/hint.test.tsx";
+  const run = (test, more) => {
+    const root = tree({
+      "apps/app/package.json": manifest("@bb/app"),
+      "apps/app/src/hint.tsx": 'export const hint = "Please Restart bb";\n',
+      [file]: test,
+    });
+    after(() => rmSync(root, { recursive: true, force: true }));
+    const { unmatched } = rebrandTree(root, only({ product: [whole], ...more }), { write: true });
+    return { unmatched, test: readFileSync(path.join(root, file), "utf8") };
+  };
+  const twice =
+    'expect(first).not.toContain("Restart bb soon");\nexpect(second).not.toContain("Restart bb soon");\n';
+  const first = {
+    file,
+    find: 'expect(first).not.toContain("Restart bb soon")',
+    replace: 'expect(first).not.toContain("Restart 1ma soon")',
+    reason: "test",
+  };
+  const commented = '// Restart bb soon\nexpect(title).not.toContain("Restart bb soon");\n';
+  const comment = {
+    file,
+    find: "// Restart bb soon",
+    replace: "// Restart 1ma soon",
+    reason: "test",
+  };
+  const pattern = "expect(screen.queryByText(/Restart bb soon|Continue/u)).toBeNull();\n";
+  const diagnostic = /negative assertions[\s\S]*"Restart bb soon" stays as is/;
+
+  test("the same text in a second assertion is still named", () => {
+    assert.throws(() => run(twice, { testReplace: [first] }), diagnostic);
+  });
+
+  test("a keep rule the second assertion needs counts as matching", () => {
+    const { unmatched, test } = run(twice, { testReplace: [first], keep: [inside] });
+    assert.deepEqual(unmatched, []);
+    requireEveryRuleMatches(unmatched);
+    assert.match(test, /expect\(first\)\.not\.toContain\("Restart 1ma soon"\)/);
+    assert.match(test, /expect\(second\)\.not\.toContain\("Restart bb soon"\)/);
+  });
+
+  test("a comment with the same text settles no assertion", () => {
+    assert.throws(() => run(commented, { testReplace: [comment] }), diagnostic);
+  });
+
+  test("a keep rule an assertion below a changed comment needs counts as matching", () => {
+    const { unmatched, test } = run(commented, { testReplace: [comment], keep: [inside] });
+    assert.deepEqual(unmatched, []);
+    assert.match(
+      test,
+      /\/\/ Restart 1ma soon\nexpect\(title\)\.not\.toContain\("Restart bb soon"\)/,
+    );
+  });
+
+  test("a rule that changes another alternative of a pattern leaves its bb named", () => {
+    const other = {
+      file,
+      find: "/Restart bb soon|Continue/u",
+      replace: "/Restart bb soon|Proceed/u",
+      reason: "test",
+    };
+    assert.throws(
+      () => run(pattern, { testReplace: [other] }),
+      /negative assertions[\s\S]*"Restart bb soon\|Continue" stays as is/,
+    );
+  });
+
+  test("a rule shorter than a pattern settles the alternative it changes", () => {
+    const branch = {
+      file,
+      find: "/Restart bb soon",
+      replace: "/Restart 1ma soon",
+      reason: "test",
+    };
+    const { test } = run(pattern, { testReplace: [branch] });
+    assert.match(test, /queryByText\(\/Restart 1ma soon\|Continue\/u\)/);
+  });
+
+  test("the mention is found behind an escape and after an earlier rule", () => {
+    const escaped = 'expect(title).not.toContain("\\u0022Restart bb\\u0022 soon");\n';
+    const quoted = { text: 'Please "Restart bb"', reason: "test" };
+    const mention = {
+      file,
+      find: "\\u0022Restart bb",
+      replace: "\\u0022Restart 1ma",
+      reason: "test",
+    };
+    const longer = {
+      file,
+      find: "expect(title)",
+      replace: "expect(screen.getByRole(title))",
+      reason: "test",
+    };
+    const runQuoted = (testReplace) => {
+      const root = tree({
+        "apps/app/package.json": manifest("@bb/app"),
+        "apps/app/src/hint.tsx": "export const hint = 'Please \"Restart bb\"';\n",
+        [file]: escaped,
+      });
+      after(() => rmSync(root, { recursive: true, force: true }));
+      rebrandTree(root, only({ product: [quoted], testReplace }), { write: true });
+      return readFileSync(path.join(root, file), "utf8");
+    };
+    assert.throws(
+      () => runQuoted([]),
+      /negative assertions[\s\S]*"\\"Restart bb\\" soon" stays as is/,
+    );
+    assert.match(runQuoted([mention]), /"\\u0022Restart 1ma\\u0022 soon"/);
+    assert.match(
+      runQuoted([longer, mention]),
+      /expect\(screen\.getByRole\(title\)\)\.not\.toContain\("\\u0022Restart 1ma\\u0022 soon"\)/,
+    );
+  });
+
   test("a keep rule inside a longer rule that no test quotes is still named", () => {
     const whole = { text: "Please Restart bb server now", reason: "test" };
     const inside = { text: "Restart bb server", reason: "test" };
