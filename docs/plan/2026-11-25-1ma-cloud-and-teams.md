@@ -1,193 +1,453 @@
 # 1ma cloud and teams
 
-25.11.2026. Plan agreed with the owner topic by topic on 24–25.11.2026. It
-replaces the section «Облако 1ma» of
-[2026-11-16-rebrand-stage-2-and-1ma-cloud.md](2026-11-16-rebrand-stage-2-and-1ma-cloud.md).
-Nothing here is built, bought or registered yet. Durations are estimates, not
-promises.
+25.11.2026. Direction agreed with the owner topic by topic on 24–25.11.2026; choices
+still open are in «Open decisions». Nothing here is built, bought or registered.
+Implementation starts after the owner has approved every screen and failure of stage 1
+in plain words. Durations are estimates, not promises.
+
+## Rules
+
+- **For whom**: solo entrepreneurs, people and small businesses. Enterprise needs
+  (company single sign-on, custom roles, audit exports, admin consoles, certificates)
+  come later and are not designed for now, except that people and companies share one
+  data model from the start.
+- **Small and without errors** beats large.
+- **Nothing is invented.** Before each important task: research of best practice and
+  free open source, with licence, activity and fit written down; then copy 1:1, or
+  borrow the architecture, or say why neither works.
+- **Free for the client.** Basic functions come with 1ma; the client does not buy a
+  third-party service for them. They customize the rest themselves.
+- **One design system.** Screens use only its components. A missing component is added
+  to it first.
 
 ## What the customer gets
 
-One product for people and for companies:
+- **1ma app** on the person's own computer, or their own server (below). Chats and
+  files are stored there. What the person sends to an agent goes to the model provider
+  they chose.
+- **1ma account**, required at the first start. One account per person; a person can
+  belong to several companies.
+- **Personal tasks**, with agents working on them. Shared tasks come later.
+- **1ma Connect** (stage 2): the person opens their own 1ma from a browser, later from
+  a phone. Off until switched on. The computer or server must be running.
+- **Company workspace**: members, shared files and a shared board, later.
 
-- **1ma app** on the person's own computer. Chats, files and agents stay there.
-- **1ma account**, required at the first start. One account per person; a person
-  can belong to several companies.
-- **1ma Connect** (stage 2): the person opens their own 1ma from a browser or a
-  phone. Off until they switch it on. Their computer must be running.
-- **Company workspace** (stage 3): members and a shared task board in the 1ma
-  cloud, shown as a tab in each member's app.
-
-There is no shared bb server in this plan. bb has no users or roles: whoever
-reaches a server can read every chat, file and stored secret on it and run
-commands. Privacy between colleagues therefore comes from each having their own
-1ma. Hosting an employee's 1ma on a company server can be added later.
+bb has no users or roles: whoever reaches a server can act with the rights of the
+account it runs under. Privacy between colleagues comes from each having their own 1ma.
+1ma does not promise that the app cannot be examined, that all data stays in the EU, or
+that nobody can technically see Connect traffic.
 
 ## Owner's decisions
 
-| Topic               | Decision                                                                                                                            |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Order               | Personal app first; companies are designed in from the start and built as a later task                                              |
-| Payment             | No payment system in the app for now                                                                                                |
-| Computers           | Mac first; the Windows build starts in parallel, is checked on a rented machine and is given to clients when stable                 |
-| Account             | Required at the first start; no client is installed before sign-in works                                                            |
-| Sign-in             | Exactly as Claude does it: Google or an email link, no passwords, 28 days renewed by use, «log out on all devices»                  |
-| Account disabled    | The app shows the sign-in screen; chats and files on the computer are not deleted                                                   |
-| Cloud outage        | As Claude: a client whose 28 days end during an outage waits for the fix. A variant that never locks signed-in clients was declined |
-| Access from outside | Second stage                                                                                                                        |
-| Connect             | One 1ma gateway in the EU for all clients, stores no traffic, no end-to-end encryption (told to clients openly)                     |
-| Team                | Own closed 1ma per employee, on the employee's computer, plus a shared board                                                        |
-| Board               | People and their agents; roles: administrator and member                                                                            |
-| Hosting             | Supabase in a named EU region for accounts, client list and boards                                                                  |
-| Downloads           | A separate public repository with builds only                                                                                       |
-| Source              | This repository stays public during active development; closing it is decided later, checks then probably run locally               |
+| Topic              | Decision                                                                                                          |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| Income             | Services: training, rollout, setup. No payment system in the app                                                  |
+| Language           | English interface only                                                                                            |
+| Order              | Personal app first, then Connect; company functions, the shared board last                                        |
+| Board              | Free with 1ma, from open source; not a paid service. Later; personal tasks first                                  |
+| Integrations       | 1C, Directum and similar: outside these stages                                                                    |
+| Computers          | Mac first, installed by the owner; Windows in parallel, checked on a rented machine, given to clients when stable |
+| Apple Developer ID | Bought later, when the operator's form is settled                                                                 |
+| Account            | Required at the first start; no client is installed before sign-in works                                          |
+| Sign-in            | As Claude does it: Google or email, no passwords, 28 days renewed by use, «log out on all devices»                |
+| Account disabled   | The app shows the sign-in screen; chats and files on the computer are not deleted                                 |
+| Cloud outage       | A client whose 28 days end during an outage waits; new people cannot sign in until it ends                        |
+| Connect            | Stage 2. One 1ma gateway in the EU, stores devices and sign-in times, no end-to-end encryption (said openly)      |
+| Team               | Own closed 1ma per employee; no shared chats or bots                                                              |
+| Hosting            | Supabase in a named EU region                                                                                     |
+| Account service    | Code in a separate private repository                                                                             |
+| Downloads          | A separate public GitHub repository with builds only                                                              |
+| Source             | Public during active development; closing it is decided later                                                     |
+| Models             | Each client uses their own subscription, as the owner does                                                        |
 
 ## Models
 
-Each person uses their own Claude or ChatGPT subscription or API key. Anthropic's
-terms require each end user to authenticate with their own credential, keep
-Claude Code unmodified, and forbid reselling or intermediating its usage.
-Preinstalling or running Claude Code inside a product needs Anthropic's Commercial
-Terms: 1ma keeps letting the user install it, and whether that is enough is checked
-with a lawyer before the first client.
+Each person signs in to Claude Code or Codex through the vendor's own flow, with their
+own subscription or key. 1ma has no Claude sign-in button, never sees or stores the
+tokens, does not pool accounts and does not resell usage.
 
-## Stage 1: account and the first client (2–3 weeks)
+Official pages on 25.11.2026: third-party app usage draws from the person's Claude
+subscription limits, and a person may sign in to the unmodified Claude Code; another
+page tells products built on the Agent SDK to use API keys unless approved. So it works
+today and the rule can change. No letter or lawyer is a condition; the fallback is the
+client's own API key, written in the client's setup guide.
 
-Result: the owner installs 1ma on a client's Mac, the client signs in, and the
-owner sees them in a client list.
+| Company of five            | Claude                                                                                               |
+| -------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Seats                      | Team plan: Standard $25 a month ($20 yearly), Premium $125 ($100), at least two; a limit per person  |
+| Each employee signs in     | With their own seat, on their own computer or server. One seat is never shared                       |
+| Bots and unattended agents | A Team plan adds API credits per seat ($20 Standard, $100 Premium, pooled up to $500) for an API key |
+| OpenAI                     | Own ChatGPT plan; OpenAI asks automation to use an API key                                           |
 
-1. **Account service** on Supabase: sign-in by Google and email link through an
-   own mail provider, 28-day inactivity limit (a Pro feature), log out everywhere,
-   account deletion and data export.
-2. **Data model for people and companies from the first migration**:
-   `profiles`, `organizations`, `memberships(role)`, `devices`. Row-level security
-   on every table, with tests that another user's and another organization's rows
-   are refused.
-3. **Sign-in page and client list** on the account address. The owner's list can
-   disable an account. The administrator is a role in the database, never a
-   check in the page.
-4. **Plugin `1ma-account`**, built in: opens the sign-in page in the browser,
-   finishes with a device code (bb's removed `bb-account` plugin is the model),
-   keeps tokens in the plugin's server-side secret store, and covers the app until
-   signed in.
-5. **Download repository** with builds and update files. A release that points the
-   app and the server at the new address goes out before the first client, because
-   the addresses are compiled in (patches 0001 and 0009; 0015 and 0017 also name
-   this repository). Otherwise installed copies stop updating when the source is
-   closed. This changes existing patches, so it needs the owner's consent.
+## Where a person's 1ma runs
 
-What the sign-in screen is not: it counts clients and does not prevent copying.
+An agent has the rights of the operating-system account it runs under. Someone who
+does not want it near personal files, or wants it to work around the clock, runs 1ma
+elsewhere.
 
-- `experimental_appOverlay` mounts inside `AppLayout`, under `OnboardingGate`
-  (`apps/app/src/App.tsx`), so sign-in comes after bb's own introduction.
-- If the plugin crashes or is switched off, the app opens without the screen.
-- The local API stays unauthenticated, as in bb.
+| Way                                | Isolation from personal files | Works 24/7 | Cost for five, month, without tax (Hetzner, 25.11)        | Effort                          |
+| ---------------------------------- | ----------------------------- | ---------- | --------------------------------------------------------- | ------------------------------- |
+| On the own Mac                     | No                            | No         | 0                                                         | None                            |
+| Own Mac, separate macOS user       | Files of the other user only  | No         | 0                                                         | Switching users                 |
+| **One small server per person**    | Yes                           | Yes        | 5 × 8 GB, €152 (Helsinki) to €180 (Germany); 4 GB €85–100 | One setup recipe, five machines |
+| One large server, a container each | Yes, if containers are right  | Yes        | 1 × 32 GB, €111–130; 16 GB €59–70                         | Admin, shared failure           |
 
-A sign-in step that is first and cannot be switched off needs a bb patch. The plan
-uses the plugin; the patch is offered when the owner redoes the introduction.
+Recommended: own Macs for those who need nothing more; a small server only for a person
+who needs isolation or round-the-clock work. It is the same single-person product with
+one's own credentials and copies, and one person's heavy task cannot slow others. A
+large server is cheaper but needs real container isolation: bb's local API has no
+sign-in, so different operating-system users on one machine are **not** separated. Such
+a server is a later variant (Incus or containers, one per person, no port shared).
 
-Without Apple signing the first start is allowed in macOS settings, and updates on
-the Mac are installed by hand.
+Bots and always-on agents need an always-on machine: one small server for the company,
+with an API key, not a person's subscription. bb's `automations` plugin runs schedules
+on it today; schedules for `1ma-bots` are not in its first version. A one-year
+`claude setup-token` avoids sign-in expiry; using Claude Code does not extend a normal
+login.
 
-**Required before the first client**: a named legal operator of the service,
-privacy policy and terms reviewed by a lawyer, data processing agreements with
-Supabase and the mail provider, a check that services may be invoiced, an incident
-contact, a restore from backup performed once, and an independent security review.
+To build: a setup recipe (cloud-init, own service unit, updates, backup), a server list
+in the app (bb shows one server at a time) and a measurement. Our measurements, not a
+promise: about 1 GB idle per server, 0.3–0.45 GB per running Claude thread. Anthropic
+names 4 GB or more. Prices vary by place; Hetzner's page showed these
+machines as not available to order on the day.
 
-## Stage 2: 1ma Connect, then the phone
+## Stage 1: account and the first client
 
-### Browser access (2–3 weeks)
+Result: the owner installs 1ma on a client's Mac, the client signs in, the owner sees
+them in a list, and the client's earlier work is there.
 
-- Base: bb's `apps/connect-next` gate and frps (MIT) on an EU server behind Caddy.
-  Sign-in uses the 1ma account; bb's GitHub-only account API is replaced.
-- Each device has its own key, revocable from the account. Machine access uses the
-  public `experimental_serverAccess` API.
-- Passes through the gateway: chats, opened files, commands. Stored: account and
-  server ids, devices, sign-in times, security log with a fixed retention.
-- TLS ends at the gateway, so whoever controls it could read traffic and act as a
-  client. Hence: off by default, no request logging, separate machine with nothing
-  else on it, signing keys outside the repository, independent review before the
-  first client.
-- A personal server has one owner; another account gets 403. This is kept.
+### Design system first
 
-Decision before this stage: the tunnel entrance in bb is
-`internal_DO_NOT_USE_openTunnelIngress`, which our «public SDK only» rule forbids.
-The choices are an exception for this plugin, a small bb patch, or a relay plugin
-through the public WebSocket routes, whose behaviour is not tested. Recommended:
-test the relay first.
+It exists: bb ships shadcn/Radix components as vendored source (a registry of about
+110 items), tokens in `theme.css`, light and dark, and the capability components of the
+SDK. Plugins copy components; a copy does not update itself. 1ma's theme plugin equals
+bb's default today. Missing: cross-column drag, date picker, combobox, multi-select,
+data table, file upload, people picker, settings layout.
 
-### Phone (1–2 more weeks)
+The separate task, with its own document and owner's approval of the look, and no bb patch:
 
-bb's Expo app renamed, signing in through the 1ma gateway. Needs own Apple and
-Google accounts and an Expo project. Push goes through Expo in the USA: thread
-titles are left out of the push text, or push stays off, until the privacy policy
-covers it. Store review time is unknown.
+1. 1ma values in `1ma-theme` (light and dark, contrast checked).
+2. A 1ma registry: pinned bb items plus the missing components as screens need them.
+3. A usage guide that is also an agent skill: clients' agents build with it.
+4. A gallery plugin for review and a check for drift from bb's items.
 
-## Stage 3: company workspace and board (3–4 weeks)
+Stage 1 builds what the sign-in screen and the client list need.
 
-- Invitations by email; roles administrator and member, enforced by the database.
-  Unlike anything inside bb, these limits are real: the board is a separate
-  service and every request carries the member's own session.
-- Board: columns, assignee, author, priority, due date, labels, sub-tasks,
-  comments, activity history, «my tasks», live updates, revision check on edits.
-- Plugin `1ma-board`: UI parts from a copy of bb's MIT `tasks` plugin with
-  `UPSTREAM.md`; data from the cloud instead of local SQLite.
-- A member hands their task to an agent in their own 1ma. The agent moves the card
-  and writes the result under that member's name, marked as an agent. Colleagues
-  see the card, never the chat.
-- An agent can read its owner's session on that computer, so it can act as that
-  member and as nobody else.
+### Sign-in
 
-Not in this stage: shared chats and bots, private chats with enforced rights
-inside one server (needs a change of bb's core), guests, custom columns, company
-single sign-on.
+Reused: Supabase Auth, its documented patterns, an MIT example of a desktop loopback
+sign-in (`termcanvas`) as a pattern, and parts of the owner's earlier
+Supabase project: email-code flow, safe redirect handling, mail layer, row-security
+hardening with attack-before/after tests. Contributors' written permission comes first;
+that project has no licence file.
+
+- **Google**: system browser, PKCE, a one-time loopback address; the exchange happens in
+  1ma's own server process.
+- **Email**: a short code typed into the app. Mail scanners open links, and a link can
+  finish in another tab or account. Supabase names a code as the fix and the earlier
+  project ended with codes. The owner decided «link» on 24.11; code instead of link is
+  an open decision, recommended.
+- No site and no page are needed for sign-in. The client list is a tab in the owner's own
+  1ma.
+- Supabase's own rate limits and captcha, no links in mail, no codes or tokens in logs,
+  tokens in the operating system's secret storage or the plugin's server storage.
+- Google after email with the same verified address reaches the same account.
+
+### Required sign-in
+
+A plugin overlay alone does not meet «required»: it is mounted under bb's own
+introduction and shows nothing when the plugin fails. Recommended, if the owner agrees
+to a small bb patch: sign-in is the first step of the first start; a missing or failed
+account plugin shows an error with support text. A person already signed in is not
+blocked by a later plugin failure until their 28-day date. Without the patch: the plugin
+only, after bb's introduction and open on failure, acceptable for a pilot only.
+
+Either way: the registered list of patch 0014 changes (owner's consent); the screen
+controls the app we ship and is not copy protection; files are protected by the
+operating-system account. Checked: clean install and update, with the plugin healthy,
+missing and crashing.
+
+### Session
+
+Supabase's inactivity limit (Pro) is set to 28 days and counts token refreshes. The app
+therefore refreshes the token only when a person acts in the window, at most hourly, and
+never in the background or for an agent. No own timer is built. The app stores «signed
+in until» = last refresh + 28 days; the limit ends up to one token life later.
+
+| Situation                | Online                                                             | No network, or the cloud is down                     |
+| ------------------------ | ------------------------------------------------------------------ | ---------------------------------------------------- |
+| New person               | Signs in                                                           | Cannot start; the screen says why                    |
+| Day 27 since use         | Any use renews                                                     | Works; shows how long is left                        |
+| Day 28 reached           | Sign-in screen                                                     | Sign-in screen; files untouched                      |
+| After the outage         | Signs in and continues                                             | —                                                    |
+| Mail provider down       | Google works, email waits; signed-in people are not affected       | —                                                    |
+| Account disabled         | Cannot refresh or sign in; noticed at the next use, at most hourly | Noticed at the next connection, at the latest day 28 |
+| «Log out on all devices» | Same                                                               | Same                                                 |
+
+Disabling uses Supabase's own ban, through a function that only the operator can call.
+Revoking one device separately is added with Connect. An already issued token stays
+valid until it ends (minutes to an hour); stage 1 has no cloud function that needs more.
+Locking shows a screen: no agent is stopped, nothing is deleted.
+
+Tests with a controlled clock: days 27, 28, 29; background work without use; disable,
+global log-out and return; recovery after an outage.
+
+### Account service
+
+Supabase CLI migrations in the private repository. Tables for people and companies from
+the first one: `profiles`, `organizations`, `memberships(role)`; explicit grants, RLS on
+each, and tests that another user's and another organization's rows are refused. Account
+deletion and export. The operator is a separate account with a second factor enforced by
+Supabase's own assurance level.
+
+### Plugins and migration of earlier work
+
+- `1ma-account`: public SDK only, own id. bb's `bb-account` shows the flow; it speaks to
+  bb's service.
+- **Personal tasks**: bb's MIT `tasks` plugin is shipped but not installed. It has a
+  board and a list, priority, due date, labels, comments and agents working on a task.
+  It is switched on at setup. No code.
+- **Migration from Claude Code and Codex**. Already shared, because 1ma drives the same
+  installed programs: login, settings, skills, commands, MCP configuration and
+  `CLAUDE.md`/`AGENTS.md` (part of it read in code, not run). Projects are found by the
+  introduction. **Chats are not imported.** Community plugin `handoff` (MIT) reads Claude
+  Code, Codex, Gemini, OpenCode and Pi sessions and starts a thread with the transcript:
+  not a native continuation, long ones are cut at 150,000 characters. Plan: audit it,
+  ship a pinned copy, and add a first-start step «bring my work»: folders, chats, MCP,
+  settings checked one by one with what moved and what did not. A true continuation of a
+  chat needs a small bb change (no API creates a thread with history); offered to the
+  owner later. Chats of claude.ai and ChatGPT in the cloud: not supported; their own
+  account exports are the way.
+
+### Downloads and updates
+
+Today's Macs are replaced by hand, so publishing a build does not move them.
+
+- The release job writes to the download repository with a right limited to it.
+- The old channel stays with the last transition version; a written manual procedure
+  covers those that missed it. The source is not closed because a build was published.
+- Addresses in patches 0001 and 0009 change. Patch 0015 states where plugins come from
+  and is not pointed at the download repository. In 0017 links are set by purpose.
+  Consent of the owner.
+- Before clients: a signature made outside the download repository. Apple signing covers
+  the Mac later. Apple Silicon only at first; managed Macs may forbid unsigned apps.
+- Clients receive built-in plugins. Plugins installed from this repository by git need a
+  home if it closes.
+
+Tests: old app → transition → next release with the old channel unavailable; a clean
+Mac; a skipped transition.
+
+### Data
+
+The minimum the law asks of anyone holding accounts, in plain words for the client:
+privacy policy and terms, the providers' standard processing agreements, deletion and
+export, a named contact, a restore from copy tried once. Who the contracting party is,
+whether it may invoice, and how contracts move if it changes is confirmed by an
+accountant or lawyer before paid work. Enterprise paperwork is out.
+
+| Data                            | Received by                   | Where                                     | Kept                          |
+| ------------------------------- | ----------------------------- | ----------------------------------------- | ----------------------------- |
+| Account, sign-in times          | Supabase                      | EU region; logs place to confirm          | Until deletion; copies 7 days |
+| Google sign-in                  | Google                        | Google's terms                            | Google's terms                |
+| Sign-in mail                    | Mail provider (open decision) | Resend stores content and logs in the USA | Its contract                  |
+| Prompts and files for the model | The person's model provider   | Its terms                                 | Its terms; not 1ma's cloud    |
+| Connect traffic (stage 2)       | Gateway host                  | EU                                        | Not stored                    |
+| Push (off in the first version) | Expo, Apple, Google           | Includes the USA                          | —                             |
+
+### Done when
+
+On a clean Mac the owner sees: both sign-ins, the client in the list, disabling and
+return, log-out everywhere, the outage screens, an update that keeps data, a restore, one
+agent task with the client's own subscription, and earlier chats and settings arriving.
+
+## Stage 2: Connect, servers, phone
+
+### Transport
+
+Research before code; the first task is a prototype of page loads, files, live
+WebSocket and terminal, with a load measurement.
+
+| Candidate                                 | For                                            | Against                                                                      |
+| ----------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------- |
+| bb's `connect-next` gate with frp         | MIT and Apache-2.0, written for this product   | Uses an internal entrance; GitHub sign-in and control service to be replaced |
+| Pangolin Community (self-hosted)          | Ready gateway with sign-in, 24k stars          | AGPL and commercial parts; WebSocket and many clients not verified           |
+| The client's own Tailscale                | Nothing to build or run; no traffic through us | Business use is $8 per person a month (the free plan is non-commercial)      |
+| The client's own Cloudflare Tunnel+Access | Up to 50 users free, WebSocket                 | Setup by the client; reselling one account to clients is forbidden           |
+
+Recommended: prototype `connect-next` and Pangolin; keep the agreed own gateway. The
+client's Tailscale is a documented workaround for those who need it earlier. An own
+control service is written only for what neither offers. bb exposes its entrance only
+as `internal_DO_NOT_USE_openTunnelIngress`; using it breaks our rule unless the owner
+changes it, so the alternative is a small bb patch.
+
+### Browser access
+
+- Off by default; a visible switch and state.
+- One owner per server; another account is refused, tested in our gateway.
+- TLS both sides; it ends at the gateway, so its controller can read content and act as
+  the client. Client text says so. One compromised gateway concerns all its clients.
+- Stored: devices and sign-in times. Account and server ids and a short security log with
+  a fixed term are proposed and need the owner's agreement. Stock logs and caches of the
+  gate, Caddy, frp and the machine are cut to agreed fields.
+- A separate machine, keys outside the repository, review before the first Connect user.
+- Browsers are named after testing.
+
+Done when: a foreign account, a disabled account and a removed device are refused, also
+on open connections within the agreed time; gateway loss is clear and recovers; local
+work continues; a planted chat text and path are found in no log; each named browser works.
+
+### Own server and phone
+
+Own server: the recipe above, so the app and the browser reach it through the same
+Connect. Phone: a **test build** for the owner (own identifiers, pairing through our
+service, no bb domains); a **store release** separately: Apple's rule 4.8 on an
+equivalent private login, account deletion in the app, reviewer access; a new personal
+Google Play account needs 12 testers for 14 days. Push is off in the first version.
+
+## Stage 3: company functions
+
+Each starts with its own research document and the owner's approval.
+
+### Shared files
+
+| Way                       | For                                         | Against                                                                    |
+| ------------------------- | ------------------------------------------- | -------------------------------------------------------------------------- |
+| Google Drive (desktop)    | Simple, on accounts most teams already have | No Linux client, so it does not fit servers; Workspace from €6.80 a person |
+| Syncthing (MPL-2.0)       | Free, plain files, Mac, Linux, Windows      | Machines must be online together; a server fixes that; no roles            |
+| Private GitHub repository | History, merges                             | For technical people                                                       |
+| Nextcloud (AGPL)          | Own hosting, rights                         | Needs a server and care                                                    |
+
+Recommended to test: Google Drive for teams on Macs; Syncthing when people use servers or
+want no Google. Checked with agents: many small writes, simultaneous edits, offline. A
+folder on a shared server is not a first choice, because it needs accounts and rights.
+
+### Shared board
+
+Plugin of 1ma, free, data in the 1ma cloud. Research on 25.11, licence and activity
+checked: **Kaneo** (MIT, 9.9k stars) has columns, custom fields, REST, webhooks, live
+updates and 40 agent tools, but its own users and no author or agent identity; **Paca**
+(Apache-2.0) treats people and agents as equal accounts. Excluded by licence: Multica,
+Planka. Vikunja, Plane, Kan and Leantime are AGPL. Kanboard is in maintenance, Vibe
+Kanban is closing.
+
+Recommended: tables and agent-tool shapes borrowed from Kaneo, account kinds from Paca,
+UI on our components (dnd-kit, MIT), on our Supabase. Running Kaneo itself would add a
+second user database, a beta sign-in bridge and a service to update; it wins if
+attachments, webhooks, Gantt or recurrence are soon needed. Either way, notices are kept.
+
+Rules: server-side origin of every record; an agent gets a short right for one task;
+removal ends requests at once and open connections within the token's life; live changes
+over Broadcast; publishing to a card is giving text to colleagues. Also in scope of this
+stage: members and roles (administrator, member), invitations.
+
+### How clients customize
+
+What bb allows: look through a theme; new screens, panels, tools, settings through
+plugins an agent writes (`bb plugin new`, `install`, `dev`, with a skill); calling
+another plugin's functions. **It does not allow** a second plugin to add a field to the
+first one's card: a plugin cannot offer slots to others, a built-in's id cannot be
+replaced, edits of a built-in are lost on update. A fork works (the client owns it as a
+local plugin and receives no updates).
+
+So our own plugins are built to be extended, as part of their contract:
+
+1. **Declared custom fields**: a definition table (name, type, label, options) and
+   values, shown on the card, details, filters, agent tools. Adding «urgency» is data an
+   agent creates on request; no code, survives updates.
+2. Versioned functions for other plugins.
+3. Everything deeper: a fork under a new id, as bb supports.
+
+Anyone's plugin code is fully trusted by bb, without a sandbox: clients install only what
+they trust. The personal `tasks` plugin has priority, labels and due dates, but no custom
+fields; 1ma does not change it.
 
 ## Cost
 
-Prices checked on official pages on 24–25.11.2026 unless marked. The owner opens
-accounts, pays and enters credentials; each purchase is named again beforehand.
+Official pages, 25.11.2026, without tax; dollars and euros are not added together. Each
+purchase is named with price and purpose beforehand.
 
-| When      | Service                             | Price                                                                      |
-| --------- | ----------------------------------- | -------------------------------------------------------------------------- |
-| Stage 1   | Supabase Pro                        | from $25/month                                                             |
-| Stage 1   | Mail (for example Resend)           | $0 up to 3,000 emails/month and 100/day; then $20/month                    |
-| Stage 1   | Google sign-in, download repository | $0 expected, not rechecked                                                 |
-| Stage 1   | Hosting of the sign-in page         | not chosen; Vercel Pro would be $20/month                                  |
-| Stage 1   | Lawyer                              | not estimated                                                              |
-| Stage 2   | EU server for the gateway           | from €5.49/month without VAT (Hetzner); real size after a load measurement |
-| Stage 2   | Apple Developer                     | $99/year (not rechecked); also removes the macOS warning                   |
-| Stage 2   | Google Play                         | $25 once (not rechecked)                                                   |
-| Windows   | Code signing                        | €200–250/year for a person (checked 31.10.2026)                            |
-| If closed | GitHub Actions on private source    | $12/month included; see below                                              |
+| Item                          | Price                                                                        |
+| ----------------------------- | ---------------------------------------------------------------------------- |
+| Supabase Pro                  | from $25 a month                                                             |
+| Sign-in mail                  | $0 (Resend free: 3,000 a month, 100 a day), then $20; EU providers rechecked |
+| Sign-in page hosting          | not needed                                                                   |
+| **Stage 1**                   | **$25–45 a month**, plus quotes not yet made: accountant or lawyer           |
+| Gateway, from stage 2         | from €5.99 (Hetzner CX23 with IPv4); real size after measuring               |
+| Apple Developer / Google Play | $99 a year / $25 once                                                        |
+| Windows signing               | from €209; term and tax to confirm                                           |
+| Client pays                   | Own Claude or ChatGPT plan; own server only if wanted                        |
 
-Running cost: about **$25–45/month** in stages 1 and 3, about **$35–90/month** with
-the gateway (estimate).
+If the source is closed, builds cost money: 18–25.11.2026, about 5,200 Linux and 126
+macOS minutes by job durations, roughly $39 a week; a rough measure, not a limit. $12 a
+month is an included allowance.
 
-GitHub Actions, 18–25.11.2026: 379 runs, about 5,200 Linux and 126 macOS minutes by
-job durations. On a private repository that is at most about $39/week at this pace
-($0.006 and $0.062 per minute). Free while the source is public.
+## Time
+
+| Part                      | Engineering (estimate)                                   | Waiting outside our control                   |
+| ------------------------- | -------------------------------------------------------- | --------------------------------------------- |
+| Design system, first part | 1–2 weeks, own document                                  | Owner's approval of the look                  |
+| Stage 1                   | about 3 weeks after it, re-estimated after the prototype | Accountant, mail and Google accounts          |
+| Connect                   | 1 week prototype, then 2–3 weeks                         | Review                                        |
+| Server recipe             | about 1 week                                             | —                                             |
+| Phone                     | 1–2 weeks test build; stores not estimated               | Store review, 14 days on a new Google account |
+| Files, board              | estimated in their documents                             | —                                             |
+
+## Components and licences
+
+| Component                                                 | Licence                                   |
+| --------------------------------------------------------- | ----------------------------------------- |
+| bb 0.49.0, `tasks`, `handoff`, termcanvas, dnd-kit, Kaneo | MIT                                       |
+| frp 0.71.0, Caddy, Paca                                   | Apache-2.0                                |
+| Syncthing                                                 | MPL-2.0                                   |
+| Pangolin                                                  | AGPL and commercial parts, only if chosen |
+| Parts of the owner's earlier project                      | No licence file: written permission       |
+
+Every build the client receives lists its notice files; the list is read from the built
+app before the first client.
 
 ## Open decisions
 
-1. Where the code of the account service lives. Recommended: a separate private
-   repository from the first day, small enough for GitHub's free allowance.
-2. The tunnel entrance (stage 2, above).
-3. Whether the company board goes before Connect. Recommended: as listed, because
-   the owner chose Connect as the second stage; the two do not depend on each other.
+Recommendation first; asked one at a time in plain words.
+
+1. **Sign-in step**: a small bb patch, or a plugin only (pilot).
+2. **Email**: a code typed into the app, or a link.
+3. **First client**: a free limited pilot, then paid after the party is confirmed and the
+   app is signed; or paid at once if confirmed; or wait for signing.
+4. **Mail**: storing data in the EU, or Resend in the USA, stated in the policy.
+5. **Patches** 0001, 0009, 0014, 0017. **Region**: Frankfurt, if no reason against.
+6. **Older documents**: permission to update those below; **reuse** of the earlier
+   project's parts (written permission).
+7. **Recommended server**: one small server per person who needs it.
+
+Before Connect: transport, extra stored fields, revocation time. Before the phone: test
+build or stores, iOS sign-in, push. Before files and board: their documents.
+
+## What this plan supersedes
+
+| Text                                                                                 | Now                                                              |
+| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `docs/plan/2026-11-16-rebrand-stage-2-and-1ma-cloud.md`, «Облако 1ma»                | Replaced                                                         |
+| `docs/plan/2026-10-31-1ma-desktop.md`: server sale, signing, models, languages, link | Where they differ, this document applies                         |
+| `AGENTS.md` (bilingual), ADR-0003, ADR-0005 (Russian)                                | English only                                                     |
+| ADR-0001 and the 31.10 plan (proposals to bb's authors)                              | Nothing is proposed to bb (13.11.2026)                           |
+| ADR-0002, ADR-0004                                                                   | Public plugins unchanged; account service private; channel moves |
+
+Those files are not edited in this change; a follow-up marks them after consent.
 
 ## Not verified
 
-- Email-link sign-in finished in a desktop app with Supabase (device code or local
-  callback): a prototype is the first task of stage 1.
-- Relay of bb's core through a plugin WebSocket; any proxy with bb's WebSockets.
-- Memory and traffic per connected client on the gateway.
-- What Claude Desktop does with no network at all: not documented officially.
-- Whether the MIT versions already published limit later plans: a question for the
-  lawyer. bb's MIT notice stays in the product in any case.
+- Supabase loopback sign-in and code mail end to end; the ban's effect on refresh in our
+  settings; linking of Google and email.
+- Plugin and migration behaviour by running; `handoff` audit; the same for Claude's and
+  Codex's desktop-app chats.
+- Transport candidates; browsers; memory per client; containers on one machine.
+- Google Drive and Syncthing with agents; what a Mac-app switch between two servers does.
+- What Claude's desktop app does offline: not documented officially.
+- On a test Mac by the owner: architecture and signature of a build, old update channel,
+  order of introduction and sign-in, offline screens.
 
 ## Order of work after approval
 
-1. Owner: operator, lawyer, accounts (Supabase, mail, Google), DNS records.
-2. Prototype of sign-in on a throwaway Supabase project, then the data model with
-   security tests, the pages, the plugin, the download repository, the review.
-3. First client. Stage 2 is planned in detail in its own document after that.
+1. Owner: choices 1–7; stage 1 screens and failures approved in plain words.
+2. Design system, first part; prototype of sign-in; then stage 1.
+3. Owner's check on a clean Mac, then the first client. Later stages get own documents.
