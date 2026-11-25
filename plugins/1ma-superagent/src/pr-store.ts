@@ -106,6 +106,10 @@ export class PrStore {
     return links.filter((link) => !isExcludedRepo(policy, link.repo));
   }
 
+  batch<T>(work: () => T): T {
+    return this.#db.transaction(work)();
+  }
+
   cursor(repo: string): number | null {
     const row = this.#db
       .prepare(`SELECT pulls_seen_until FROM repo_cursors WHERE repo = ?`)

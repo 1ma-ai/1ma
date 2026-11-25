@@ -66,9 +66,11 @@ function setup(options: {
     }
   }
   const reads: string[] = [];
+  const admission = { ok: true, onPull: (_number: number) => {} };
   const github: GitHubReader = {
     async pull(repo, number) {
       reads.push(`pull ${number}`);
+      admission.onPull(number);
       const found = options.pulls.find((candidate) => candidate.number === number);
       if (found === undefined) throw new Error(`no ${repo}#${number}`);
       return found;
@@ -113,7 +115,7 @@ function setup(options: {
       ]),
       now,
       signal: new AbortController().signal,
-      admitted: () => true,
+      admitted: () => admission.ok,
     });
   const archive = (serverId: ServerId) =>
     store.applySnapshot(
@@ -122,7 +124,17 @@ function setup(options: {
       { observedAt: 2, completeness: "complete" },
       null,
     );
-  return { db, store, prStore, run, reads, failing, archive, metadata: options.metadata };
+  return {
+    db,
+    store,
+    prStore,
+    run,
+    reads,
+    failing,
+    archive,
+    admission,
+    metadata: options.metadata,
+  };
 }
 
 describe("runPrPass", () => {
@@ -435,6 +447,27 @@ describe("runPrPass", () => {
     });
     await run(10_000);
     expect(prStore.get("example/app", 7)?.provenanceGap).toBe(true);
+  });
+
+  it("keeps the cursor where it was when the batch it covers is dropped", async () => {
+    const pulls = [pull(1, { updatedAt: 1_000 })];
+    const { prStore, run, admission } = setup({ threads: { mac: [], linux: [] }, pulls });
+    await run(10_000);
+    prStore.setCursor("example/app", 1_500);
+    pulls.push(pull(2, { updatedAt: 2_000 }), pull(3, { updatedAt: 3_000 }));
+    admission.onPull = () => {
+      admission.ok = false;
+    };
+    await run(20_000);
+    expect(prStore.get("example/app", 2)).toBeNull();
+    expect(prStore.cursor("example/app")).toBe(1_500);
+    admission.ok = true;
+    admission.onPull = () => {};
+    await run(30_000);
+    expect([prStore.get("example/app", 2)?.number, prStore.get("example/app", 3)?.number]).toEqual([
+      2, 3,
+    ]);
+    expect(prStore.cursor("example/app")).toBe(3_000);
   });
 
   it("rereads a known PR by number after it closed, and looks back only from its cursor", async () => {

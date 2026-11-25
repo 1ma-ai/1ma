@@ -131,22 +131,26 @@ function branchHint(threads: readonly WatchedThread[], pull: PullRequest): strin
   return matches.slice(0, HINT_LIMIT).join(",");
 }
 
+interface RepoBatch {
+  readonly repo: string;
+  readonly pulls: readonly PullRequest[];
+  readonly cursor: number | null;
+}
+
 async function pullsOfRepo(
   deps: PrPassDeps,
   github: GitHubReader,
   repo: string,
   claimed: readonly number[],
   problems: string[],
-): Promise<PullRequest[]> {
+): Promise<RepoBatch> {
   const found = new Map<number, PullRequest>();
   const since = deps.prStore.cursor(repo) ?? deps.now - FIRST_LOOK_BACK_MS;
+  let cursor: number | null = null;
   try {
     const recent = await github.recentPulls(repo, since, deps.signal);
     for (const pull of recent.pulls) found.set(pull.number, pull);
-    if (recent.complete && deps.admitted()) {
-      const newest = Math.max(since, ...recent.pulls.map((pull) => pull.updatedAt));
-      deps.prStore.setCursor(repo, newest);
-    }
+    if (recent.complete) cursor = Math.max(since, ...recent.pulls.map((pull) => pull.updatedAt));
   } catch (error) {
     problems.push(`${repo} recent pull requests: ${describeError(error)}`);
   }
@@ -162,7 +166,78 @@ async function pullsOfRepo(
         }
       }),
   );
-  return [...found.values()];
+  return { repo, pulls: [...found.values()], cursor };
+}
+
+function recordLink(
+  deps: PrPassDeps,
+  pull: PullRequest,
+  candidates: ReadonlyMap<string, readonly Candidate[]>,
+  read: ReadonlySet<string>,
+  threads: readonly WatchedThread[],
+): void {
+  const current = deps.prStore.get(pull.repo, pull.number);
+  const linked =
+    current?.linkKind === "claim" &&
+    current.deliveryServerId !== null &&
+    current.deliveryThreadId !== null
+      ? `${current.deliveryServerId}:${current.deliveryThreadId}`
+      : null;
+  const decision = decideLink(
+    deps.policy,
+    pull,
+    candidates.get(key(pull.repo, pull.number)) ?? [],
+    linked === null
+      ? null
+      : {
+          chat: linked,
+          observed: read.has(linked),
+          unreadParticipants: (current?.conflictChat?.split(",") ?? []).filter(
+            (chat) => !read.has(chat),
+          ),
+        },
+  );
+  deps.prStore.record(pull, decision, branchHint(threads, pull), deps.now);
+}
+
+function modelReadOf(
+  deps: PrPassDeps,
+  pull: PullRequest,
+  threads: readonly WatchedThread[],
+  problems: string[],
+): (() => Promise<void>) | null {
+  const link = deps.prStore.get(pull.repo, pull.number);
+  if (link?.linkKind !== "claim" || pull.state !== "open" || link.deliveryServerId === null)
+    return null;
+  const serverId = link.deliveryServerId;
+  const threadId = link.deliveryThreadId;
+  const executor = deps.executors.get(serverId);
+  const thread = threads.find(
+    (candidate) => candidate.serverId === serverId && candidate.threadId === threadId,
+  );
+  if (
+    executor === undefined ||
+    threadId === null ||
+    thread === undefined ||
+    deps.observed.get(serverId) === "failed"
+  ) {
+    deps.prStore.markChatModelGap(pull.repo, pull.number);
+    return null;
+  }
+  return () =>
+    executor.threadModel(threadId, deps.signal).then(
+      (model) => {
+        if (!deps.admitted()) return;
+        if (model === null) deps.prStore.markChatModelGap(pull.repo, pull.number);
+        else
+          deps.prStore.observeChatModel(pull.repo, pull.number, thread.providerId, model, deps.now);
+      },
+      (error: unknown) => {
+        if (!deps.admitted()) return;
+        deps.prStore.markChatModelGap(pull.repo, pull.number);
+        problems.push(`${serverId}:${threadId} model: ${describeError(error)}`);
+      },
+    );
 }
 
 export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] }> {
@@ -178,7 +253,7 @@ export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] 
   }
   const { candidates, read } = await collectClaims(deps, threads, problems);
   const repos = [...deps.policy.connected.keys()];
-  const pullsByRepo = await Promise.all(
+  const batches = await Promise.all(
     repos.map(async (repo) => {
       const claimed = [...candidates.values()]
         .flat()
@@ -188,70 +263,16 @@ export async function runPrPass(deps: PrPassDeps): Promise<{ problems: string[] 
     }),
   );
   if (!deps.admitted()) return { problems };
-  const modelReads: Array<Promise<void>> = [];
-  for (const pull of pullsByRepo.flat()) {
-    const current = deps.prStore.get(pull.repo, pull.number);
-    const linked =
-      current?.linkKind === "claim" &&
-      current.deliveryServerId !== null &&
-      current.deliveryThreadId !== null
-        ? `${current.deliveryServerId}:${current.deliveryThreadId}`
-        : null;
-    const decision = decideLink(
-      deps.policy,
-      pull,
-      candidates.get(key(pull.repo, pull.number)) ?? [],
-      linked === null
-        ? null
-        : {
-            chat: linked,
-            observed: read.has(linked),
-            unreadParticipants: (current?.conflictChat?.split(",") ?? []).filter(
-              (chat) => !read.has(chat),
-            ),
-          },
+  const modelReads = deps.prStore.batch(() => {
+    for (const batch of batches)
+      if (batch.cursor !== null) deps.prStore.setCursor(batch.repo, batch.cursor);
+    return batches.flatMap((batch) =>
+      batch.pulls.flatMap((pull) => {
+        recordLink(deps, pull, candidates, read, threads);
+        return modelReadOf(deps, pull, threads, problems) ?? [];
+      }),
     );
-    deps.prStore.record(pull, decision, branchHint(threads, pull), deps.now);
-    const link = deps.prStore.get(pull.repo, pull.number);
-    if (link?.linkKind !== "claim" || pull.state !== "open" || link.deliveryServerId === null)
-      continue;
-    const serverId = link.deliveryServerId;
-    const threadId = link.deliveryThreadId;
-    const executor = deps.executors.get(serverId);
-    const thread = threads.find(
-      (candidate) => candidate.serverId === serverId && candidate.threadId === threadId,
-    );
-    if (
-      executor === undefined ||
-      threadId === null ||
-      thread === undefined ||
-      deps.observed.get(serverId) === "failed"
-    ) {
-      deps.prStore.markChatModelGap(pull.repo, pull.number);
-      continue;
-    }
-    modelReads.push(
-      executor.threadModel(threadId, deps.signal).then(
-        (model) => {
-          if (!deps.admitted()) return;
-          if (model === null) deps.prStore.markChatModelGap(pull.repo, pull.number);
-          else
-            deps.prStore.observeChatModel(
-              pull.repo,
-              pull.number,
-              thread.providerId,
-              model,
-              deps.now,
-            );
-        },
-        (error: unknown) => {
-          if (!deps.admitted()) return;
-          deps.prStore.markChatModelGap(pull.repo, pull.number);
-          problems.push(`${serverId}:${threadId} model: ${describeError(error)}`);
-        },
-      ),
-    );
-  }
-  await Promise.all(modelReads);
+  });
+  await Promise.all(modelReads.map((start) => start()));
   return { problems };
 }
