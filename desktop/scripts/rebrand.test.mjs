@@ -347,6 +347,8 @@ describe("tests follow only the sources they can reach", () => {
       'export const start = "Ready to start using bb";',
       'export const relaunch = "Relaunch bb to finish updating";',
       'export const marker = "Written by bb: runs the bb command of the bb installed on this computer.";',
+      'export const Card = () => <section aria-label="bb update">x</section>;',
+      'export const hint = "bb updates app apply --when-idle asked for this update";',
       "",
     ].join("\n"),
   );
@@ -368,6 +370,7 @@ describe("tests follow only the sources they can reach", () => {
       'expect(screen.queryByRole("button", { name: /Copy the command|Relaunch bb|Download/ })).toBeNull();',
       "expect(text).toMatch(/Written by bb: runs the bb command of the bb installed on this computer\\./);",
       'const pasted = "using bb\'s Plugin Guide.";',
+      'within(card).getByRole("region", { name: "bb update" });',
       "",
     ].join("\n"),
   );
@@ -504,6 +507,12 @@ describe("tests follow only the sources they can reach", () => {
   test("a tie between renamed and kept sources follows the test's own kind", () => {
     assert.match(read("apps/app/src/update.test.tsx"), /toBe\("Create a new 1ma plugin that "\)/);
     assert.match(read("apps/cli/src/usage.test.ts"), /toBe\("Create a new bb plugin that "\)/);
+  });
+
+  test("a label the test repeats in full wins over a command line that starts the same", () => {
+    assert.match(read("apps/app/src/update.tsx"), /aria-label="1ma update"/);
+    assert.match(read("apps/app/src/update.tsx"), /"bb updates app apply --when-idle asked/);
+    assert.match(read("apps/app/src/update.test.tsx"), /\{ name: "1ma update" \}/);
   });
 
   test("code 1ma leaves alone keeps its tests, except for renamed dependencies", () => {

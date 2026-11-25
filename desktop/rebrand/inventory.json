@@ -818,6 +818,7 @@
 ["bb ${…} has no changelog in the app.","1ma ${…} has no changelog in the app."],
 ["bb ${…} will be installed on ${…}"],
 ["bb ${…} — ${…}"],
+["bb ${…}","1ma ${…}"],
 ["bb ${…}"],
 ["bb ${…}${…}"],
 ["bb (built-in)","1ma (built-in)"],

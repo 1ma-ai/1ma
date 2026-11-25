@@ -675,7 +675,9 @@ export function createIndex(rules) {
 // least 8 characters, so a test can repeat a source text, quote part of it, or cut
 // through a template value. When neither string contains the other, the overlap
 // rests on where both happen to end and needs three words. Only sources of the test's package and its
-// dependencies count (scope). Explicit rules win; then the longest overlap; then,
+// dependencies count (scope). Explicit rules win; then the longest overlap; then
+// a source the test repeats in full, over one that merely contains the same
+// characters (a label "bb update" beside a command line "bb updates app …"); then,
 // for an overlap of three words or more, sources treated like the test's own
 // package (renamed or left alone); a remaining tie keeps bb. A bb the rules
 // would keep in the test itself (a command, code, an identifier, a bb cloud
@@ -694,6 +696,7 @@ export function propagate(
   const rank = (found) => [
     found.explicit ? 1 : 0,
     found.length,
+    found.repeated ? 1 : 0,
     found.explicit || (found.words >= 3 && found.rebranded === rebranded) ? 1 : 0,
     (found.kind === "kept") !== relaxed ? 1 : 0,
   ];
@@ -745,6 +748,7 @@ export function propagate(
         if (entry.explicit && end - start !== needle.length) continue;
         if (haystack.slice(start, end) !== needle.slice(start - shift, end - shift)) continue;
         const whole = end - start === needle.length || end - start === haystack.length;
+        const repeated = end - start === needle.length && end - start === haystack.length;
         while (start < end && /\s/u.test(haystack[start])) start += 1;
         while (end > start && /\s/u.test(haystack[end - 1])) end -= 1;
         const overlap = haystack.slice(start, end);
@@ -758,6 +762,7 @@ export function propagate(
             length: overlap.length,
             words,
             kind,
+            repeated,
             explicit: entry.explicit,
             rebranded: entry.rebranded,
           });
