@@ -1,0 +1,249 @@
+import type { PluginRpcMethodContract } from "@get-bb/plugin-sdk";
+import { z } from "zod";
+import {
+  CAPABILITIES_MAX,
+  CAPABILITY_PATTERN,
+  INSTRUCTIONS_MAX,
+  MEMORY_MAX,
+  NAME_MAX,
+  REACH_MAX,
+  ROLE_MAX,
+  THREAD_IDS_MAX,
+} from "./limits.js";
+
+export const SHAPES = ["circle", "squircle", "blob", "pill"] as const;
+export const FACES = ["calm", "happy", "focused", "curious"] as const;
+export const COLORS = [
+  "#7c6cf0",
+  "#1f9e7a",
+  "#e07a2c",
+  "#d6457a",
+  "#2f8fd8",
+  "#c49a1a",
+  "#8a5cd0",
+  "#3aa35b",
+] as const;
+
+export const appearanceSchema = z.object({
+  shape: z.enum(SHAPES),
+  face: z.enum(FACES),
+  color: z.string().regex(/^#[0-9a-f]{6}$/),
+});
+export type Appearance = z.infer<typeof appearanceSchema>;
+
+const singleLine = (schema: z.ZodString) =>
+  schema.regex(/^[^\p{Cc}]*$/u, "One line of text without control characters");
+export const botNameSchema = singleLine(z.string().trim().min(1).max(NAME_MAX));
+export const botRoleSchema = singleLine(z.string().trim().max(ROLE_MAX));
+const name = botNameSchema;
+const role = botRoleSchema;
+const instructions = z.string().max(INSTRUCTIONS_MAX);
+const capabilities = z.array(z.string().regex(CAPABILITY_PATTERN)).max(CAPABILITIES_MAX);
+
+export const chatDefaultsSchema = z.object({
+  projectId: z.string().nullable(),
+  providerId: z.string().optional(),
+  model: z.string().optional(),
+});
+export type ChatDefaults = z.infer<typeof chatDefaultsSchema>;
+
+// A conversation's place in its bot; position orders the bot's conversations.
+export const botMemberSchema = z.object({
+  botId: z.string(),
+  startedFromBot: z.boolean(),
+  completed: z.boolean(),
+  position: z.number(),
+});
+export type BotMember = z.infer<typeof botMemberSchema>;
+
+export const botThreadSchema = botMemberSchema
+  .omit({ botId: true })
+  .extend({ threadId: z.string() });
+export type BotThread = z.infer<typeof botThreadSchema>;
+
+export const botSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  role: z.string(),
+  appearance: appearanceSchema,
+  capabilities: z.array(z.string()),
+  hidden: z.boolean(),
+});
+export type BotSummary = z.infer<typeof botSummarySchema>;
+
+export const botDetailSchema = botSummarySchema.extend({
+  reach: z.array(z.string()).nullable(),
+  conversations: z.number().int(),
+  instructions: z.string(),
+  memory: z.string(),
+  memorySha256: z.string(),
+  defaults: chatDefaultsSchema.nullable(),
+  revision: z.number().int(),
+});
+export type BotDetail = z.infer<typeof botDetailSchema>;
+
+export const actorSchema = z.object({
+  kind: z.enum(["owner", "agent", "plugin", "system"]),
+  id: z.string().nullable(),
+});
+export type Actor = z.infer<typeof actorSchema>;
+
+export const botEventSchema = z.object({
+  id: z.number().int(),
+  at: z.number(),
+  kind: z.string(),
+  actor: actorSchema,
+  detail: z.record(z.string(), z.unknown()),
+});
+export type BotEvent = z.infer<typeof botEventSchema>;
+
+const botId = z.object({ botId: z.string() });
+const threadId = z.object({ threadId: z.string() });
+const keys = z.object({ keys: z.array(z.string()).max(THREAD_IDS_MAX) });
+const ok = z.object({ ok: z.literal(true) });
+
+// What a read shows; the store marks the same names stale where it writes.
+export const tags = {
+  bots: "bots",
+  bot: (id: string) => `bot:${id}`,
+  // The bot's conversations together: which there are, their order and state.
+  conversations: (id: string) => `conversations:${id}`,
+  // Each conversation of the bot by itself.
+  members: (id: string) => `members:${id}`,
+  thread: (id: string) => `thread:${id}`,
+  events: (id: string) => `events:${id}`,
+};
+
+export const createBotInput = z.object({
+  name,
+  role: role.optional(),
+  appearance: appearanceSchema.optional(),
+  capabilities: capabilities.optional(),
+  instructions: instructions.optional(),
+});
+export type CreateBotInput = z.infer<typeof createBotInput>;
+
+export const updateBotInput = z.object({
+  botId: z.string(),
+  expectedRevision: z.number().int(),
+  name: name.optional(),
+  role: role.optional(),
+  appearance: appearanceSchema.optional(),
+  capabilities: capabilities.optional(),
+  instructions: instructions.optional(),
+  memory: z.string().max(MEMORY_MAX).optional(),
+  hidden: z.boolean().optional(),
+  reach: z.array(z.string()).max(REACH_MAX).nullable().optional(),
+  clearDefaults: z.literal(true).optional(),
+});
+export type UpdateBotInput = z.infer<typeof updateBotInput>;
+
+export const startThreadInput = z.object({
+  botId: z.string(),
+  request: z.record(z.string(), z.unknown()),
+});
+
+// A conversation and the one above it in the bot's tree, as the caller knows it.
+const treePlace = z.object({ threadId: z.string(), parentThreadId: z.string().nullable() });
+
+export const moveThreadsInput = z.object({
+  botId: z.string(),
+  // real: the conversation above is also its parent in bb; otherwise its parent
+  // is outside the bot's tree.
+  sources: z.array(treePlace.extend({ real: z.boolean() })).min(1),
+  // inside: under the target, which changes no order.
+  target: treePlace.extend({ placement: z.enum(["before", "after", "inside"]) }),
+  // Whether the moved conversations and the target were drawn under their real
+  // parents. Otherwise only the order changes.
+  levelShown: z.boolean(),
+});
+export type MoveThreadsInput = z.infer<typeof moveThreadsInput>;
+
+export const botsRpc = {
+  "bots.v1.list": {
+    input: z.object({}),
+    output: z.object({ bots: z.array(botSummarySchema) }),
+    tags: () => [tags.bots],
+  },
+  "bots.v1.forThread": {
+    input: threadId,
+    output: z.object({ botId: z.string(), capabilities: z.array(z.string()) }).nullable(),
+    tags: (input: z.infer<typeof threadId>, output: { botId: string } | null) => [
+      tags.thread(input.threadId),
+      ...(output === null ? [] : [tags.bot(output.botId), tags.members(output.botId)]),
+    ],
+  },
+  "bots.v1.forThreads": {
+    input: keys,
+    output: z.record(z.string(), botMemberSchema.nullable()),
+    keyTags: (key: string, member: BotMember | null) => [
+      tags.thread(key),
+      ...(member === null ? [] : [tags.members(member.botId)]),
+    ],
+  },
+  // A page of the bot's conversations in its order, or from its end: those
+  // beyond the position `after`.
+  "bots.v1.threads": {
+    input: z.object({
+      botId: z.string(),
+      from: z.enum(["first", "last"]).optional(),
+      after: z.number().optional(),
+      limit: z.number().int().min(1).max(THREAD_IDS_MAX).optional(),
+    }),
+    output: z.object({ threads: z.array(botThreadSchema), next: z.number().nullable() }),
+    tags: (input: z.infer<typeof botId>) => [tags.conversations(input.botId)],
+  },
+  "bots.v1.get": {
+    input: botId,
+    output: botDetailSchema,
+    tags: (input: z.infer<typeof botId>) => [
+      tags.bot(input.botId),
+      tags.conversations(input.botId),
+    ],
+  },
+  // What the bot's agents are told, word for word.
+  "bots.v1.instructions": {
+    input: botId,
+    output: z.object({ text: z.string() }),
+    tags: (input: z.infer<typeof botId>) => [tags.bot(input.botId), tags.bots],
+  },
+  "bots.v1.create": { input: createBotInput, output: botDetailSchema },
+  "bots.v1.update": { input: updateBotInput, output: botDetailSchema },
+  "bots.v1.remove": { input: botId, output: ok },
+  "bots.v1.reorderBots": { input: z.object({ botIds: z.array(z.string()) }), output: ok },
+  "bots.v1.setHidden": {
+    input: z.object({ botId: z.string(), hidden: z.boolean() }),
+    output: ok,
+  },
+  "bots.v1.assign": {
+    input: z.object({
+      threadId: z.string(),
+      botId: z.string().nullable(),
+      place: z.enum(["first", "last"]).optional(),
+    }),
+    output: z.object({ botId: z.string().nullable(), startedFromBot: z.boolean() }),
+  },
+  // The conversation a click on the bot opens; null when a click starts a new one.
+  "bots.v1.main": {
+    input: botId,
+    output: z.object({ threadId: z.string().nullable() }),
+  },
+  // The same for many bots at once, for showing: it may be behind by one change.
+  "bots.v1.mains": {
+    input: keys,
+    output: z.record(z.string(), z.string().nullable()),
+    keyTags: (key: string) => [tags.conversations(key)],
+  },
+  "bots.v1.moveThreads": { input: moveThreadsInput, output: ok },
+  "bots.v1.setCompleted": {
+    input: z.object({ threadId: z.string(), completed: z.boolean() }),
+    output: ok,
+  },
+  "bots.v1.startThread": { input: startThreadInput, output: threadId },
+  "bots.v1.continueInBot": { input: threadId, output: threadId },
+  "bots.v1.events": {
+    input: z.object({ botId: z.string(), limit: z.number().int().min(1).max(200).optional() }),
+    output: z.object({ events: z.array(botEventSchema) }),
+    tags: (input: z.infer<typeof botId>) => [tags.events(input.botId)],
+  },
+} as const satisfies Record<string, PluginRpcMethodContract>;

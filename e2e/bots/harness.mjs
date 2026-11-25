@@ -121,9 +121,18 @@ export function say(threadId, text) {
   });
 }
 
+// A bot's conversations in its order.
+export async function conversations(botId) {
+  const { threads } = await rpc("bots.v1.threads", { botId });
+  return threads.map(({ threadId, completed, startedFromBot }) => ({
+    threadId,
+    completed,
+    startedFromBot,
+  }));
+}
+
 export async function completedOf(botId, threadId) {
-  const { bots } = await rpc("bots.v1.list", {});
-  const row = bots.find((bot) => bot.id === botId)?.threads.find((t) => t.threadId === threadId);
+  const row = (await conversations(botId)).find((t) => t.threadId === threadId);
   if (row === undefined) throw new Error(`${threadId} is not listed under bot ${botId}`);
   return row.completed;
 }

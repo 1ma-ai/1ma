@@ -16,15 +16,15 @@ import {
   type ThreadSelectionStore,
 } from "../app/selection/threadSelection.js";
 import type { SectionThreadDndState } from "../app/dnd/useSectionThreadDnd.js";
-import { botDrop } from "./thread-drop.js";
+import { getBotDropId, type BotDrop } from "./thread-drop.js";
 
 installTestPluginRuntime();
+const { useBotDrop } = await import("./BotDrops.js");
 const { useSectionThreadDnd } = await import("../app/dnd/useSectionThreadDnd.js");
 
 afterEach(() => {
   cleanup();
   document.body.innerHTML = "";
-  botDrop.cancel();
 });
 
 // The project list holds only its own conversations; a conversation shown
@@ -39,17 +39,16 @@ const ROOT_ITEMS = buildSectionThreadList(
 );
 
 function renderList() {
-  const result: { dnd: SectionThreadDndState | null; selection: ThreadSelectionStore | null } = {
-    dnd: null,
-    selection: null,
-  };
+  interface Reported {
+    dnd: SectionThreadDndState | null;
+    selection: ThreadSelectionStore;
+    botDrop: BotDrop;
+  }
+  const result: { current: Reported | null } = { current: null };
   const pinned = buildPinnedSidebarState({ groupEnvironmentThreads: true, threads: [] });
-  function Harness({
-    report,
-  }: {
-    report: (dnd: SectionThreadDndState | null, selection: ThreadSelectionStore) => void;
-  }) {
+  function Harness({ report }: { report: (reported: Reported) => void }) {
     const selection = useThreadSelectionStore();
+    const botDrop = useBotDrop();
     const dnd = useSectionThreadDnd({
       containerId: CHRONOLOGICAL_CONTAINER_ID,
       enabled: true,
@@ -62,20 +61,19 @@ function renderList() {
       pinnedRootNodes: pinned.rootNodes,
       onReorderPinnedThread: vi.fn(),
     });
-    report(dnd, selection);
+    report({ dnd, selection, botDrop });
     return null;
   }
   renderSlot(
     { component: Harness },
     {
-      report: (dnd: SectionThreadDndState | null, selection: ThreadSelectionStore) => {
-        result.dnd = dnd;
-        result.selection = selection;
+      report: (reported: Reported) => {
+        result.current = reported;
       },
     },
     {},
   );
-  return result;
+  return () => result.current!;
 }
 
 // Rows in the order the sidebar draws them, so a meta-click selects by id.
@@ -95,36 +93,21 @@ function select(store: ThreadSelectionStore, ids: readonly string[]) {
   }
 }
 
-function botRow(botId: string) {
-  const row = document.createElement("div");
-  row.setAttribute("data-1ma-bot-drop", botId);
-  const target = document.createElement("button");
-  row.append(target);
-  document.body.append(row);
-  return target;
-}
-
 describe("a drag that starts in a project and is dropped on a bot", () => {
   it("moves exactly the conversations the preview counts", () => {
     const drops: (readonly string[])[] = [];
-    const unregister = botDrop.register({
+    const list = renderList();
+    list().botDrop.register({
       accept: (threadIds) => threadIds,
       drop: (threadIds) => drops.push(threadIds),
     });
-    const list = renderList();
-    select(list.selection!, ["bot-conversation", "project-a"]);
-    const props = () => list.dnd!.dndContextProps;
+    select(list().selection, ["bot-conversation", "project-a"]);
+    const props = () => list().dnd!.dndContextProps;
     act(() => props().onDragStart?.({ active: { id: "project-a" } } as DragStartEvent));
-    const preview = list.dnd!.activeThread!.displayTitle;
+    const preview = list().dnd!.activeThread!.displayTitle;
 
-    const target = botRow("bot_b");
-    document.elementsFromPoint = () => [target];
-    const collisions = props().collisionDetection!({
-      pointerCoordinates: { x: 100, y: 10 },
-    } as Parameters<NonNullable<ReturnType<typeof props>["collisionDetection"]>>[0]);
-    expect(collisions).toEqual([]);
-    act(() => props().onDragEnd?.({ active: { id: "project-a" }, over: null } as DragEndEvent));
-    unregister();
+    const over = { id: getBotDropId({ botId: "bot_b", place: "last" }) };
+    act(() => props().onDragEnd?.({ active: { id: "project-a" }, over } as DragEndEvent));
 
     expect(drops).toHaveLength(1);
     const moved = drops[0]!;

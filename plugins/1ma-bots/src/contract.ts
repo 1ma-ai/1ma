@@ -6,7 +6,9 @@ import {
   INSTRUCTIONS_MAX,
   MEMORY_MAX,
   NAME_MAX,
+  REACH_MAX,
   ROLE_MAX,
+  THREAD_IDS_MAX,
 } from "./limits.js";
 
 export const SHAPES = ["circle", "squircle", "blob", "pill"] as const;
@@ -45,11 +47,18 @@ export const chatDefaultsSchema = z.object({
 });
 export type ChatDefaults = z.infer<typeof chatDefaultsSchema>;
 
-export const botThreadSchema = z.object({
-  threadId: z.string(),
+// A conversation's place in its bot; position orders the bot's conversations.
+export const botMemberSchema = z.object({
+  botId: z.string(),
   startedFromBot: z.boolean(),
   completed: z.boolean(),
+  position: z.number(),
 });
+export type BotMember = z.infer<typeof botMemberSchema>;
+
+export const botThreadSchema = botMemberSchema
+  .omit({ botId: true })
+  .extend({ threadId: z.string() });
 export type BotThread = z.infer<typeof botThreadSchema>;
 
 export const botSummarySchema = z.object({
@@ -57,15 +66,14 @@ export const botSummarySchema = z.object({
   name: z.string(),
   role: z.string(),
   appearance: appearanceSchema,
-  avatar: z.string(),
   capabilities: z.array(z.string()),
   hidden: z.boolean(),
-  reach: z.array(z.string()).nullable(),
-  threads: z.array(botThreadSchema),
 });
 export type BotSummary = z.infer<typeof botSummarySchema>;
 
 export const botDetailSchema = botSummarySchema.extend({
+  reach: z.array(z.string()).nullable(),
+  conversations: z.number().int(),
   instructions: z.string(),
   memory: z.string(),
   memorySha256: z.string(),
@@ -91,7 +99,20 @@ export type BotEvent = z.infer<typeof botEventSchema>;
 
 const botId = z.object({ botId: z.string() });
 const threadId = z.object({ threadId: z.string() });
+const keys = z.object({ keys: z.array(z.string()).max(THREAD_IDS_MAX) });
 const ok = z.object({ ok: z.literal(true) });
+
+// What a read shows; the store marks the same names stale where it writes.
+export const tags = {
+  bots: "bots",
+  bot: (id: string) => `bot:${id}`,
+  // The bot's conversations together: which there are, their order and state.
+  conversations: (id: string) => `conversations:${id}`,
+  // Each conversation of the bot by itself.
+  members: (id: string) => `members:${id}`,
+  thread: (id: string) => `thread:${id}`,
+  events: (id: string) => `events:${id}`,
+};
 
 export const createBotInput = z.object({
   name,
@@ -112,7 +133,7 @@ export const updateBotInput = z.object({
   instructions: instructions.optional(),
   memory: z.string().max(MEMORY_MAX).optional(),
   hidden: z.boolean().optional(),
-  reach: z.array(z.string()).max(200).nullable().optional(),
+  reach: z.array(z.string()).max(REACH_MAX).nullable().optional(),
   clearDefaults: z.literal(true).optional(),
 });
 export type UpdateBotInput = z.infer<typeof updateBotInput>;
@@ -142,12 +163,50 @@ export const botsRpc = {
   "bots.v1.list": {
     input: z.object({}),
     output: z.object({ bots: z.array(botSummarySchema) }),
+    tags: () => [tags.bots],
   },
   "bots.v1.forThread": {
     input: threadId,
     output: z.object({ botId: z.string(), capabilities: z.array(z.string()) }).nullable(),
+    tags: (input: z.infer<typeof threadId>, output: { botId: string } | null) => [
+      tags.thread(input.threadId),
+      ...(output === null ? [] : [tags.bot(output.botId), tags.members(output.botId)]),
+    ],
   },
-  "bots.v1.get": { input: botId, output: botDetailSchema },
+  "bots.v1.forThreads": {
+    input: keys,
+    output: z.record(z.string(), botMemberSchema.nullable()),
+    keyTags: (key: string, member: BotMember | null) => [
+      tags.thread(key),
+      ...(member === null ? [] : [tags.members(member.botId)]),
+    ],
+  },
+  // A page of the bot's conversations in its order, or from its end: those
+  // beyond the position `after`.
+  "bots.v1.threads": {
+    input: z.object({
+      botId: z.string(),
+      from: z.enum(["first", "last"]).optional(),
+      after: z.number().optional(),
+      limit: z.number().int().min(1).max(THREAD_IDS_MAX).optional(),
+    }),
+    output: z.object({ threads: z.array(botThreadSchema), next: z.number().nullable() }),
+    tags: (input: z.infer<typeof botId>) => [tags.conversations(input.botId)],
+  },
+  "bots.v1.get": {
+    input: botId,
+    output: botDetailSchema,
+    tags: (input: z.infer<typeof botId>) => [
+      tags.bot(input.botId),
+      tags.conversations(input.botId),
+    ],
+  },
+  // What the bot's agents are told, word for word.
+  "bots.v1.instructions": {
+    input: botId,
+    output: z.object({ text: z.string() }),
+    tags: (input: z.infer<typeof botId>) => [tags.bot(input.botId), tags.bots],
+  },
   "bots.v1.create": { input: createBotInput, output: botDetailSchema },
   "bots.v1.update": { input: updateBotInput, output: botDetailSchema },
   "bots.v1.remove": { input: botId, output: ok },
@@ -169,6 +228,12 @@ export const botsRpc = {
     input: botId,
     output: z.object({ threadId: z.string().nullable() }),
   },
+  // The same for many bots at once, for showing: it may be behind by one change.
+  "bots.v1.mains": {
+    input: keys,
+    output: z.record(z.string(), z.string().nullable()),
+    keyTags: (key: string) => [tags.conversations(key)],
+  },
   "bots.v1.moveThreads": { input: moveThreadsInput, output: ok },
   "bots.v1.setCompleted": {
     input: z.object({ threadId: z.string(), completed: z.boolean() }),
@@ -179,5 +244,6 @@ export const botsRpc = {
   "bots.v1.events": {
     input: z.object({ botId: z.string(), limit: z.number().int().min(1).max(200).optional() }),
     output: z.object({ events: z.array(botEventSchema) }),
+    tags: (input: z.infer<typeof botId>) => [tags.events(input.botId)],
   },
 } as const satisfies Record<string, PluginRpcMethodContract>;

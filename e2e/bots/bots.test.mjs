@@ -5,6 +5,7 @@ import {
   BOTS,
   screenshotDir,
   completedOf,
+  conversations,
   diagnose,
   exchangeOf,
   createBot,
@@ -224,6 +225,59 @@ describe("1ma-bots on a real server", () => {
       "after dispatch Bruno's next letter continues Alice's exchange",
     );
     assert.equal(exchangeOf(brunoThread).chain?.id, alicesExchange.id);
+  });
+
+  it("catches up with what happened while it was disabled", async () => {
+    const bot = await createBot("Sleeper");
+    const worked = await startConversation(bot, "[stub:reply worked]", projects.alpha, {
+      providerId: "acp-omp",
+    });
+    const quiet = await startConversation(bot, "[stub:reply quiet]");
+    const deleted = await startConversation(bot, "[stub:reply deleted]");
+    for (const id of [worked, quiet, deleted]) {
+      await waitTurns(id, 1);
+      await waitStatus(id, "idle");
+    }
+    for (const threadId of [worked, quiet])
+      await rpc("bots.v1.setCompleted", { threadId, completed: true });
+    await rpc("bots.v1.setHidden", { botId: bot.id, hidden: true });
+    server.bb(["plugin", "disable", BOTS]);
+    let fork;
+    try {
+      await say(worked, "[stub:reply while-disabled]");
+      await waitTurns(worked, 2);
+      await waitStatus(worked, "idle");
+      fork = await server.api("POST", "/threads/fork", {
+        sourceThreadId: worked,
+        title: "Continued while disabled",
+        input: [{ type: "text", text: "[stub:reply continued]", mentions: [] }],
+      });
+      await waitTurns(fork.id, 1);
+      await rename(quiet, "Renamed while disabled");
+      server.bb(["thread", "delete", deleted, "--yes"]);
+    } finally {
+      server.bb(["plugin", "enable", BOTS]);
+    }
+    const state = async () => ({
+      hidden: (await rpc("bots.v1.get", { botId: bot.id })).hidden,
+      conversations: (await conversations(bot.id))
+        .map(({ threadId, completed }) => [threadId, completed])
+        .toSorted(),
+    });
+    const expected = {
+      hidden: false,
+      conversations: [
+        [worked, false],
+        [quiet, true],
+        [fork.id, false],
+      ].toSorted(),
+    };
+    await waitFor(
+      "the bot to show what happened",
+      60 * SECOND,
+      async () => JSON.stringify(await state()) === JSON.stringify(expected),
+    ).catch(() => undefined);
+    assert.deepEqual(await state(), expected);
   });
 });
 
@@ -500,8 +554,8 @@ describe("1ma-sidebar with the bots block", () => {
         "the drag changes the saved bot order",
         30 * SECOND,
         async () =>
-          (await rpc("bots.v1.get", { botId: fixture.visible.id })).threads[0].threadId ===
-            fixture.v1 && (await order())[0] === fixture.v1,
+          (await conversations(fixture.visible.id))[0].threadId === fixture.v1 &&
+          (await order())[0] === fixture.v1,
       );
       const parentTurns = await turnsDone(fixture.v1);
       await drag(
@@ -576,7 +630,7 @@ describe("1ma-sidebar with the bots block", () => {
       await waitTurns(id, 1);
       await waitStatus(id, "idle");
     }
-    const members = async () => (await rpc("bots.v1.get", { botId: bot.id })).threads;
+    const members = () => conversations(bot.id);
     const [open1, open2, done1, done2] = (await members()).map((member) => member.threadId);
     const parents = () =>
       Promise.all(
@@ -699,11 +753,7 @@ describe("1ma-sidebar with the bots block", () => {
         .evaluateAll((links) => links.map((link) => link.getAttribute("data-sidebar-thread-id")));
       assert.equal(ids[0], fixture.plain, "the dropped conversation is the bot's first");
       assert.equal(await threadLink(page, fixture.plain).count(), 1, "it left its project");
-      const { bots } = await rpc("bots.v1.list", {});
-      assert.equal(
-        bots.find((bot) => bot.id === fixture.visible.id).threads[0].threadId,
-        fixture.plain,
-      );
+      assert.equal((await conversations(fixture.visible.id))[0].threadId, fixture.plain);
       assert.deepEqual(problems, []);
     } finally {
       await context.close();

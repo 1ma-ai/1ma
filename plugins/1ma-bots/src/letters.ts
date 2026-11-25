@@ -20,12 +20,12 @@ export interface LetterRoute {
 export function resolveBot(store: BotStore, reference: string): string {
   const byId = store.find(reference);
   if (byId) return byId.id;
-  const byName = store.list().filter((bot) => bot.name === reference);
-  if (byName.length === 1) return byName[0]!.id;
-  if (byName.length > 1) {
+  const named = store.idsNamed(reference);
+  if (named.length === 1) return named[0]!;
+  if (named.length > 1) {
     throw new BotsError("invalid", `Several bots are named ${reference}; use the bot id`);
   }
-  throw new BotsError("not_found", `No bot ${reference}; list bots with bb 1ma-bots list`);
+  throw new BotsError("not_found", `No bot ${reference}; find it with bot_find`);
 }
 
 // One transaction: the limit check and the count it guards cannot interleave.
@@ -42,7 +42,7 @@ export function routeLetter(
   limits: LetterLimits,
 ): LetterRoute {
   return store.transaction(() => {
-    const db = store.database;
+    const { database: db, owner } = store;
     const fromBotId = store.botOfThread(args.fromThreadId);
     if (fromBotId === null) {
       throw new BotsError("forbidden", "Only a bot's conversation can write to another bot");
@@ -64,10 +64,10 @@ export function routeLetter(
     }
 
     const sentLastHour = db
-      .prepare<[string, number], { n: number }>(
-        "SELECT COUNT(*) AS n FROM letters WHERE from_bot = ? AND sent_at > ?",
+      .prepare<[string, string, number], { n: number }>(
+        "SELECT COUNT(*) AS n FROM letters WHERE owner_id = ? AND from_bot = ? AND sent_at > ?",
       )
-      .get(fromBotId, args.now - HOUR_MS)!.n;
+      .get(owner, fromBotId, args.now - HOUR_MS)!.n;
     if (sentLastHour >= limits.hourlyLetters) {
       throw new BotsError(
         "forbidden",
@@ -75,16 +75,12 @@ export function routeLetter(
       );
     }
 
-    const chainOf = db.prepare<[string], { id: string; letters: number }>(
-      `SELECT chains.id, chains.letters FROM thread_chains
-       JOIN chains ON chains.id = thread_chains.chain_id WHERE thread_chains.thread_id = ?`,
-    );
     // A conversation the owner wrote in carries its own exchange; one that
     // never had one joins the recipient's, so a fresh conversation cannot
     // restart an exchange that ran out.
     if (args.ownerTurn !== null)
       startOwnerExchange(store, args.fromThreadId, args.now, args.ownerTurn);
-    const current = chainOf.get(args.fromThreadId) ?? chainOf.get(toThreadId);
+    const current = chainOf(store, args.fromThreadId) ?? chainOf(store, toThreadId);
     if (current && current.letters >= limits.chainLetters) {
       throw new BotsError(
         "forbidden",
@@ -93,24 +89,28 @@ export function routeLetter(
     }
     const chainId = current?.id ?? `chain_${randomUUID()}`;
     if (current) {
-      db.prepare("UPDATE chains SET letters = letters + 1 WHERE id = ?").run(chainId);
+      db.prepare("UPDATE chains SET letters = letters + 1 WHERE owner_id = ? AND id = ?").run(
+        owner,
+        chainId,
+      );
     } else {
-      db.prepare("INSERT INTO chains (id, letters, created_at) VALUES (?, 1, ?)").run(
+      db.prepare("INSERT INTO chains (owner_id, id, letters, created_at) VALUES (?, ?, 1, ?)").run(
+        owner,
         chainId,
         args.now,
       );
     }
     setChain(store, args.fromThreadId, chainId);
     db.prepare(
-      `INSERT INTO letters (chain_id, from_bot, from_thread, to_bot, to_thread, sent_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(chainId, fromBotId, args.fromThreadId, toBotId, toThreadId, args.now);
+      `INSERT INTO letters (owner_id, chain_id, from_bot, from_thread, to_bot, to_thread, sent_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(owner, chainId, fromBotId, args.fromThreadId, toBotId, toThreadId, args.now);
     // The recipient joins this exchange only when the letter is accepted
     // into a turn (acceptDelivery), not while it waits in the queue.
     const token = randomUUID();
     db.prepare(
-      "INSERT INTO pending_letters (token, chain_id, to_thread, created_at) VALUES (?, ?, ?, ?)",
-    ).run(token, chainId, toThreadId, args.now);
+      "INSERT INTO pending_letters (owner_id, token, chain_id, to_thread, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(owner, token, chainId, toThreadId, args.now);
     return {
       chainId,
       token,
@@ -122,13 +122,28 @@ export function routeLetter(
   });
 }
 
+interface Chain {
+  id: string;
+  letters: number;
+}
+
+function chainOf(store: BotStore, threadId: string): Chain | undefined {
+  return store.database
+    .prepare<[string, string], Chain>(
+      `SELECT chains.id, chains.letters FROM thread_chains
+       JOIN chains ON chains.id = thread_chains.chain_id
+       WHERE thread_chains.owner_id = ? AND thread_chains.thread_id = ?`,
+    )
+    .get(store.owner, threadId);
+}
+
 function setChain(store: BotStore, threadId: string, chainId: string): void {
   store.database
     .prepare(
-      `INSERT INTO thread_chains (thread_id, chain_id) VALUES (?, ?)
+      `INSERT INTO thread_chains (owner_id, thread_id, chain_id) VALUES (?, ?, ?)
        ON CONFLICT(thread_id) DO UPDATE SET chain_id = excluded.chain_id`,
     )
-    .run(threadId, chainId);
+    .run(store.owner, threadId, chainId);
 }
 
 const LETTER_TOKEN = /<<<letter ([0-9a-f-]{36})\b/gu;
@@ -147,31 +162,26 @@ export function acceptDelivery(
 ): boolean {
   if (tokens.length === 0) return false;
   return store.transaction(() => {
-    const db = store.database;
-    const chains: Array<{ id: string; letters: number }> = [];
+    const { database: db, owner } = store;
+    const chains: Chain[] = [];
     for (const token of tokens) {
       const pending = db
-        .prepare<[string, string], { chain_id: string }>(
-          "SELECT chain_id FROM pending_letters WHERE token = ? AND to_thread = ?",
+        .prepare<[string, string, string], { chain_id: string }>(
+          "SELECT chain_id FROM pending_letters WHERE owner_id = ? AND token = ? AND to_thread = ?",
         )
-        .get(token, threadId);
+        .get(owner, token, threadId);
       if (!pending) continue;
-      db.prepare("DELETE FROM pending_letters WHERE token = ?").run(token);
+      db.prepare("DELETE FROM pending_letters WHERE owner_id = ? AND token = ?").run(owner, token);
       const chain = db
-        .prepare<[string], { id: string; letters: number }>(
-          "SELECT id, letters FROM chains WHERE id = ?",
+        .prepare<[string, string], Chain>(
+          "SELECT id, letters FROM chains WHERE owner_id = ? AND id = ?",
         )
-        .get(pending.chain_id);
+        .get(owner, pending.chain_id);
       if (chain) chains.push(chain);
     }
     if (chains.length === 0) return false;
     if (joinsRunningTurn) {
-      const running = db
-        .prepare<[string], { id: string; letters: number }>(
-          `SELECT chains.id, chains.letters FROM thread_chains
-           JOIN chains ON chains.id = thread_chains.chain_id WHERE thread_chains.thread_id = ?`,
-        )
-        .get(threadId);
+      const running = chainOf(store, threadId);
       if (running) chains.push(running);
     }
     const longest = chains.reduce((a, b) => (b.letters > a.letters ? b : a));
@@ -191,21 +201,22 @@ export function startOwnerExchange(
   ownerTurn: number,
 ): void {
   store.transaction(() => {
-    const anchored = store.database
-      .prepare<[string], { owner_turn: number | null }>(
-        "SELECT owner_turn FROM thread_chains WHERE thread_id = ?",
+    const { database: db, owner } = store;
+    const anchored = db
+      .prepare<[string, string], { owner_turn: number | null }>(
+        "SELECT owner_turn FROM thread_chains WHERE owner_id = ? AND thread_id = ?",
       )
-      .get(threadId);
+      .get(owner, threadId);
     if (anchored?.owner_turn === ownerTurn) return;
     const chainId = `chain_${randomUUID()}`;
-    store.database
-      .prepare("INSERT INTO chains (id, letters, created_at) VALUES (?, 0, ?)")
-      .run(chainId, now);
-    store.database
-      .prepare(
-        `INSERT INTO thread_chains (thread_id, chain_id, owner_turn) VALUES (?, ?, ?)
-         ON CONFLICT(thread_id) DO UPDATE SET chain_id = excluded.chain_id, owner_turn = excluded.owner_turn`,
-      )
-      .run(threadId, chainId, ownerTurn);
+    db.prepare("INSERT INTO chains (owner_id, id, letters, created_at) VALUES (?, ?, 0, ?)").run(
+      owner,
+      chainId,
+      now,
+    );
+    db.prepare(
+      `INSERT INTO thread_chains (owner_id, thread_id, chain_id, owner_turn) VALUES (?, ?, ?, ?)
+       ON CONFLICT(thread_id) DO UPDATE SET chain_id = excluded.chain_id, owner_turn = excluded.owner_turn`,
+    ).run(owner, threadId, chainId, ownerTurn);
   });
 }

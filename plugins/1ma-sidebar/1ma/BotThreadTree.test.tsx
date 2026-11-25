@@ -66,16 +66,18 @@ function renderTree(answer: () => { ok: true } = () => ({ ok: true }), threads =
         id: "bot_m",
         name: "Marketer",
         role: "",
-        avatar: "",
+        appearance: { shape: "circle", face: "calm", color: "#7c6cf0" },
+        capabilities: [],
         hidden: false,
-        threads: ["main", "archived", "guest", "parent", "first", "second", "restored", "done"].map(
-          (threadId) => ({
-            threadId,
-            startedFromBot: true,
-            completed: false,
-          }),
-        ),
       },
+      members: Object.fromEntries(
+        ["main", "archived", "guest", "parent", "first", "second", "restored", "done"].map(
+          (threadId, position) => [
+            threadId,
+            { botId: "bot_m", startedFromBot: true, completed: false, position },
+          ],
+        ),
+      ),
       threads,
       compareThreads: () => 0,
       parentOf: (threadId: string) => PARENTS[threadId] ?? null,

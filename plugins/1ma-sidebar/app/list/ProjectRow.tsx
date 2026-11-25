@@ -161,6 +161,7 @@ import {
 import { getSidebarItemKey } from "../rows/sidebarItemKeys.js";
 import { useNestDropPreview } from "../dnd/useNestDropPreview.js";
 import { useChronologicalSectionThreadDnd } from "../dnd/SectionThreadDndContext.js";
+import { BotDropTargets } from "../../1ma/BotDrops.js";
 import {
   renderBuiltInSidebarSection,
   type BuiltInSidebarSectionOptions,
@@ -1227,15 +1228,22 @@ export function SectionThreadDragOverlayPortal({
   activeThread: SidebarThread | null;
 }) {
   const modifiers = useSidebarThreadDragOverlayModifiers();
-  return createPortal(
-    <DragOverlay
-      className="cursor-grabbing"
-      dropAnimation={null}
-      modifiers={modifiers}
-    >
-      {activeThread ? <SectionThreadDragOverlay thread={activeThread} /> : null}
-    </DragOverlay>,
-    document.body,
+  return (
+    <>
+      <BotDropTargets />
+      {createPortal(
+        <DragOverlay
+          className="cursor-grabbing"
+          dropAnimation={null}
+          modifiers={modifiers}
+        >
+          {activeThread ? (
+            <SectionThreadDragOverlay thread={activeThread} />
+          ) : null}
+        </DragOverlay>,
+        document.body,
+      )}
+    </>
   );
 }
 

@@ -1,94 +1,124 @@
 // @vitest-environment jsdom
+import type { CollisionDetection, DragOverEvent } from "@dnd-kit/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { botDrop } from "./thread-drop.js";
+import {
+  createBotDrop,
+  getBotDropId,
+  parseBotDropId,
+  splitBotCollisions,
+  splitBotOver,
+  type BotDropTarget,
+} from "./thread-drop.js";
 
-// The face is drawn at x 0-32; the row's click target covers the whole row,
-// and hit testing finds only that target, as in the browser.
-function botRow(botId: string) {
-  const row = document.createElement("div");
-  row.setAttribute("data-1ma-bot-drop", botId);
-  const face = document.createElement("span");
-  face.setAttribute("data-1ma-bot-drop-first", "");
-  face.getBoundingClientRect = () => new DOMRect(0, 0, 32, 32);
-  const target = document.createElement("button");
-  row.append(face, target);
-  document.body.append(row);
-  return { face: target, name: target };
-}
+type CollisionArgs = Parameters<CollisionDetection>[0];
 
-function pointAt(element: Element | null, x = 1) {
-  document.elementsFromPoint = () => (element === null ? [] : [element]);
-  return { x, y: 1 };
+const FIRST: BotDropTarget = { botId: "bot_a", place: "first" };
+const LAST: BotDropTarget = { botId: "bot_a", place: "last" };
+
+// A list row above a bot's row; the bot's face is drawn at x 0-32.
+function collisionsAt(pointerCoordinates: CollisionArgs["pointerCoordinates"], parent?: Element) {
+  const rects = new Map<string, DOMRect>([
+    ["thr_row", new DOMRect(0, 0, 200, 60)],
+    [getBotDropId(LAST), new DOMRect(0, 60, 200, 40)],
+    [getBotDropId(FIRST), new DOMRect(0, 60, 32, 40)],
+  ]);
+  const droppableContainers = [...rects.keys()].map((id) => {
+    const element = document.createElement("div");
+    (parent ?? document.body).append(element);
+    return { id, node: { current: element } };
+  });
+  const { bot, list } = splitBotCollisions({
+    pointerCoordinates,
+    droppableRects: rects,
+    droppableContainers,
+  } as unknown as CollisionArgs);
+  return { bot: bot.map(({ id }) => parseBotDropId(id)), list: list.droppableContainers };
 }
 
 afterEach(() => {
   document.body.innerHTML = "";
-  botDrop.cancel();
+});
+
+describe("what the pointer is over in a drag", () => {
+  it("is the bot's face before its row, and nothing off the bot", () => {
+    expect(collisionsAt({ x: 10, y: 80 }).bot).toEqual([FIRST]);
+    expect(collisionsAt({ x: 100, y: 80 }).bot).toEqual([LAST]);
+    expect(collisionsAt({ x: 100, y: 30 }).bot).toEqual([]);
+    expect(collisionsAt(null).bot).toEqual([]);
+  });
+
+  it("is not a bot scrolled out of the list's view", () => {
+    const view = document.createElement("div");
+    view.style.overflow = "auto";
+    document.body.append(view);
+    view.getBoundingClientRect = () => new DOMRect(0, 0, 200, 70);
+    expect(collisionsAt({ x: 100, y: 65 }, view).bot).toEqual([LAST]);
+    expect(collisionsAt({ x: 100, y: 80 }, view).bot).toEqual([]);
+  });
+
+  it("leaves the list its own drop places only", () => {
+    expect(collisionsAt({ x: 100, y: 30 }).list.map(({ id }) => id)).toEqual(["thr_row"]);
+    const overBot = {
+      over: { id: getBotDropId(LAST) },
+      collisions: [{ id: getBotDropId(LAST) }],
+    } as DragOverEvent;
+    expect(splitBotOver(overBot)).toEqual({ bot: LAST, list: { over: null, collisions: null } });
+    const overRow = { over: { id: "thr_row" }, collisions: [{ id: "thr_row" }] } as DragOverEvent;
+    expect(splitBotOver(overRow)).toEqual({ bot: null, list: overRow });
+  });
 });
 
 describe("dropping a dragged thread on a bot", () => {
-  it("on the face makes it first, on the rest of the row last, elsewhere nothing", () => {
+  it("gives the bot what was dragged to the place it was dropped in", () => {
     const drops: unknown[] = [];
-    const unregister = botDrop.register({
+    const drop = createBotDrop();
+    drop.register({
       accept: (threadIds) => threadIds,
       drop: (threadIds, target) => drops.push({ threadIds, target }),
     });
-    const { face, name } = botRow("bot_a");
-
-    botDrop.start(["thr_1"]);
-    expect(botDrop.over(pointAt(face))).toBe(true);
-    botDrop.end();
-    botDrop.start(["thr_2", "thr_3"]);
-    expect(botDrop.over(pointAt(name, 100))).toBe(true);
-    botDrop.end();
-    botDrop.start(["thr_4"]);
-    expect(botDrop.over(pointAt(document.body))).toBe(false);
-    botDrop.end();
-    unregister();
-
+    drop.start(["thr_1"]);
+    drop.over(LAST);
+    drop.over(FIRST);
+    drop.end();
+    drop.start(["thr_2", "thr_3"]);
+    drop.over(LAST);
+    drop.end();
+    drop.start(["thr_4"]);
+    drop.over(LAST);
+    drop.over(null);
+    drop.end();
     expect(drops).toEqual([
-      { threadIds: ["thr_1"], target: { botId: "bot_a", place: "first" } },
-      { threadIds: ["thr_2", "thr_3"], target: { botId: "bot_a", place: "last" } },
+      { threadIds: ["thr_1"], target: FIRST },
+      { threadIds: ["thr_2", "thr_3"], target: LAST },
     ]);
   });
 
-  it("a drag that carries no plain thread, a cancelled drag and a hidden bot drop nothing", () => {
+  it("a drag that carries no plain thread and a cancelled drag drop nothing", () => {
     const handler = vi.fn();
-    const unregister = botDrop.register({ accept: (threadIds) => threadIds, drop: handler });
-    const { name } = botRow("bot_a");
-    botDrop.start([]);
-    expect(botDrop.over(pointAt(name))).toBe(false);
-    botDrop.end();
-    botDrop.start(["thr_1"]);
-    botDrop.over(pointAt(name));
-    botDrop.cancel();
-    botDrop.end();
-    const hidden = document.createElement("div");
-    hidden.setAttribute("data-1ma-bot-drop", "");
-    document.body.append(hidden);
-    botDrop.start(["thr_1"]);
-    expect(botDrop.over(pointAt(hidden))).toBe(false);
-    botDrop.end();
-    unregister();
+    const drop = createBotDrop();
+    drop.register({ accept: (threadIds) => threadIds, drop: handler });
+    drop.start([]);
+    drop.over(LAST);
+    drop.end();
+    drop.start(["thr_1"]);
+    drop.over(LAST);
+    drop.cancel();
+    drop.end();
     expect(handler).not.toHaveBeenCalled();
   });
-});
 
-describe("what a drop on a bot moves", () => {
-  it("is what the bots block accepts, and a drag it accepts nothing of targets no bot", () => {
+  it("carries what the bots block accepts", () => {
     const drops: unknown[] = [];
-    const unregister = botDrop.register({
+    const drop = createBotDrop();
+    drop.register({
       accept: (threadIds) => threadIds.filter((id) => id !== "thr_child"),
       drop: (threadIds) => drops.push(threadIds),
     });
-    const { name } = botRow("bot_a");
-    botDrop.start(["thr_child"]);
-    expect(botDrop.over(pointAt(name, 100))).toBe(false);
-    botDrop.end();
-    botDrop.start(["thr_root", "thr_child"]);
-    expect(botDrop.over(pointAt(name, 100))).toBe(true);
-    botDrop.end();
-    unregister();
+    drop.start(["thr_child"]);
+    expect(drop.dragged()).toEqual([]);
+    drop.start(["thr_root", "thr_child"]);
+    drop.over(LAST);
+    drop.end();
     expect(drops).toEqual([["thr_root"]]);
   });
 });

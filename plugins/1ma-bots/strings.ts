@@ -71,6 +71,7 @@ export const strings = {
     continueInBot: "Continue in a bot conversation",
   },
   completed: (count: number) => `Done: ${count}`,
+  moreInList: (count: number) => `${count} more; narrow the list with --find <text>`,
   settings: {
     autoCompleteHours: "Mark idle bot conversations done after (hours)",
     autoCompleteHoursDescription:
@@ -80,6 +81,9 @@ export const strings = {
       "An exchange ends at this many letters; the bot then asks the owner. Your own message in a conversation starts a new exchange.",
     hourlyLetters: "Letters per bot per hour",
     hourlyLettersDescription: "The most letters one bot may send to other bots in an hour.",
+    retentionDays: "Keep bot letters and activity for (days)",
+    retentionDaysDescription:
+      "Older records of letters between bots and of bot activity are deleted. 0 keeps them forever. Conversations themselves are never deleted.",
   },
 } as const;
 
@@ -101,7 +105,9 @@ export const agentText = {
     role === ""
       ? `- ${JSON.stringify(name)} (${id})`
       : `- ${JSON.stringify(name)} (${id}), role ${JSON.stringify(role)}`,
+  othersUnlisted: (count: number) => `- ${count} more; look them up with bot_find`,
   tools: {
+    find: "Find the bots this bot may write to by a part of their name, role or work areas. Returns the first matches and how many there are.",
     memoryRead:
       "Read this bot's memory with its sha256, character count and limit. Read before overwriting.",
     memoryUpdate: `Change this bot's memory. append adds one single-line fact (duplicates are ignored); forget removes one exact fact line; overwrite replaces the whole memory and needs expectedSha256 from bot_read. Memory holds at most ${MEMORY_MAX} characters: when full, read, condense and overwrite.`,

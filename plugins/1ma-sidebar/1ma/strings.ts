@@ -34,7 +34,7 @@ export const strings = {
   settings: {
     showBots: "Show bots",
     showBotsDescription:
-      "Show the bots block above the projects when the 1ma Bots plugin is installed. Off, the list is exactly bb's.",
+      "Show the bots block above the projects when the 1ma Bots plugin is installed. Off, the standard list is shown.",
   },
   migratedPreferences: (keys: readonly string[]) =>
     `copied the built-in thread list's preferences: ${keys.join(", ")}`,
