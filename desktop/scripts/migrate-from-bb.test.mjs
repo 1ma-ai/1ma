@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -7,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -23,6 +25,7 @@ import {
   parseArgs,
   PI_SESSIONS,
   processesUsing,
+  real,
   runningFrom,
 } from "./migrate-from-bb.mjs";
 
@@ -167,6 +170,42 @@ describe("the machine data an export leaves behind", () => {
         "plugins/provider-claude-code/bridge-data",
       ],
     );
+  });
+});
+
+describe("where a path leads", () => {
+  test("a path that exists leads where the system resolves it", () => {
+    const root = fresh("layout");
+    write(root, "x/y/z/file");
+    symlinkSync(path.join(root, "x"), path.join(root, "absolute"));
+    symlinkSync("../../y", path.join(root, "x/y/z/up"));
+    symlinkSync("absolute", path.join(root, "to-link"));
+    symlinkSync(path.join(root, "to-link"), path.join(root, "absolute-to-link"));
+    for (const relative of [
+      "x/y/z/file",
+      "absolute/y",
+      "x/y/z/up/z",
+      "x/y/z/up/z/up/z/file",
+      "to-link/y/z",
+      "absolute-to-link/y/z/up",
+    ]) {
+      const file = path.join(root, relative);
+      assert.equal(real(file), realpathSync(file), relative);
+    }
+  });
+
+  test("a loop of symbolic links is named, also in a folder above the name", () => {
+    const root = fresh("loop");
+    mkdirSync(root);
+    symlinkSync("b", path.join(root, "a"));
+    symlinkSync("a", path.join(root, "b"));
+    symlinkSync("self", path.join(root, "self"));
+    for (const relative of ["a", "self/sub"])
+      assert.throws(
+        () => real(path.join(root, relative)),
+        /passes through a loop of symbolic links/,
+        relative,
+      );
   });
 });
 
@@ -364,6 +403,46 @@ describe("Pi sessions of a bb older than 0.50", () => {
     assert.equal(readFileSync(path.join(to, "earlier.txt"), "utf8"), "earlier 1ma\n");
   });
 
+  // The `..` in the link's text leaves the folder host-data leads to, not
+  // host-data's own name.
+  for (const hostDataLinked of [true, false])
+    test(`go where a link with \`..\` after a link leads (host-data ${hostDataLinked ? "a link out" : "a folder"})`, () => {
+      const home = fresh("home");
+      const given = fresh("pi-given");
+      write(given, "thr_given.jsonl", "given\n");
+      const outside = fresh("pi-storage");
+      mkdirSync(path.join(outside, "a/b"), { recursive: true });
+      const prepare = (from) => {
+        const provider = path.join(from, "plugins/provider-pi");
+        mkdirSync(path.join(provider, "bridge-data"), { recursive: true });
+        if (hostDataLinked)
+          symlinkSync(path.join(outside, "a/b"), path.join(provider, "host-data"));
+        else write(provider, "host-data/state.json", "{}");
+        symlinkSync("../host-data/../store", path.join(provider, "bridge-data/sessions"));
+      };
+      const imported = () => homeImport(home, { more: ["--pi-sessions", given], prepare });
+      if (hostDataLinked)
+        assert.throws(imported, (error) => {
+          assert.match(error.message, /would be written outside/);
+          assert.ok(
+            error.message.includes(path.join(realpathSync(outside), "a/store")),
+            error.message,
+          );
+          return true;
+        });
+      else {
+        const { from, to, record } = imported();
+        assert.equal(record.piSessions.copied, 1);
+        assert.equal(
+          readFileSync(path.join(to, "plugins/provider-pi/store/thr_given.jsonl"), "utf8"),
+          "given\n",
+        );
+        assert.equal(existsSync(path.join(from, "plugins/provider-pi/store")), false);
+      }
+      assert.deepEqual(readdirSync(path.join(outside, "a")), ["b"]);
+      assert.deepEqual(readdirSync(path.join(outside, "a/b")), []);
+    });
+
   test("a folder given for them that cannot exist brings none, one that leads into 1ma's is refused", () => {
     const home = fresh("home");
     const file = fresh("a-file");
@@ -497,7 +576,7 @@ describe("importing into 1ma", () => {
       [["earlier.txt"], ["--move-aside"]],
       [[], []],
     ]) {
-      const disk = fresh("other-disk");
+      const disk = fresh("owner's disk");
       mkdirSync(disk);
       for (const name of earlier) write(disk, name, "earlier 1ma\n");
       const to = fresh("1ma");
@@ -506,7 +585,12 @@ describe("importing into 1ma", () => {
         () => importIntoOneMa(importArgs(from, to, cli, more), quiet),
         (error) => {
           assert.match(error.message, /is a symbolic link to /);
-          assert.ok(error.message.includes(`pass --to ${disk}`), error.message);
+          const quoted = /pass --to ('.*')$/.exec(error.message)?.[1];
+          assert.ok(quoted, error.message);
+          assert.equal(
+            execFileSync("/bin/sh", ["-c", `printf %s ${quoted}`], { encoding: "utf8" }),
+            realpathSync(disk),
+          );
           return true;
         },
       );

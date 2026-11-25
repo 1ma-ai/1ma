@@ -207,6 +207,7 @@ export function piSessionPlan(dir) {
 // A session the 1ma data folder already has is newer than bb's and stays.
 // The machine entries copied before keep bb's symbolic links as they are, so
 // the folder may lead out of the 1ma data folder: nothing is written there.
+// Inside it, the folder is made where the links lead.
 export function copyPiSessions({ from, to, plan }) {
   const target = path.join(to, PI_SESSIONS);
   let copied = 0;
@@ -217,7 +218,7 @@ export function copyPiSessions({ from, to, plan }) {
       throw new Error(
         `Pi's earlier conversations would be written outside ${to}: ${target} is a symbolic link to ${physical}, copied from bb as it is. Replace the link in bb's data folder with a real folder, or pass --pi-sessions with an empty folder to import without them, then run the import again.`,
       );
-    mkdirSync(target, { recursive: true });
+    mkdirSync(physical, { recursive: true });
     copyFileSync(path.join(from, name), path.join(target, name), constants.COPYFILE_EXCL);
     copied += 1;
   }
@@ -280,24 +281,35 @@ function isLink(file) {
   }
 }
 
-// A folder that does not exist yet resolves through its nearest existing
-// parent, so both sides of a comparison pass the same symbolic links. A link
-// to a folder that does not exist is followed too: a write under it would
-// create that folder where the link points.
-function real(dir) {
-  const missing = [];
-  let existing = path.resolve(dir);
-  for (let links = 0; !existsSync(existing) && path.dirname(existing) !== existing;) {
-    if (isLink(existing)) {
-      if ((links += 1) > MAX_LINKS)
-        throw new Error(`${dir} passes through a loop of symbolic links`);
-      existing = path.resolve(realpathSync(path.dirname(existing)), readlinkSync(existing));
+// The place the kernel reaches for a path, existing or not: each symbolic link
+// is followed where it stands, `..` leaves the folder reached so far, and a
+// name that does not exist yet keeps its place.
+export function real(dir) {
+  const rest = path.resolve(dir).split("/").toReversed();
+  let reached = "/";
+  for (let links = 0; rest.length > 0;) {
+    const name = rest.pop();
+    if (name === "" || name === ".") continue;
+    if (name === "..") {
+      reached = path.dirname(reached);
       continue;
     }
-    missing.unshift(path.basename(existing));
-    existing = path.dirname(existing);
+    const next = path.join(reached, name);
+    if (!isLink(next)) {
+      reached = next;
+      continue;
+    }
+    if ((links += 1) > MAX_LINKS) throw new Error(`${dir} passes through a loop of symbolic links`);
+    const text = readlinkSync(next);
+    if (text.startsWith("/")) reached = "/";
+    rest.push(...text.split("/").toReversed());
   }
-  return path.join(realpathSync(existing), ...missing);
+  return reached;
+}
+
+// A path as one argument of a POSIX shell command.
+function shellQuoted(text) {
+  return `'${text.replaceAll("'", "'\\''")}'`;
 }
 
 function overlaps(a, b) {
@@ -355,7 +367,7 @@ function checkBeforeImport(options) {
     throw new Error(`Pi's earlier conversations in ${options.piSessions} must be outside ${to}`);
   if (isLink(to))
     throw new Error(
-      `${to} is a symbolic link to ${real(to)}. The import moves and renames the folder it is given, and would do that to the link and not to the data behind it: pass --to ${real(to)}.`,
+      `${to} is a symbolic link to ${real(to)}. The import moves and renames the folder it is given, and would do that to the link and not to the data behind it: pass --to ${shellQuoted(real(to))}`,
     );
   if (!existsSync(path.join(from, "bb.db")) || !existsSync(path.join(from, "host-id")))
     throw new Error(`${from} is not a bb data folder (no bb.db or host-id)`);
@@ -458,7 +470,7 @@ export function importIntoOneMa(options, log = console.log, now = new Date()) {
     );
   log("next: start 1ma. On its first start it finishes the import and rewrites the plugin paths.");
   log(
-    `bb connect stays off in 1ma until you run: bb server allow-connect --data-dir ${to} (only once bb is no longer used, or both servers fight over the tunnel)`,
+    `bb connect stays off in 1ma until you run: bb server allow-connect --data-dir ${shellQuoted(to)} (only once bb is no longer used, or both servers fight over the tunnel)`,
   );
   return record;
 }
