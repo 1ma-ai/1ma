@@ -1,3 +1,4 @@
+// From the first installed version on, an applied migration is never edited: changes are new statements at the end.
 export const MIGRATIONS: string[] = [
   `CREATE TABLE servers (
     id TEXT PRIMARY KEY,
