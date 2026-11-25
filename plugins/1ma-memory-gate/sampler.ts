@@ -1,6 +1,7 @@
 import type { MemoryReading } from "./contract.js";
 import { withDeadline } from "./deadline.js";
 import { freeBytes, type GateHost, type Sample } from "./gate.js";
+import { strings } from "./strings.js";
 
 export const SAMPLE_INTERVAL_MS = 5_000;
 export const READ_TIMEOUT_MS = 4_000;
@@ -13,6 +14,8 @@ export interface SamplerDeps {
   connectedHosts(signal: AbortSignal): Promise<GateHost[]>;
   read(hostId: string, signal: AbortSignal): Promise<MemoryReading>;
   warn(message: string): void;
+  /** Called after each stored reading and at the end of each round. */
+  changed(): void;
 }
 
 interface Machine {
@@ -36,6 +39,7 @@ export function createSampler(deps: SamplerDeps) {
   let requested = false;
   let wake: (() => void) | null = null;
   let listFailing = false;
+  let listed = false;
 
   function machineFor(id: string, name: string): Machine {
     const known = machines.get(id);
@@ -78,15 +82,14 @@ export function createSampler(deps: SamplerDeps) {
         };
         machine.failures = 0;
         machine.retryAt = 0;
+        deps.changed();
       },
       (error: unknown) => {
         if (!current()) return;
         machine.failures += 1;
         const delay = Math.min(SAMPLE_INTERVAL_MS * 2 ** (machine.failures - 1), MAX_BACKOFF_MS);
         machine.retryAt = deps.now() + delay;
-        deps.warn(
-          `could not read memory on ${machine.name || id}: ${errorMessage(error)}; next try in ${String(delay / 1000)} s`,
-        );
+        deps.warn(strings.logReadFailed(machine.name || id, errorMessage(error), delay / 1000));
       },
     );
   }
@@ -102,16 +105,14 @@ export function createSampler(deps: SamplerDeps) {
     } catch (error) {
       // The list is the plugin's own server, asked at the usual pace: a slower
       // pace would leave turns unchecked for longer once the server answers again.
-      if (!signal.aborted && !listFailing)
-        deps.warn(
-          `could not list machines: ${errorMessage(error)}; readings age until the list is back`,
-        );
+      if (!signal.aborted && !listFailing) deps.warn(strings.logListFailed(errorMessage(error)));
       listFailing = !signal.aborted;
       return;
     }
     listFailing = false;
-    const listed = new Set(hosts.map((host) => host.id));
-    for (const id of machines.keys()) if (!listed.has(id)) machines.delete(id);
+    listed = true;
+    const ids = new Set(hosts.map((host) => host.id));
+    for (const id of machines.keys()) if (!ids.has(id)) machines.delete(id);
     for (const host of hosts) {
       const machine = machineFor(host.id, host.name);
       machine.name = host.name;
@@ -136,6 +137,12 @@ export function createSampler(deps: SamplerDeps) {
   return {
     get(hostId: string): Sample | undefined {
       return machines.get(hostId)?.sample;
+    },
+    name(hostId: string): string | undefined {
+      return machines.get(hostId)?.name;
+    },
+    gone(hostId: string): boolean {
+      return listed && !machines.has(hostId);
     },
     /** Sample again now instead of at the next interval. */
     requestRefresh(): void {
@@ -162,7 +169,9 @@ export function createSampler(deps: SamplerDeps) {
         while (!signal.aborted) {
           requested = false;
           await sampleAll(signal);
-          if (!signal.aborted && !requested) await pause(signal);
+          if (signal.aborted) break;
+          deps.changed();
+          if (!requested) await pause(signal);
         }
       } finally {
         active = null;

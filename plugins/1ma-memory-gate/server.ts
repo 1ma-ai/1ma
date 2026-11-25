@@ -7,12 +7,14 @@ import {
   hostLabel,
   isNewTurnOnHost,
   READING_GRACE_MS,
+  type Answer,
   type DispatchQuestion,
+  type Due,
   type GateSettings,
+  type RunningThread,
   type Sample,
 } from "./gate.js";
 import { withDeadline } from "./deadline.js";
-import { createRetryTimer } from "./retry.js";
 import { createSampler, READ_TIMEOUT_MS } from "./sampler.js";
 import { strings } from "./strings.js";
 
@@ -20,12 +22,6 @@ export const SAMPLER_NAME = "memory-sampler";
 
 const RUNNING_TIMEOUT_MS = 2_000;
 const MAX_STATUS_HOSTS = 50;
-const RECHECK_EVENTS = [
-  "thread.idle",
-  "thread.failed",
-  "thread.archived",
-  "thread.deleted",
-] as const;
 
 const DEFAULTS = { enabled: true, reserveMb: 600, pressurePercent: 10, minRunning: 1 };
 const reserveMbSchema = z.number().int().min(64).max(65536);
@@ -56,11 +52,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function readingLine(sample: Sample | undefined): string {
+function readingLine(sample: Sample | undefined, neededBytes: number): string {
   if (sample === undefined || sample.reading === null) return strings.statusNoReading;
   if (!sample.reading.supported) return strings.statusUnsupported;
   return strings.statusReading(
     freeBytes(sample.reading),
+    neededBytes,
     sample.reading.pressureFullAvg10,
     Math.max(0, Math.round((monotonic() - sample.takenAt) / 1000)),
   );
@@ -109,29 +106,97 @@ export default function plugin(bb: BbPluginApi): void {
     read: (hostId, signal) =>
       client.call("readMemory", null, { hostId, signal, timeoutMs: READ_TIMEOUT_MS }),
     warn: (message) => bb.log.warn(message),
+    changed: () => reconsider(),
   });
 
   async function currentSettings(): Promise<StoredSettings> {
     return storedSettingsSchema.parse(await settings.get());
   }
 
-  async function runningOn(hostId: string): Promise<string[]> {
+  async function runningThreads(): Promise<RunningThread[]> {
     const running = await withDeadline(
       (signal) => bb.sdk.threads.listRunning({ signal }),
       lifetime.signal,
       RUNNING_TIMEOUT_MS,
     ).answer;
-    return running.filter((thread) => thread.hostId === hostId).map((thread) => thread.id);
+    return running.map((thread) => ({ id: thread.id, hostId: thread.hostId }));
   }
 
-  function recheck(): void {
-    bb.experimental_hooks.recheck("message.dispatch").catch((error: unknown) => {
-      bb.log.warn(`could not re-attempt held turns: ${errorMessage(error)}`);
-    });
+  function noteReadings(host: string, readings: Answer["readings"]): void {
+    if (readings === "lost") bb.log.warn(strings.logReadingsLost(host, READING_GRACE_MS / 1000));
+    if (readings === "back") bb.log.info(strings.logReadingsBack(host));
   }
 
-  const retry = createRetryTimer(monotonic, recheck);
-  bb.onDispose(() => retry.dispose());
+  // Each failure is warned about once until the call works again.
+  let recheckFailing = false;
+  let checkFailing = false;
+
+  async function recheck(): Promise<boolean> {
+    if (lifetime.signal.aborted) return false;
+    try {
+      await bb.experimental_hooks.recheck("message.dispatch");
+      recheckFailing = false;
+      return true;
+    } catch (error) {
+      if (!lifetime.signal.aborted && !recheckFailing)
+        bb.log.warn(strings.logRecheckFailed(errorMessage(error)));
+      recheckFailing = true;
+      return false;
+    }
+  }
+
+  async function reconsiderOnce(): Promise<void> {
+    for (const hostId of gate.readingsBack(sampler))
+      noteReadings(hostLabel({ id: hostId, name: sampler.name(hostId) ?? "" }), "back");
+    if (!gate.hasWaiting()) return;
+    let due: Due;
+    try {
+      const [stored, running] = await Promise.all([currentSettings(), runningThreads()]);
+      due = gate.due(gateSettings(stored), sampler, running);
+      checkFailing = false;
+    } catch (error) {
+      if (lifetime.signal.aborted) return;
+      // The hook lets turns through when it cannot check; the waiting ones get the same chance.
+      if (!checkFailing) bb.log.warn(strings.logReconsiderFailed(errorMessage(error)));
+      checkFailing = true;
+      due = gate.allWaiting();
+    }
+    if (due.size === 0 || lifetime.signal.aborted) return;
+    if (await recheck()) gate.rechecked(due);
+  }
+
+  let reconsidering = false;
+  let reconsiderAgain = false;
+
+  /** Asks core to re-attempt held turns when one of them would go ahead now. */
+  function reconsider(): void {
+    if (lifetime.signal.aborted) return;
+    if (reconsidering) {
+      reconsiderAgain = true;
+      return;
+    }
+    reconsidering = true;
+    void (async () => {
+      try {
+        do {
+          reconsiderAgain = false;
+          await reconsiderOnce();
+        } while (reconsiderAgain && !lifetime.signal.aborted);
+      } finally {
+        reconsidering = false;
+      }
+    })();
+  }
+
+  // A chat can have further messages held under this plugin's name that the
+  // gate was not asked about again, and core's own drain at the end of a turn
+  // leaves held messages out: every thread that ends asks for a re-attempt.
+  function threadEnded(threadId: string, removed: boolean): void {
+    if (removed) gate.removed(threadId);
+    else gate.ended(threadId);
+    if (gate.hasWaiting()) sampler.requestRefresh();
+    void recheck();
+  }
 
   bb.background.service(SAMPLER_NAME, {
     async start(signal) {
@@ -143,6 +208,8 @@ export default function plugin(bb: BbPluginApi): void {
           else sampler.reconnected(event.id);
         },
       });
+      // Turns an earlier instance held are asked about again, so the waiting set rebuilds.
+      void recheck();
       try {
         await sampler.run(signal);
       } finally {
@@ -151,42 +218,51 @@ export default function plugin(bb: BbPluginApi): void {
     },
   });
 
-  settings.onChange(() => recheck());
-  for (const event of RECHECK_EVENTS) bb.events.on(event, () => recheck());
+  settings.onChange(() => reconsider());
+  bb.events.on("thread.idle", ({ thread }) => threadEnded(thread.id, false));
+  bb.events.on("thread.failed", ({ thread }) => threadEnded(thread.id, false));
+  bb.events.on("thread.archived", ({ thread }) => threadEnded(thread.id, true));
+  bb.events.on("thread.deleted", ({ thread }) => threadEnded(thread.id, true));
+  bb.events.on("thread.active", ({ thread }) => gate.active(thread.id));
+  bb.events.on("message.queued", ({ entry }) => gate.queued(entry.threadId));
+  bb.events.on("message.dispatched", ({ entry }) => gate.dispatched(entry.threadId));
+  bb.events.on("message.cancelled", ({ entry }) => {
+    gate.cancelled(entry.threadId);
+    reconsider();
+  });
 
   bb.experimental_hooks.on("message.dispatch", async (context) => {
+    const threadId = context.thread.id;
     try {
       const question: DispatchQuestion = {
         attempt: context.attempt,
-        threadId: context.thread.id,
+        threadId,
         threadStatus: context.thread.status,
         host: context.host === null ? null : { id: context.host.id, name: context.host.name },
       };
-      if (!isNewTurnOnHost(question)) return { action: "proceed" };
+      if (!isNewTurnOnHost(question)) {
+        gate.passed(threadId);
+        return { action: "proceed" };
+      }
       const stored = await currentSettings();
-      if (!stored.enabled) return { action: "proceed" };
-      const runningOnHost = await runningOn(question.host.id);
-      const verdict = gate.answer({
+      if (!stored.enabled) {
+        gate.passed(threadId);
+        return { action: "proceed" };
+      }
+      const running = await runningThreads();
+      const answer = gate.answer({
         question,
         settings: gateSettings(stored),
         sample: sampler.get(question.host.id),
-        runningOnHost,
+        running,
       });
-      if (verdict.readings === "lost")
-        bb.log.warn(
-          `no memory reading from ${hostLabel(question.host)} for ${String(READING_GRACE_MS / 1000)} s, new turns there go ahead unchecked`,
-        );
-      if (verdict.readings === "back")
-        bb.log.info(
-          `memory readings from ${hostLabel(question.host)} are back, new turns there are checked again`,
-        );
-      if (verdict.action === "proceed") return { action: "proceed" };
-      if (verdict.why === "no-reading") sampler.requestRefresh();
-      retry.book(verdict.retryInMs);
-      return { action: "wait", reason: verdict.reason, sendAt: Date.now() + verdict.retryInMs };
+      noteReadings(hostLabel(question.host), answer.readings);
+      if (answer.action === "proceed") return { action: "proceed" };
+      if (answer.why === "no-reading") sampler.requestRefresh();
+      return { action: "wait", reason: answer.reason };
     } catch (error) {
-      if (!lifetime.signal.aborted)
-        bb.log.warn(`memory check failed, the turn goes ahead: ${errorMessage(error)}`);
+      gate.passed(threadId);
+      if (!lifetime.signal.aborted) bb.log.warn(strings.logCheckFailed(errorMessage(error)));
       return { action: "proceed" };
     }
   });
@@ -202,10 +278,12 @@ export default function plugin(bb: BbPluginApi): void {
           options: { json: { type: "boolean", description: strings.jsonOption } },
           async run(input) {
             const stored = await currentSettings();
-            const [hosts, running] = await Promise.all([
+            const [hosts, listed] = await Promise.all([
               bb.sdk.hosts.list(),
               bb.sdk.threads.listRunning(),
             ]);
+            const running = listed.map((thread) => ({ id: thread.id, hostId: thread.hostId }));
+            const hiddenHosts = Math.max(0, hosts.length - MAX_STATUS_HOSTS);
             const shown = hosts.slice(0, MAX_STATUS_HOSTS).map((host) => {
               const gateHost = { id: host.id, name: hostLabel({ id: host.id, name: host.name }) };
               const sample = sampler.get(host.id);
@@ -218,18 +296,23 @@ export default function plugin(bb: BbPluginApi): void {
                 },
                 settings: gateSettings(stored),
                 sample,
-                runningOnHost: running
-                  .filter((thread) => thread.hostId === host.id)
-                  .map((thread) => thread.id),
+                running,
               });
-              return { host: gateHost, status: host.status, sample, verdict };
+              return {
+                host: gateHost,
+                status: host.status,
+                sample,
+                neededBytes: gate.neededBytes(host.id, gateSettings(stored), running),
+                waiting: gate.waitingOn(host.id),
+                verdict,
+              };
             });
             if (input.options.json)
               return {
                 exitCode: 0,
                 stdout: JSON.stringify({
                   settings: stored,
-                  hosts: shown.map(({ host, status, sample, verdict }) => ({
+                  hosts: shown.map(({ host, status, sample, neededBytes, waiting, verdict }) => ({
                     id: host.id,
                     name: host.name,
                     status,
@@ -238,23 +321,27 @@ export default function plugin(bb: BbPluginApi): void {
                       sample === undefined || sample.reading === null
                         ? null
                         : Math.round(monotonic() - sample.takenAt),
+                    neededBytes,
+                    waiting,
                     answer:
                       verdict.action === "proceed"
                         ? { action: "start", why: verdict.why }
                         : { action: "wait", why: verdict.why, reason: verdict.reason },
                   })),
+                  hiddenHosts,
                 }),
               };
-            const lines = shown.map(({ host, status, sample, verdict }) =>
+            const lines = shown.map(({ host, status, sample, neededBytes, waiting, verdict }) =>
               strings.statusHostLine(
                 host.name,
                 status,
-                readingLine(sample),
+                readingLine(sample, neededBytes),
                 verdict.action === "wait"
                   ? strings.statusWait(verdict.reason)
                   : verdict.why === "reading-unavailable"
                     ? strings.statusStartUnchecked
                     : strings.statusStart,
+                strings.statusWaiting(waiting),
               ),
             );
             return {
@@ -267,9 +354,7 @@ export default function plugin(bb: BbPluginApi): void {
                   stored.minRunning,
                 ),
                 ...(lines.length === 0 ? [strings.statusNoHosts] : lines),
-                ...(hosts.length > MAX_STATUS_HOSTS
-                  ? [strings.statusMoreHosts(hosts.length - MAX_STATUS_HOSTS)]
-                  : []),
+                ...(hiddenHosts > 0 ? [strings.statusMoreHosts(hiddenHosts)] : []),
               ].join("\n"),
             };
           },

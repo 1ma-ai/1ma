@@ -33,11 +33,13 @@ function deferred() {
 function setup(overrides: Partial<SamplerDeps> = {}) {
   const warnings: string[] = [];
   const reads: string[] = [];
+  const changes: number[] = [];
   const read = overrides.read ?? (async () => linux(4096 * MIB));
   const sampler = createSampler({
     now: () => performance.now(),
     connectedHosts: async () => [HEALTHY],
     warn: (message) => warnings.push(message),
+    changed: () => changes.push(performance.now()),
     ...overrides,
     read: (hostId, signal) => {
       reads.push(hostId);
@@ -53,6 +55,7 @@ function setup(overrides: Partial<SamplerDeps> = {}) {
     sampler,
     warnings,
     reads,
+    changes,
     ended: () => ended,
     async stop() {
       controller.abort();
@@ -186,9 +189,11 @@ it("forgets a machine that is no longer in the list", async () => {
   try {
     await vi.advanceTimersByTimeAsync(0);
     expect(run.sampler.get(HEALTHY.id)).toBeDefined();
+    expect(run.sampler.gone(HEALTHY.id)).toBe(false);
     hosts = [];
     await vi.advanceTimersByTimeAsync(SAMPLE_INTERVAL_MS);
     expect(run.sampler.get(HEALTHY.id)).toBeUndefined();
+    expect(run.sampler.gone(HEALTHY.id)).toBe(true);
   } finally {
     await run.stop();
   }
@@ -270,6 +275,35 @@ it("warns once while the machine list keeps failing, and again when it fails ane
     failing = true;
     await vi.advanceTimersByTimeAsync(2 * SAMPLE_INTERVAL_MS);
     expect(run.warnings).toHaveLength(2);
+  } finally {
+    await run.stop();
+  }
+});
+
+it("calls back after each stored reading and at the end of each round", async () => {
+  let failing = false;
+  const run = setup({
+    read: async () => {
+      if (failing) throw new Error("daemon went away");
+      return linux(MIB);
+    },
+  });
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(run.changes).toEqual([0, 0]);
+    failing = true;
+    await vi.advanceTimersByTimeAsync(SAMPLE_INTERVAL_MS);
+    expect(run.changes).toEqual([0, 0, SAMPLE_INTERVAL_MS]);
+  } finally {
+    await run.stop();
+  }
+});
+
+it("takes no machine for gone before the machine list first answered", async () => {
+  const run = setup({ connectedHosts: () => new Promise(() => {}) });
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(run.sampler.gone(HEALTHY.id)).toBe(false);
   } finally {
     await run.stop();
   }
