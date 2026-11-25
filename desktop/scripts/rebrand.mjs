@@ -209,12 +209,16 @@ export function rebrandString(text, context, rules) {
   }
   return { result: compose(text, decisions, rules.replacement), decisions };
 }
+// Where each cooked unit of a literal starts and ends in its raw text; a line
+// continuation belongs to neither neighbour.
 function cookedToRaw(raw) {
-  const map = [];
+  const starts = [];
+  const ends = [];
   let i = 0;
   while (i < raw.length) {
     if (raw[i] !== "\\") {
-      map.push(i);
+      starts.push(i);
+      ends.push(i + 1);
       i += 1;
       continue;
     }
@@ -235,11 +239,14 @@ function cookedToRaw(raw) {
       length = close - i + 1;
       units = Number.parseInt(raw.slice(i + 3, close), 16) > 0xffff ? 2 : 1;
     } else if (next === "u") length = 6;
-    for (let unit = 0; unit < units; unit += 1) map.push(i);
+    for (let unit = 0; unit < units; unit += 1) {
+      starts.push(i);
+      ends.push(i + length);
+    }
     i += length;
   }
-  map.push(raw.length);
-  return map;
+  starts.push(raw.length);
+  return { starts, ends };
 }
 
 function calleeName(call) {
@@ -295,9 +302,16 @@ function contextOf(node) {
   return { kind: "value" };
 }
 
+// The raw offset where the cooked unit at an index starts, and the raw range
+// that length units from an index cover.
 function rawOffsets(segment) {
   const map = segment.escapes ? cookedToRaw(segment.raw) : null;
-  return (index) => segment.rawStart + (map ? map[index] : index);
+  const start = (index) => segment.rawStart + (map ? map.starts[index] : index);
+  const end = (index) => segment.rawStart + (map ? map.ends[index] : index + 1);
+  return {
+    start,
+    range: (at, length) => [start(at), length === 0 ? start(at) : end(at + length - 1)],
+  };
 }
 
 // Where the range [start, end) of a text is once the edits are applied. A start
@@ -318,9 +332,9 @@ function moveRange([start, end], edits) {
   return [move(start, false), move(end, true)];
 }
 
-// The edits replaceAll makes for a test rule, each with the span it changes:
-// the match without what find and replace share at either end.
-function ruleEdits(text, find, replace) {
+// The edits that turn find into replace, by the longest common subsequence of
+// the two: text they share keeps its place, also between two changes.
+function textDiff(find, replace) {
   let prefix = 0;
   while (prefix < find.length && prefix < replace.length && find[prefix] === replace[prefix])
     prefix += 1;
@@ -331,30 +345,64 @@ function ruleEdits(text, find, replace) {
     find[find.length - 1 - suffix] === replace[replace.length - 1 - suffix]
   )
     suffix += 1;
+  const from = find.slice(prefix, find.length - suffix);
+  const to = replace.slice(prefix, replace.length - suffix);
+  const common = Array.from({ length: from.length + 1 }, () => new Uint32Array(to.length + 1));
+  for (let i = from.length - 1; i >= 0; i -= 1)
+    for (let j = to.length - 1; j >= 0; j -= 1)
+      common[i][j] =
+        from[i] === to[j] ? common[i + 1][j + 1] + 1 : Math.max(common[i + 1][j], common[i][j + 1]);
   const edits = [];
-  for (let at = text.indexOf(find); at !== -1; at = text.indexOf(find, at + find.length))
-    edits.push({
-      start: at,
-      end: at + find.length,
-      text: replace,
-      changed: [at + prefix, at + find.length - suffix],
-    });
+  let edit = null;
+  let i = 0;
+  let j = 0;
+  while (i < from.length || j < to.length) {
+    if (i < from.length && j < to.length && from[i] === to[j]) {
+      edit = null;
+      i += 1;
+      j += 1;
+      continue;
+    }
+    if (!edit) {
+      edit = { start: prefix + i, end: prefix + i, text: "" };
+      edits.push(edit);
+    }
+    if (j === to.length || (i < from.length && common[i + 1][j] >= common[i][j + 1])) {
+      i += 1;
+      edit.end = prefix + i;
+    } else {
+      edit.text += to[j];
+      j += 1;
+    }
+  }
   return edits;
 }
 
+// A test rule applied to a text: find and replace are literal, and the edits
+// are what changes at every match.
+function ruleEdits(text, find, replace) {
+  const diff = textDiff(find, replace);
+  const edits = [];
+  const next = text.replaceAll(find, (_, at) => {
+    for (const { start, end, text: inserted } of diff)
+      edits.push({ start: at + start, end: at + end, text: inserted });
+    return replace;
+  });
+  return { text: next, edits };
+}
+
 function editsFor(file, text, segment, decisions, replacement) {
-  const toRaw = rawOffsets(segment);
+  const { range } = rawOffsets(segment);
   const edits = [];
   for (const decision of decisions) {
     if (decision.kind === "product") {
-      const at = toRaw(decision.index);
-      const found = text.slice(at, at + 2);
+      const [start, end] = range(decision.index, 2);
+      const found = text.slice(start, end);
       if (found.toLowerCase() !== "bb")
-        throw new Error(`${file}: cannot map "bb" at ${at} (found ${JSON.stringify(found)})`);
-      edits.push({ start: at, end: at + 2, text: replacement });
+        throw new Error(`${file}: cannot map "bb" at ${start} (found ${JSON.stringify(found)})`);
+      edits.push({ start, end, text: replacement });
     } else if (decision.kind === "replace" || decision.kind === "name") {
-      const start = toRaw(decision.index);
-      const end = toRaw(decision.index + decision.length);
+      const [start, end] = range(decision.index, decision.length);
       if (end - start !== decision.length)
         throw new Error(`${file}: an override covers escaped text at ${start}`);
       const unsafe = segment.regex ? /(?<!\\)\/|[\n\r]/u : /["'`\\$]/u;
@@ -411,12 +459,12 @@ function literalEdits(file, text, options) {
       offset += segment.cooked.length + PLACEHOLDER.length;
       return { segment, start, end: start + segment.cooked.length, decisions: [] };
     });
-    const position = (index) => {
-      const part = local.find((item) => item.start <= index && index <= item.end);
-      part.toRaw ??= rawOffsets(part.segment);
-      return part.toRaw(index - part.start);
+    const range = (at, length) => {
+      const part = local.find((item) => item.start <= at && at <= item.end);
+      part.offsets ??= rawOffsets(part.segment);
+      return part.offsets.range(at - part.start, length);
     };
-    const { result, decisions } = decide(full, { ...context, file, position });
+    const { result, decisions } = decide(full, { ...context, file, range });
     record?.(
       file,
       display ? full.replaceAll(PLACEHOLDER, "${…}") : full,
@@ -464,7 +512,7 @@ function literalEdits(file, text, options) {
         };
         const { decisions } = regexes(pattern, {
           negative: negativeAssertion(node),
-          position: rawOffsets(segment),
+          range: rawOffsets(segment).range,
         });
         edits.push(...editsFor(file, text, segment, decisions, rules.replacement));
       }
@@ -1385,7 +1433,8 @@ export function rebrandTree(root, rules, { write = false } = {}) {
       return { result: compose(pattern, decisions, rules.replacement), decisions };
     };
     // A negative assertion is checked once the file's testReplace rules ran: a
-    // rule settles the mentions of the literal whose text it changes.
+    // mention of the literal is settled when the rules leave other text there
+    // than they found.
     const negatives = [];
     const edits = literalEdits(file, text, {
       rules,
@@ -1395,7 +1444,7 @@ export function rebrandTree(root, rules, { write = false } = {}) {
           negatives.push({
             literal: cooked,
             decided,
-            position: context.position,
+            range: context.range,
             relax: (settled) => propagate(cooked, index, { ...options, relaxed: true, settled }),
           });
         return decided;
@@ -1406,32 +1455,34 @@ export function rebrandTree(root, rules, { write = false } = {}) {
           negatives.push({
             literal: pattern,
             decided,
-            position: context.position,
+            range: context.range,
             relax: (settled) => byAlternative(pattern, { relaxed: true, settled }),
           });
         return decided;
       },
     });
     text = rewrite(file, edits, text, testsChanged);
+    const before = text;
     const stages = [];
     for (const entry of testEdits.get(file) ?? []) {
+      if (entry.find === "")
+        throw new Error(
+          `${file}: a testReplace rule has an empty find; give it the text to change`,
+        );
       if (!text.includes(entry.find))
         throw new Error(`${file}: testReplace "${entry.find}" no longer matches; review it`);
-      stages.push(ruleEdits(text, entry.find, entry.replace));
-      const next = text.replaceAll(entry.find, entry.replace);
+      const applied = ruleEdits(text, entry.find, entry.replace);
+      stages.push(applied.edits);
       if (!testsChanged.includes(file)) testsChanged.push(file);
-      if (write) writeFileSync(path.join(root, file), next);
-      text = next;
+      if (write) writeFileSync(path.join(root, file), applied.text);
+      text = applied.text;
     }
-    for (const { literal, decided, position, relax } of negatives) {
+    for (const { literal, decided, range, relax } of negatives) {
       const settled = (at, length) => {
-        let range = moveRange([position(at), position(at + length)], edits);
-        for (const stage of stages) {
-          if (stage.some(({ changed: [start, end] }) => range[0] < end && start < range[1]))
-            return true;
-          range = moveRange(range, stage);
-        }
-        return false;
+        let moved = moveRange(range(at, length), edits);
+        const found = before.slice(...moved);
+        for (const stage of stages) moved = moveRange(moved, stage);
+        return text.slice(...moved) !== found;
       };
       const relaxed = relax(settled);
       const open = decided.decisions.filter(

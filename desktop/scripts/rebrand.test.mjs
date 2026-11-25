@@ -860,6 +860,78 @@ describe("prepare stops when a rule for all of bb matches nothing", () => {
     );
   });
 
+  const rule = (find, replace) => ({ file, find, replace, reason: "test" });
+  const call = 'expect(title).not.toContain("Restart bb soon")';
+  const plain = `${call};\n`;
+
+  test("a later rule keeps the place of text a wide rule leaves alone", () => {
+    const wide = rule(call, 'expect(screen.getByRole(title)).not.toContain("Restart bb soon")');
+    const narrow = rule("screen.getByRole", "screen.getByLabelText");
+    assert.throws(() => run(plain, { testReplace: [wide, narrow] }), diagnostic);
+    const { unmatched, test } = run(plain, { testReplace: [wide, narrow], keep: [inside] });
+    assert.deepEqual(unmatched, []);
+    requireEveryRuleMatches(unmatched);
+    assert.match(
+      test,
+      /expect\(screen\.getByLabelText\(title\)\)\.not\.toContain\("Restart bb soon"\)/,
+    );
+  });
+
+  test("a rule that changes both sides of a mention in one match leaves it named", () => {
+    const around = rule(call, 'expect(screen.getByRole(title)).not.toContain("Restart bb later")');
+    assert.throws(() => run(plain, { testReplace: [around] }), diagnostic);
+  });
+
+  test("a rule that writes what it finds settles nothing", () => {
+    assert.throws(() => run(plain, { testReplace: [rule("b", "b")] }), diagnostic);
+  });
+
+  test("an insertion next to a mention that a later rule takes back leaves it named", () => {
+    for (const insert of [rule("bb", "!bb"), rule("bb", "bb!")])
+      assert.throws(() => run(plain, { testReplace: [insert, rule("!", "")] }), diagnostic);
+  });
+
+  test("a mention a later rule names bb again is named, one that ends as 1ma is not", () => {
+    assert.throws(
+      () => run(plain, { testReplace: [rule("bb", "1ma"), rule("1ma", "bb")] }),
+      diagnostic,
+    );
+    const { test } = run(plain, { testReplace: [rule("bb", "bx"), rule("bx", "1ma")] });
+    assert.match(test, /not\.toContain\("Restart 1ma soon"\)/);
+  });
+
+  test("a line continuation after a mention is not part of it", () => {
+    const continued = 'expect(title).not.toContain("Restart bb\\\n soon");\n';
+    assert.throws(() => run(continued, { testReplace: [rule("\\\n", "")] }), diagnostic);
+    const { test } = run(continued, { testReplace: [rule("Restart bb", "Restart 1ma")] });
+    assert.match(test, /not\.toContain\("Restart 1ma\\\n soon"\)/);
+  });
+
+  test("find and replace are literal text", () => {
+    assert.match(run(plain, { testReplace: [rule("bb", "$&")] }).test, /"Restart \$& soon"/);
+    const { test } = run(`// TOKEN\n${plain}`, {
+      testReplace: [rule("TOKEN", "$$$$ $` $'"), rule("bb", "1ma")],
+    });
+    assert.equal(test, '// $$$$ $` $\'\nexpect(title).not.toContain("Restart 1ma soon");\n');
+  });
+
+  test("a rule with an empty find is refused", () => {
+    assert.throws(
+      () => run(plain, { testReplace: [rule("", "x")] }),
+      /apps\/app\/src\/hint\.test\.tsx: a testReplace rule has an empty find/,
+    );
+  });
+
+  test("a rule that matches twice rewrites both and settles the mention", () => {
+    const { test } = run(`const shown = "Restart bb soon";\n${plain}`, {
+      testReplace: [rule("bb soon", "1ma soon")],
+    });
+    assert.equal(
+      test,
+      'const shown = "Restart 1ma soon";\nexpect(title).not.toContain("Restart 1ma soon");\n',
+    );
+  });
+
   test("a keep rule inside a longer rule that no test quotes is still named", () => {
     const whole = { text: "Please Restart bb server now", reason: "test" };
     const inside = { text: "Restart bb server", reason: "test" };
@@ -871,6 +943,33 @@ describe("prepare stops when a rule for all of bb matches nothing", () => {
     after(() => rmSync(root, { recursive: true, force: true }));
     const { unmatched } = rebrandTree(root, only({ product: [whole], keep: [inside] }));
     assert.deepEqual(unmatched, [{ kind: "keep", text: inside.text }]);
+  });
+
+  const opening = { text: "Open bb", to: "Open 1ma", reason: "test" };
+  const access = (literal) => {
+    const root = tree({
+      "apps/app/package.json": manifest("@bb/app"),
+      "apps/app/src/access.tsx": `export const title = "${literal}";\n`,
+    });
+    after(() => rmSync(root, { recursive: true, force: true }));
+    return root;
+  };
+
+  test("an override that ends before a line continuation leaves the continuation", () => {
+    const root = access("Open bb\\\n from any browser");
+    rebrandTree(root, only({ replace: [opening] }), { write: true });
+    assert.equal(
+      readFileSync(path.join(root, "apps/app/src/access.tsx"), "utf8"),
+      'export const title = "Open 1ma\\\n from any browser";\n',
+    );
+  });
+
+  test("an override over an escape is refused", () => {
+    const root = access("Open\\x20bb from any browser");
+    assert.throws(
+      () => rebrandTree(root, only({ replace: [opening] })),
+      /apps\/app\/src\/access\.tsx: an override covers escaped text/,
+    );
   });
 
   test("rules that all match pass", () => {
