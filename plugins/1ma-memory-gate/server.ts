@@ -11,6 +11,7 @@ import {
   type GateSettings,
   type Sample,
 } from "./gate.js";
+import { createRetryTimer } from "./retry.js";
 import { createSampler, READ_TIMEOUT_MS } from "./sampler.js";
 import { strings } from "./strings.js";
 
@@ -48,8 +49,19 @@ function gateSettings(stored: StoredSettings): GateSettings {
   };
 }
 
+const monotonic = () => performance.now();
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Bounds a call by the plugin's own timer, whether or not it honours its abort signal. */
+function within<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`no answer in ${String(ms / 1000)} s`)), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 }
 
 function readingLine(sample: Sample | undefined): string {
@@ -58,7 +70,7 @@ function readingLine(sample: Sample | undefined): string {
   return strings.statusReading(
     freeBytes(sample.reading),
     sample.reading.pressureFullAvg10,
-    Math.max(0, Math.round((Date.now() - sample.takenAt) / 1000)),
+    Math.max(0, Math.round((monotonic() - sample.takenAt) / 1000)),
   );
 }
 
@@ -93,9 +105,9 @@ export default function plugin(bb: BbPluginApi): void {
     },
   });
   const client = bb.hosts.experimental_client({ contract: memoryHostContract });
-  const gate = createGate(() => Date.now());
+  const gate = createGate(monotonic);
   const sampler = createSampler({
-    now: () => Date.now(),
+    now: monotonic,
     connectedHosts: async (signal) =>
       (await bb.sdk.hosts.list({ signal }))
         .filter((host) => host.status === "connected")
@@ -110,9 +122,10 @@ export default function plugin(bb: BbPluginApi): void {
   }
 
   async function runningOn(hostId: string): Promise<string[]> {
-    const running = await bb.sdk.threads.listRunning({
-      signal: AbortSignal.timeout(RUNNING_TIMEOUT_MS),
-    });
+    const running = await within(
+      bb.sdk.threads.listRunning({ signal: AbortSignal.timeout(RUNNING_TIMEOUT_MS) }),
+      RUNNING_TIMEOUT_MS,
+    );
     return running.filter((thread) => thread.hostId === hostId).map((thread) => thread.id);
   }
 
@@ -122,12 +135,17 @@ export default function plugin(bb: BbPluginApi): void {
     });
   }
 
+  const retry = createRetryTimer(monotonic, recheck);
+  bb.onDispose(() => retry.dispose());
+
   bb.background.service(SAMPLER_NAME, {
     async start(signal) {
       const unsubscribe = bb.sdk.subscribe({
         event: "host:changed",
         callback: (event) => {
-          if (event.changes.includes("host-connected")) sampler.requestRefresh();
+          if (!event.changes.includes("host-connected")) return;
+          if (event.id === undefined) sampler.requestRefresh();
+          else sampler.reconnected(event.id);
         },
       });
       try {
@@ -152,20 +170,24 @@ export default function plugin(bb: BbPluginApi): void {
       if (!isNewTurnOnHost(question)) return { action: "proceed" };
       const stored = await currentSettings();
       if (!stored.enabled) return { action: "proceed" };
+      const runningOnHost = await runningOn(question.host.id);
       const verdict = gate.answer({
         question,
         settings: gateSettings(stored),
         sample: sampler.get(question.host.id),
-        runningOnHost: await runningOn(question.host.id),
+        runningOnHost,
       });
-      if (verdict.action === "proceed") {
-        if (verdict.why === "reading-unavailable")
-          bb.log.warn(
-            `no memory reading from ${hostLabel(question.host)} for ${String(READING_GRACE_MS / 1000)} s, the turn goes ahead unchecked`,
-          );
-        return { action: "proceed" };
-      }
+      if (verdict.readings === "lost")
+        bb.log.warn(
+          `no memory reading from ${hostLabel(question.host)} for ${String(READING_GRACE_MS / 1000)} s, new turns there go ahead unchecked`,
+        );
+      if (verdict.readings === "back")
+        bb.log.info(
+          `memory readings from ${hostLabel(question.host)} are back, new turns there are checked again`,
+        );
+      if (verdict.action === "proceed") return { action: "proceed" };
       if (verdict.why === "no-reading") sampler.requestRefresh();
+      retry.book(verdict.retryInMs);
       return { action: "wait", reason: verdict.reason, sendAt: Date.now() + verdict.retryInMs };
     } catch (error) {
       bb.log.warn(`memory check failed, the turn goes ahead: ${errorMessage(error)}`);
@@ -216,7 +238,7 @@ export default function plugin(bb: BbPluginApi): void {
                     name: host.name,
                     status,
                     reading: sample?.reading ?? null,
-                    ageMs: sample === undefined ? null : Date.now() - sample.takenAt,
+                    ageMs: sample === undefined ? null : Math.round(monotonic() - sample.takenAt),
                     answer:
                       verdict.action === "proceed"
                         ? { action: "start", why: verdict.why }

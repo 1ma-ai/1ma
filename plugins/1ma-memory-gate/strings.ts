@@ -8,13 +8,13 @@ export const strings = {
     "Hold a new chat turn in the queue while its machine is short of memory. A running chat is never stopped, and Send now still sends at once.",
   reserveMbLabel: "Memory per chat (MB)",
   reserveMbDescription:
-    "How much free memory a new chat turn needs, 64 to 65536 MB. Each chat started in the last 45 seconds holds this much more, until its own memory shows.",
+    "How much free memory a new chat turn needs, 64 to 65536 MB. Each chat let through in the last 45 seconds holds this much more until its own memory shows; one that has not started within 10 seconds holds nothing.",
   pressurePercentLabel: "Memory pressure limit (%)",
   pressurePercentDescription:
     "Hold new turns while tasks on the machine spent at least this share of the last 10 seconds waiting for memory, 1 to 100.",
   minRunningLabel: "Always allow this many chats",
   minRunningDescription:
-    "Let a new turn start without checking memory while fewer chats than this run on its machine, 0 to 100. Memory held by something other than chats then never stops the only chat.",
+    "Let a new turn start without checking memory, even before the first reading, while fewer chats than this run or are starting on its machine, 0 to 100. Memory held by something other than chats then never stops the only chat.",
 
   waitingForReading: (host: string) => `Checking free memory on ${host}`,
   waitingForMemory: (host: string, freeBytes: number, neededBytes: number) =>
@@ -36,7 +36,7 @@ export const strings = {
     `Memory gate: ${enabled ? "on" : "off"}; ${String(reserveMb)} MB per chat; pressure limit ${String(pressurePercent)}%; always allow ${String(minRunning)}`,
   statusNoHosts: "No machines",
   statusNoReading: "no reading yet",
-  statusUnsupported: "no memory gate on this machine (no Linux memory files)",
+  statusUnsupported: "no memory gate on this machine (not Linux)",
   statusReading: (freeBytes: number | null, pressure: number | null, ageSeconds: number) =>
     `${freeBytes === null ? "free memory unknown" : `${gigabytes(freeBytes)} GB free`}, pressure ${pressure === null ? "unknown" : `${String(pressure)}%`}, read ${String(ageSeconds)} s ago`,
   statusStart: "a new chat starts",
