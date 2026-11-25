@@ -1,0 +1,325 @@
+import { randomUUID } from "node:crypto";
+import type Database from "better-sqlite3";
+import { type AnswerOutcome, type Card, type CardState, cardSchema } from "./card.js";
+
+export { answerSchema, cardSchema, questionPayloadSchema } from "./card.js";
+export type { AnswerOutcome, Card, QuestionPayload } from "./card.js";
+export const QUESTION_RENDERER = "question";
+export const QUESTION_TIMEOUT_MS = 7 * 24 * 60 * 60 * 1000;
+export const UNRECORDED_RETRY_MS = [30 * 1000, 2 * 60 * 1000, 10 * 60 * 1000] as const;
+
+export type QuestionState =
+  | "queued"
+  | "open"
+  | "answered"
+  | "dismissed"
+  | "stale"
+  | "expired"
+  | "canceled";
+
+export interface QuestionRow {
+  id: string;
+  key: string;
+  kind: string;
+  chatThreadId: string | null;
+  subject: string;
+  expectedVersion: string;
+  card: Card;
+  priority: number;
+  state: QuestionState;
+  token: string | null;
+  answer: string | null;
+  remindAt: number | null;
+  createdAt: number;
+  expiresAt: number;
+  unrecordedAnswer: boolean;
+}
+
+interface RawQuestion {
+  id: string;
+  key: string;
+  kind: string;
+  chat_thread_id: string | null;
+  subject: string;
+  expected_version: string;
+  card: string;
+  priority: number;
+  state: string;
+  token: string | null;
+  answer: string | null;
+  remind_at: number | null;
+  created_at: number;
+  expires_at: number | null;
+  unrecorded_answer: number;
+}
+
+const STATES: readonly QuestionState[] = [
+  "queued",
+  "open",
+  "answered",
+  "dismissed",
+  "stale",
+  "expired",
+  "canceled",
+];
+
+function toRow(raw: RawQuestion): QuestionRow {
+  const state = STATES.find((value) => value === raw.state);
+  if (state === undefined) throw new Error(`unknown question state ${raw.state}`);
+  return {
+    id: raw.id,
+    key: raw.key,
+    kind: raw.kind,
+    chatThreadId: raw.chat_thread_id,
+    subject: raw.subject,
+    expectedVersion: raw.expected_version,
+    card: cardSchema.parse(JSON.parse(raw.card)),
+    priority: raw.priority,
+    state,
+    token: raw.token,
+    answer: raw.answer,
+    remindAt: raw.remind_at,
+    createdAt: raw.created_at,
+    expiresAt: raw.expires_at ?? raw.created_at + QUESTION_TIMEOUT_MS,
+    unrecordedAnswer: raw.unrecorded_answer > 0,
+  };
+}
+
+export interface AskInput {
+  readonly key: string;
+  readonly kind: string;
+  readonly subject: string;
+  readonly expectedVersion: string;
+  readonly card: Card;
+  readonly priority: number;
+}
+
+export interface QuestionKind {
+  currentVersion(subject: string): string | null;
+  onAnswer(question: QuestionRow, optionId: string, now: number): void | "stale";
+}
+
+export class QuestionStore {
+  readonly #db: Database.Database;
+
+  constructor(db: Database.Database) {
+    this.#db = db;
+  }
+
+  ask(input: AskInput, now: number): string | null {
+    const card = cardSchema.parse(input.card);
+    const id = `q_${randomUUID()}`;
+    const result = this.#db
+      .prepare(
+        `INSERT INTO questions (id, key, kind, chat_thread_id, subject, expected_version, card, priority, state, created_at, expires_at)
+         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'queued', ?, ?)
+         ON CONFLICT DO NOTHING`,
+      )
+      .run(
+        id,
+        input.key,
+        input.kind,
+        input.subject,
+        input.expectedVersion,
+        JSON.stringify(card),
+        input.priority,
+        now,
+        now + QUESTION_TIMEOUT_MS,
+      );
+    return result.changes === 1 ? id : null;
+  }
+
+  live(key: string): QuestionRow | null {
+    const raw = this.#db
+      .prepare(`SELECT * FROM questions WHERE key = ? AND state IN ('queued', 'open')`)
+      .get(key) as RawQuestion | undefined;
+    return raw === undefined ? null : toRow(raw);
+  }
+
+  isPendingOrDecided(key: string): boolean {
+    return (
+      this.#db
+        .prepare(
+          `SELECT 1 FROM questions WHERE key = ? AND state IN ('queued', 'open', 'answered', 'dismissed') LIMIT 1`,
+        )
+        .get(key) !== undefined
+    );
+  }
+
+  latest(key: string): QuestionRow | null {
+    const raw = this.#db
+      .prepare(`SELECT * FROM questions WHERE key = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+      .get(key) as RawQuestion | undefined;
+    return raw === undefined ? null : toRow(raw);
+  }
+
+  get(id: string): QuestionRow | null {
+    const raw = this.#db.prepare(`SELECT * FROM questions WHERE id = ?`).get(id) as
+      | RawQuestion
+      | undefined;
+    return raw === undefined ? null : toRow(raw);
+  }
+
+  retire(key: string): void {
+    this.#db
+      .prepare(`UPDATE questions SET state = 'stale' WHERE key = ? AND state IN ('queued', 'open')`)
+      .run(key);
+  }
+
+  moveOpenCards(chat: string | null): void {
+    const move = this.#db.transaction(() => {
+      const rows = this.#db
+        .prepare(`SELECT * FROM questions WHERE state = 'open' AND chat_thread_id IS NOT ?`)
+        .all(chat) as RawQuestion[];
+      for (const row of rows) {
+        this.#db.prepare(`UPDATE questions SET state = 'stale' WHERE id = ?`).run(row.id);
+        this.#db
+          .prepare(
+            `INSERT INTO questions (id, key, kind, chat_thread_id, subject, expected_version, card, priority, state, created_at, expires_at)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'queued', ?, ?)`,
+          )
+          .run(
+            `q_${randomUUID()}`,
+            row.key,
+            row.kind,
+            row.subject,
+            row.expected_version,
+            row.card,
+            row.priority,
+            row.created_at,
+            row.expires_at,
+          );
+      }
+    });
+    move();
+  }
+
+  cancel(key: string): void {
+    this.#db
+      .prepare(
+        `UPDATE questions SET state = 'canceled' WHERE key = ? AND state IN ('queued', 'open')`,
+      )
+      .run(key);
+  }
+
+  waiting(): QuestionRow[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM questions WHERE state IN ('queued', 'open') ORDER BY priority DESC, created_at, rowid`,
+      )
+      .all() as RawQuestion[];
+    return rows.map(toRow);
+  }
+
+  next(now: number): QuestionRow | null {
+    this.#db
+      .prepare(
+        `UPDATE questions SET state = 'expired' WHERE state IN ('queued', 'open')
+         AND COALESCE(expires_at, created_at + ?) <= ?`,
+      )
+      .run(QUESTION_TIMEOUT_MS, now);
+    const raw = this.#db
+      .prepare(
+        `SELECT * FROM questions WHERE state IN ('queued', 'open') AND (remind_at IS NULL OR remind_at <= ?)
+         ORDER BY CASE state WHEN 'open' THEN 0 ELSE 1 END, priority DESC, created_at, rowid LIMIT 1`,
+      )
+      .get(now) as RawQuestion | undefined;
+    return raw === undefined ? null : toRow(raw);
+  }
+
+  markOpen(id: string, chatThreadId: string, token: string, now: number): boolean {
+    return (
+      this.#db
+        .prepare(
+          `UPDATE questions SET state = 'open', chat_thread_id = ?, token = ?, opened_at = ?
+           WHERE id = ? AND state IN ('queued', 'open')`,
+        )
+        .run(chatThreadId, token, now, id).changes === 1
+    );
+  }
+
+  requeue(id: string, token: string, remindAt: number | null): void {
+    this.#db
+      .prepare(
+        `UPDATE questions SET state = 'queued', token = NULL, remind_at = ? WHERE id = ? AND token = ? AND state = 'open'`,
+      )
+      .run(remindAt, id, token);
+  }
+
+  requeueUnrecorded(id: string, token: string, now: number): void {
+    const [first, second, later] = UNRECORDED_RETRY_MS;
+    this.#db
+      .prepare(
+        `UPDATE questions SET state = 'queued', token = NULL, unrecorded_answer = unrecorded_answer + 1,
+           remind_at = @now + CASE unrecorded_answer WHEN 0 THEN @first WHEN 1 THEN @second ELSE @later END
+         WHERE id = @id AND token = @token AND state = 'open'`,
+      )
+      .run({ id, token, now, first, second, later });
+  }
+
+  closeAs(id: string, token: string, state: "dismissed" | "expired"): void {
+    this.#db
+      .prepare(`UPDATE questions SET state = ? WHERE id = ? AND token = ? AND state = 'open'`)
+      .run(state, id, token);
+  }
+
+  answer(
+    id: string,
+    token: string,
+    optionId: string,
+    kinds: ReadonlyMap<string, QuestionKind>,
+    now: number,
+  ): AnswerOutcome {
+    const apply = this.#db.transaction((): AnswerOutcome => {
+      const question = this.get(id);
+      if (question?.state === "answered" && question.token === token)
+        return question.answer === optionId ? "recorded" : "rejected";
+      if (question?.state === "stale" && question.token === token) return "stale";
+      if (question === null || question.state !== "open" || question.token !== token)
+        return "unknown";
+      if (!question.card.options.some((option) => option.id === optionId)) return "rejected";
+      if (question.expiresAt <= now) {
+        this.#db.prepare(`UPDATE questions SET state = 'expired' WHERE id = ?`).run(id);
+        return "stale";
+      }
+      const kind = kinds.get(question.kind);
+      if (kind === undefined) return "rejected";
+      if (kind.currentVersion(question.subject) !== question.expectedVersion) {
+        this.#db
+          .prepare(`UPDATE questions SET state = 'stale', answered_at = ? WHERE id = ?`)
+          .run(now, id);
+        return "stale";
+      }
+      if (kind.onAnswer(question, optionId, now) === "stale") {
+        this.#db
+          .prepare(`UPDATE questions SET state = 'stale', answered_at = ? WHERE id = ?`)
+          .run(now, id);
+        return "stale";
+      }
+      this.#db
+        .prepare(
+          `UPDATE questions SET state = 'answered', answer = ?, answered_at = ? WHERE id = ?`,
+        )
+        .run(optionId, now, id);
+      return "applied";
+    });
+    return apply();
+  }
+
+  cardState(id: string, token: string): CardState {
+    const waiting = this.waiting().filter((question) => question.id !== id).length;
+    const question = this.get(id);
+    if (question === null || question.token !== token)
+      return { open: false, decided: null, outdated: null, waiting };
+    return {
+      open: question.state === "open",
+      decided: question.state === "answered" ? question.answer : null,
+      outdated: question.state === "stale" || question.state === "expired" ? question.state : null,
+      waiting,
+    };
+  }
+}
+
+export function newToken(): string {
+  return randomUUID();
+}

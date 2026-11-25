@@ -1,0 +1,39 @@
+{
+  "name": "bb-plugin-1ma-superagent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Суперагент 1ma: запись работ по чатам и PR на двух серверах 1ma и действия Главного бота.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "bb plugin build"
+  },
+  "dependencies": {
+    "@get-bb/plugin-sdk": "0.6.132",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "better-sqlite3": "12.11.1",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0"
+  },
+  "engines": {
+    "bb": ">=0.49",
+    "bbPluginSdk": ">=0.6.132"
+  },
+  "bb": {
+    "name": "1ma Superagent",
+    "description": "Keeps a record of work across the chats and pull requests of two 1ma servers and gives the main bot its actions.",
+    "branding": {
+      "icon": "Workflow"
+    },
+    "server": "./server.ts",
+    "host": "./host.ts",
+    "app": "./app.tsx"
+  }
+}

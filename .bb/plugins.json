@@ -24,6 +24,10 @@
       "source": "./plugins/1ma-auto-updates"
     },
     {
+      "name": "1ma-superagent",
+      "source": "./plugins/1ma-superagent"
+    },
+    {
       "name": "1ma-bots",
       "source": "./plugins/1ma-bots"
     },

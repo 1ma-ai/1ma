@@ -1,0 +1,370 @@
+import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
+import { describe, expect, it } from "vitest";
+import { PASS_SCHEDULE_NAME, createPlugin } from "../server.js";
+import { ActionStore } from "./actions.js";
+import type { SpawnRequest } from "./observation.js";
+import { QuestionStore, questionPayloadSchema } from "./questions.js";
+import { START_TOOL } from "./start-tool.js";
+import { answerCard, fakeExecutor, snapshot } from "./test-helpers.js";
+
+const BOT = "thr_bot";
+const NEW_BOT = "thr_newbot";
+const PROMPT = "Rename the setting, nothing else. Do not touch the release scripts.";
+
+interface Gate {
+  armed: boolean;
+  entered: () => void;
+  release: Promise<void>;
+}
+
+function gate(): Gate & { reached: Promise<void>; open: () => void } {
+  let entered = () => {};
+  let open = () => {};
+  const reached = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { armed: false, entered, release, reached, open };
+}
+
+async function setup(
+  remote = "https://github.com/example/app.git",
+  beforeSnapshot: () => Promise<void> = async () => {},
+) {
+  const spawned: SpawnRequest[] = [];
+  const spawnedElsewhere: SpawnRequest[] = [];
+  const wait = gate();
+  const { bb, harness } = createFakePluginHost({
+    pluginId: "1ma-superagent",
+    settings: { role: "control", mainBotThreadId: BOT, excludedRepos: "example/private" },
+    sdk: { projects: { get: async () => ({ id: "proj_bot", gitRemoteUrl: null }) } },
+  });
+  const linux = fakeExecutor("linux", {
+    snapshot: async () => {
+      await beforeSnapshot();
+      return snapshot([]);
+    },
+    projectRemote: async () => {
+      if (wait.armed) {
+        wait.entered();
+        await wait.release;
+      }
+      return remote;
+    },
+    spawn: async (request) => {
+      spawned.push(request);
+      return { threadId: "thr_task" };
+    },
+  });
+  const otherLinux = fakeExecutor("linux", {
+    snapshot: async () => snapshot([]),
+    projectRemote: async () => remote,
+    spawn: async (request) => {
+      spawnedElsewhere.push(request);
+      return { threadId: "thr_elsewhere" };
+    },
+  });
+  const mac = fakeExecutor("mac", { snapshot: async () => snapshot([]) });
+  await createPlugin({
+    executors: (config) => [
+      mac,
+      config.linuxServerUrl === "http://linux-new:7000" ? otherLinux : linux,
+    ],
+    gh: () => async () => ({ status: "error", message: "unused" }),
+  })(bb);
+  const propose = (threadId = BOT) =>
+    harness.behavior.callAgentTool(
+      START_TOOL,
+      {
+        server: "linux",
+        projectId: "proj_app",
+        providerId: "claude-code",
+        model: "claude-opus-5-5",
+        prompt: PROMPT,
+      },
+      { threadId, projectId: "proj_bot" },
+    );
+  return { bb, harness, spawned, spawnedElsewhere, propose, wait };
+}
+
+async function confirmedWhileTargetIsChecked(t: Awaited<ReturnType<typeof setup>>) {
+  await t.propose();
+  t.wait.armed = true;
+  await answerCard(t.harness, openCard(t.harness), "start");
+  await t.wait.reached;
+  t.wait.armed = false;
+}
+
+function passSettled() {
+  return new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+async function actionState(t: Awaited<ReturnType<typeof setup>>) {
+  const result = await t.harness.behavior.callRpc("work.v1.actions", {});
+  return JSON.stringify(result).match(/"state":"(\w+)"/)?.[1];
+}
+
+function openCard(harness: Awaited<ReturnType<typeof setup>>["harness"]) {
+  const [request] = harness.inspection.pendingInteractions;
+  if (request === undefined) throw new Error("no card");
+  return {
+    id: request.id,
+    threadId: request.threadId,
+    payload: questionPayloadSchema.parse(request.payload),
+  };
+}
+
+describe("sa_start_chat", () => {
+  it("only proposes: the card shows the owner's words verbatim and nothing starts before the answer", async () => {
+    const { harness, spawned, propose } = await setup();
+    const result = await propose();
+    expect(JSON.stringify(result)).toContain("nothing starts until they answer");
+    const card = openCard(harness);
+    expect(card.threadId).toBe(BOT);
+    expect(card.payload.quote).toBe(PROMPT);
+    expect(card.payload.options[0]).toMatchObject({ id: "start", recommended: true });
+    await harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    expect(spawned).toEqual([]);
+    await answerCard(harness, card, "start");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    await harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]).toMatchObject({
+      prompt: PROMPT,
+      projectId: "proj_app",
+      label: { nonce: expect.stringMatching(/^lbl_[0-9a-f]{32}$/) },
+    });
+    await harness.lifecycle.dispose();
+  });
+
+  it("starts nothing when the owner declines", async () => {
+    const { harness, spawned, propose } = await setup();
+    await propose();
+    const card = openCard(harness);
+    await answerCard(harness, card, "no");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    expect(spawned).toEqual([]);
+    await harness.lifecycle.dispose();
+  });
+
+  it("refuses a chat that is not the main bot and a project that is excluded", async () => {
+    const other = await setup();
+    expect(await other.propose("thr_someone")).toMatchObject({ isError: true });
+    expect(other.harness.inspection.pendingInteractions).toEqual([]);
+    await other.harness.lifecycle.dispose();
+    const excluded = await setup("https://github.com/example/private.git");
+    expect(await excluded.propose()).toMatchObject({ isError: true });
+    expect(excluded.harness.inspection.pendingInteractions).toEqual([]);
+    await excluded.harness.lifecycle.dispose();
+  });
+});
+
+describe("settings changed while a confirmed start checks its target", () => {
+  it("sends nothing and cancels with a notice when the project is excluded during the check", async () => {
+    const t = await setup();
+    await confirmedWhileTargetIsChecked(t);
+    await t.harness.behavior.setSettings({ excludedRepos: "example/private, example/app" });
+    t.wait.open();
+    await passSettled();
+    expect(t.spawned).toEqual([]);
+    expect(await actionState(t)).toBe("canceled");
+    expect(t.harness.inspection.pendingInteractions.map((request) => request.title)).toContain(
+      "Запуск чата отменён",
+    );
+    await t.harness.lifecycle.dispose();
+  });
+
+  it("does not send through the old server when its address changes during the check, and the next pass sends through the new one", async () => {
+    const t = await setup();
+    await confirmedWhileTargetIsChecked(t);
+    await t.harness.behavior.setSettings({ linuxServerUrl: "http://linux-new:7000" });
+    t.wait.open();
+    await passSettled();
+    expect(t.spawned).toEqual([]);
+    expect(t.spawnedElsewhere).toHaveLength(1);
+    await t.harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    expect(t.spawned).toEqual([]);
+    expect(t.spawnedElsewhere).toHaveLength(1);
+    await t.harness.lifecycle.dispose();
+  });
+
+  it("proposes nothing when the settings change while the proposal checks its project", async () => {
+    const t = await setup();
+    t.wait.armed = true;
+    const proposal = t.propose();
+    await t.wait.reached;
+    await t.harness.behavior.setSettings({ role: "executor" });
+    t.wait.open();
+    expect(await proposal).toMatchObject({ isError: true });
+    expect(t.harness.inspection.pendingInteractions).toEqual([]);
+    expect(await t.harness.behavior.callRpc("work.v1.actions", {})).toEqual({ actions: [] });
+    await t.harness.lifecycle.dispose();
+  });
+
+  it("sends nothing once the plugin became an executor during the check", async () => {
+    const t = await setup();
+    await confirmedWhileTargetIsChecked(t);
+    await t.harness.behavior.setSettings({ role: "executor" });
+    t.wait.open();
+    await passSettled();
+    await t.harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    expect(t.spawned).toEqual([]);
+    expect(t.spawnedElsewhere).toEqual([]);
+    expect(await actionState(t)).toBe("confirmed");
+    await t.harness.lifecycle.dispose();
+  });
+});
+
+describe("settings that end the control role or the pass earlier in the pass", () => {
+  it.each<Record<string, string | boolean>>([{ role: "executor" }, { passEnabled: false }])(
+    "sends nothing and keeps the start confirmed after %j while the servers are read",
+    async (change) => {
+      const held = gate();
+      held.armed = true;
+      const t = await setup(undefined, async () => {
+        if (!held.armed) return;
+        held.entered();
+        await held.release;
+      });
+      await t.propose();
+      await answerCard(t.harness, openCard(t.harness), "start");
+      await held.reached;
+      held.armed = false;
+      await t.harness.behavior.setSettings(change);
+      held.open();
+      await passSettled();
+      expect(t.spawned).toEqual([]);
+      expect(t.spawnedElsewhere).toEqual([]);
+      expect(await actionState(t)).toBe("confirmed");
+      await t.harness.lifecycle.dispose();
+    },
+  );
+
+  it("proposes nothing while the pass is switched off", async () => {
+    const t = await setup();
+    await t.harness.behavior.setSettings({ passEnabled: false });
+    expect(await t.propose()).toMatchObject({ isError: true });
+    expect(t.harness.inspection.pendingInteractions).toEqual([]);
+    expect(await t.harness.behavior.callRpc("work.v1.actions", {})).toEqual({ actions: [] });
+    await t.harness.lifecycle.dispose();
+  });
+});
+
+describe("a card belongs to the chat and role it was asked in", () => {
+  const decide = (
+    t: Awaited<ReturnType<typeof setup>>,
+    card: ReturnType<typeof openCard>,
+    optionId: string,
+  ) =>
+    t.harness.behavior.callRpc("questions.v1.decide", {
+      questionId: card.payload.questionId,
+      token: card.payload.token,
+      optionId,
+    });
+  const results = (t: Awaited<ReturnType<typeof setup>>) =>
+    new ActionStore(t.bb.storage.database())
+      .recent(10)
+      .map((action) => [action.state, action.result]);
+
+  it("closes the old bot's start cards and shows none of its requests in the newly pinned chat", async () => {
+    const t = await setup();
+    await t.propose();
+    await t.propose();
+    expect(openCard(t.harness).threadId).toBe(BOT);
+    await t.harness.behavior.setSettings({ mainBotThreadId: NEW_BOT });
+    await passSettled();
+    expect(t.harness.inspection.pendingInteractions).toEqual([]);
+    expect(results(t)).toEqual([
+      ["canceled", "its bot chat is no longer the pinned one"],
+      ["canceled", "its bot chat is no longer the pinned one"],
+    ]);
+    await t.harness.lifecycle.dispose();
+  });
+
+  it.each<[string, Record<string, string>, string]>([
+    [
+      "the pinned chat changed",
+      { mainBotThreadId: NEW_BOT },
+      "its bot chat is no longer the pinned one",
+    ],
+    ["the role became executor", { role: "executor" }, "this server is no longer the control"],
+  ])("refuses an old card's start as stale after %s", async (_name, change, result) => {
+    const t = await setup();
+    await t.propose();
+    const card = openCard(t.harness);
+    await t.harness.behavior.setSettings(change);
+    expect(await decide(t, card, "start")).toEqual({ outcome: "stale" });
+    await t.harness.behavior.setSettings({ role: "control" });
+    await t.harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    await passSettled();
+    expect(t.spawned).toEqual([]);
+    expect(results(t)).toEqual([["canceled", result]]);
+    await t.harness.lifecycle.dispose();
+  });
+
+  it("moves an owner's question to the newly pinned chat with a new token", async () => {
+    const t = await setup();
+    new QuestionStore(t.bb.storage.database()).ask(
+      {
+        key: "notice:fixture",
+        kind: "notice",
+        subject: "fixture",
+        expectedVersion: "1",
+        card: {
+          title: "Fixture notice",
+          observed: "observed",
+          affected: "affected",
+          recommendation: "recommendation",
+          options: [{ id: "ok", label: "OK", recommended: true }],
+        },
+        priority: 40,
+      },
+      Date.now(),
+    );
+    await t.harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    await passSettled();
+    const old = openCard(t.harness);
+    expect(old.threadId).toBe(BOT);
+    await t.harness.behavior.setSettings({ mainBotThreadId: NEW_BOT });
+    await passSettled();
+    const moved = openCard(t.harness);
+    expect(t.harness.inspection.pendingInteractions).toHaveLength(1);
+    expect(moved.threadId).toBe(NEW_BOT);
+    expect(moved.payload.title).toBe("Fixture notice");
+    expect(moved.payload.token).not.toBe(old.payload.token);
+    expect(await decide(t, old, "ok")).toEqual({ outcome: "stale" });
+    expect(await decide(t, moved, "ok")).toEqual({ outcome: "applied" });
+    await t.harness.lifecycle.dispose();
+  });
+
+  it("records a start decided during a pause and sends nothing until the pass is on again", async () => {
+    const t = await setup();
+    await t.propose();
+    const card = openCard(t.harness);
+    await t.harness.behavior.setSettings({ passEnabled: false });
+    expect(openCard(t.harness).id).toBe(card.id);
+    expect(await decide(t, card, "start")).toEqual({ outcome: "applied" });
+    await t.harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    await passSettled();
+    expect(t.spawned).toEqual([]);
+    expect(results(t)).toEqual([["confirmed", null]]);
+    await t.harness.lifecycle.dispose();
+  });
+});
+
+describe("work.v1.actions", () => {
+  it("lists the bot's proposals with their state and without the owner's words", async () => {
+    const { harness, propose } = await setup();
+    await propose();
+    const result = await harness.behavior.callRpc("work.v1.actions", {});
+    expect(result).toMatchObject({
+      actions: [{ kind: "spawn_thread", serverId: "linux", state: "proposed", attempt: 1 }],
+    });
+    expect(JSON.stringify(result)).not.toContain(PROMPT);
+    await harness.lifecycle.dispose();
+  });
+});
