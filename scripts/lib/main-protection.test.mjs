@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
-import { run } from "./main-protection.mjs";
+import { ghRunner, run } from "./main-protection.mjs";
 
 const text = readFileSync(new URL("../../.github/main-protection.json", import.meta.url), "utf8");
 const wanted = JSON.parse(text);
 const REPOSITORY = "repos/1ma-ai/1ma";
 const PROTECTION = `${REPOSITORY}/branches/main/protection`;
 const ACTIONS = `${REPOSITORY}/actions/permissions`;
+const RULES = `${REPOSITORY}/rules/branches/main`;
+const FILE = `${REPOSITORY}/contents/.github/main-protection.json?ref=main`;
 
 // An answer as gh --include prints it: the status line, the headers, an empty
 // line, the body.
@@ -35,6 +37,7 @@ function ruleOf(classic) {
 function github(change = () => {}) {
   const on = (enabled) => ({ url: "https://api.github.com/x", enabled });
   const state = {
+    name: wanted.repository,
     actions: { ...wanted.actions, selected_actions_url: "https://api.github.com/x" },
     protection: {
       url: "https://api.github.com/x",
@@ -92,13 +95,14 @@ function github(change = () => {}) {
   };
   const respond = (method, address, body) => {
     if (method === "GET") {
-      if (address === `${REPOSITORY}/actions/permissions`) return answer(state.actions);
+      if (address === REPOSITORY) return answer({ full_name: state.name, private: false });
+      if (address === ACTIONS) return answer(state.actions);
       if (address === PROTECTION)
         return state.protection === null
           ? refuse("Branch not protected", 404)
           : answer(state.protection);
-      if (address === `${REPOSITORY}/rules/branches/main`) return answer(state.rules);
-      if (address === `${REPOSITORY}/contents/.github/main-protection.json?ref=main`)
+      if (address === RULES) return answer(state.rules);
+      if (address === FILE)
         return state.file === null
           ? refuse("Not Found", 404)
           : answer({ content: Buffer.from(state.file).toString("base64"), encoding: "base64" });
@@ -258,7 +262,7 @@ describe("comparing GitHub with the file", () => {
           branch: "main",
           ref: "refs/heads/main",
         });
-      else assert.ok(address.startsWith(`${REPOSITORY}/`), address);
+      else assert.ok(address === REPOSITORY || address.startsWith(`${REPOSITORY}/`), address);
   });
 
   test("names a deployment a classic rule for the branch requires, which the REST answer leaves out", () => {
@@ -327,9 +331,9 @@ describe("comparing GitHub with the file", () => {
       }),
       () => ({ status: 0, stdout: included(200, '{"data":{"repository":null}}'), stderr: "" }),
       () => ({
-        status: 1,
+        status: 0,
         stdout: included(200, JSON.stringify({ errors: [{ message: "Something went wrong" }] })),
-        stderr: "gh: Something went wrong\n",
+        stderr: "",
       }),
     ];
     for (const given of broken) {
@@ -338,6 +342,76 @@ describe("comparing GitHub with the file", () => {
       });
       assert.throws(() => hub.call(), /branch protection rule of main could not be read/u);
       assert.deepEqual(hub.output, []);
+    }
+    const failed = github((state) => {
+      state.answers["POST graphql"] = () => ({
+        status: 1,
+        stdout: included(200, JSON.stringify({ errors: [{ message: "Something went wrong" }] })),
+        stderr: "gh: Something went wrong\n",
+      });
+    });
+    assert.throws(() => failed.call(), /POST graphql: the answer could not be read \(HTTP 200\)/u);
+  });
+
+  test("stops before anything else is read when GitHub answers for another repository", () => {
+    for (const apply of [false, true]) {
+      const hub = github((state) => {
+        state.name = "1ma-ai/renamed";
+        state.protection = null;
+      });
+      assert.throws(
+        () => hub.call(apply),
+        /GitHub answers for 1ma-ai\/renamed, not for 1ma-ai\/1ma, .*correct "repository"/u,
+      );
+      assert.deepEqual(hub.asked, [{ method: "GET", address: REPOSITORY, body: undefined }]);
+      assert.deepEqual(hub.output, []);
+    }
+  });
+
+  test("does not take an answer that was not read whole, or not of its kind, for a state of GitHub", () => {
+    const kept = (change) => (_, read) => change(read());
+    const cut = {
+      "an empty body": () => ({ status: 0, stdout: included(200), stderr: "" }),
+      "a body cut short": kept((done) => ({ ...done, stdout: done.stdout.slice(0, -3) })),
+      "a status line from a gh that failed": kept((done) => ({
+        ...done,
+        status: 1,
+        stderr: "gh: unexpected EOF\n",
+      })),
+      null: () => ({ status: 0, stdout: included(200, "null"), stderr: "" }),
+    };
+    const kinds = {
+      [`GET ${REPOSITORY}`]: [[], { private: false }],
+      [`GET ${ACTIONS}`]: [[], { enabled: true }],
+      [`GET ${PROTECTION}`]: [[], { required_status_checks: { checks: [null] } }],
+      [`GET ${RULES}`]: [{}, [null]],
+      ["POST graphql"]: [[]],
+      [`GET ${FILE}`]: [[], { content: 5 }],
+    };
+    for (const [key, wrong] of Object.entries(kinds)) {
+      const answers = {
+        ...cut,
+        ...Object.fromEntries(
+          wrong.map((value) => [
+            JSON.stringify(value),
+            () => ({ status: 0, stdout: included(200, JSON.stringify(value)), stderr: "" }),
+          ]),
+        ),
+      };
+      for (const [what, given] of Object.entries(answers)) {
+        const hub = github((state) => {
+          if (key === `GET ${FILE}`) state.actions.sha_pinning_required = false;
+          state.answers[key] = given;
+        });
+        assert.throws(
+          () => hub.call(true),
+          (error) =>
+            error.message === `${key}: the answer could not be read (HTTP 200)` &&
+            !(error instanceof TypeError),
+          `${key}, ${what}`,
+        );
+        assert.deepEqual(hub.written(), [], `${key}, ${what}`);
+      }
     }
   });
 });
@@ -414,7 +488,7 @@ describe("applying the file", () => {
     }
   });
 
-  test("says what was written when a later write fails, and reads both states again", () => {
+  test("says what was written when a later write is refused, from the state read after each write", () => {
     const hub = github((state) => {
       state.protection = null;
       state.actions.sha_pinning_required = false;
@@ -422,147 +496,184 @@ describe("applying the file", () => {
     });
     assert.equal(hub.call(true), 1);
     const output = hub.output.join("\n");
-    assert.match(output, /Writing branch protection failed: PUT .*: Validation Failed/u);
+    assert.match(
+      output,
+      /Not written: branch protection\. GitHub still differs from the file in protection; the answer was PUT .*: Validation Failed \(HTTP 422\)\./u,
+    );
     assert.match(output, /Already written: actions\./u);
     assert.match(output, /GitHub still differs from the file:\n- protection: GitHub has null/u);
-    assert.doesNotMatch(output.split("GitHub still differs")[1], /actions\./u);
-    const afterFailure = hub.asked.slice(
-      hub.asked.findLastIndex((entry) => entry.method === "PUT"),
-    );
+    assert.doesNotMatch(output.split("GitHub still differs from the file:")[1], /actions\./u);
+    const reads = [`GET ${ACTIONS}`, `GET ${PROTECTION}`, `GET ${RULES}`, "POST graphql"];
     assert.deepEqual(
-      afterFailure.slice(1).map(({ method, address }) => `${method} ${address}`),
+      hub.asked.map(({ method, address }) => `${method} ${address}`),
       [
-        `GET ${REPOSITORY}/actions/permissions`,
-        `GET ${PROTECTION}`,
-        `GET ${REPOSITORY}/rules/branches/main`,
-        "POST graphql",
+        `GET ${REPOSITORY}`,
+        ...reads,
+        `GET ${FILE}`,
+        `PUT ${ACTIONS}`,
+        ...reads,
+        `PUT ${PROTECTION}`,
+        ...reads,
       ],
     );
   });
 
-  test("stops at the first failed write and says nothing was written", () => {
+  test("stops at a refused first write and says nothing was written", () => {
     const hub = github((state) => {
       state.protection = null;
       state.actions.sha_pinning_required = false;
-      state.fails[`PUT ${REPOSITORY}/actions/permissions`] = ["Must have admin rights", 403];
+      state.fails[`PUT ${ACTIONS}`] = ["Must have admin rights", 403];
     });
     assert.equal(hub.call(true), 1);
     assert.equal(hub.written().length, 1);
-    assert.match(hub.output.join("\n"), /Nothing was written\./u);
+    assert.match(
+      hub.output.join("\n"),
+      /Not written: actions\. .*the answer was PUT .*: Must have admin rights \(HTTP 403\)\.\nNothing was written\./u,
+    );
   });
 
-  test("after a write whose answer broke off, reads GitHub again and says what is there", () => {
+  test("does not take a write answered by the 200 of the GET a redirect made of it for written", () => {
     const hub = github((state) => {
       state.protection = null;
       state.actions.sha_pinning_required = false;
-      state.answers[`PUT ${PROTECTION}`] = (_, write) => ({
-        ...write(),
-        stdout: included(200, "{"),
+      state.answers[`PUT ${ACTIONS}`] = (now) => ({
+        status: 0,
+        stdout: included(200, JSON.stringify(now.actions)),
+        stderr: "",
       });
     });
-    assert.equal(hub.call(true), 0);
-    const output = hub.output.join("\n");
-    assert.match(output, /Written: actions, branch protection\./u);
-    assert.match(hub.output.at(-1), /is now protected as the file says/u);
-    assert.equal(hub.asked.at(-1).address, "graphql");
-  });
-
-  test("does not say nothing was written when the first write's answer did not arrive", () => {
-    const hub = github((state) => {
-      state.protection = null;
-      state.actions.sha_pinning_required = false;
-      state.answers[`PUT ${REPOSITORY}/actions/permissions`] = (_, write) => {
-        write();
-        return {
-          status: 1,
-          stdout: "",
-          stderr: 'Put "https://api.github.com/x": read tcp: connection reset by peer\n',
-        };
-      };
-    });
     assert.equal(hub.call(true), 1);
+    assert.deepEqual(
+      hub.written().map(({ method, address }) => `${method} ${address}`),
+      [`PUT ${ACTIONS}`],
+    );
     const output = hub.output.join("\n");
-    assert.doesNotMatch(output, /Nothing was written/u);
     assert.match(
       output,
-      /Writing actions: .*connection reset by peer.*unknown whether it was written/u,
+      /Not written: actions\. GitHub answered success \(PUT .*: HTTP 200\), yet it still differs from the file in actions\.sha_pinning_required\.\nNothing was written\./u,
     );
-    assert.equal(hub.written().length, 1);
-    const after = output.split("GitHub still differs from the file:")[1];
-    assert.match(after, /- protection: GitHub has null/u);
-    assert.doesNotMatch(after, /actions\./u);
+    assert.doesNotMatch(output, /^Written:/mu);
   });
 
-  test("says what was written and what is unknown before it fails to read GitHub again", () => {
+  test("says a write GitHub answered with success is not written when GitHub still shows the old state", () => {
+    const hub = github((state) => {
+      state.protection.required_signatures.enabled = true;
+      state.answers[`DELETE ${PROTECTION}/required_signatures`] = empty;
+    });
+    assert.equal(hub.call(true), 1);
+    assert.match(
+      hub.output.join("\n"),
+      /Not written: required signatures\. GitHub answered success \(DELETE .*: HTTP 204\), yet it still differs from the file in required_signatures\./u,
+    );
+    assert.match(hub.output.at(-1), /- required_signatures: GitHub has true/u);
+  });
+
+  test("takes a write that GitHub shows done for written whatever its answer, and goes on", () => {
+    const lost = {
+      "a server error": () => ({
+        status: 1,
+        stdout: included(502, JSON.stringify({ message: "Server Error" })),
+        stderr: "gh: Server Error (HTTP 502)\n",
+      }),
+      "no answer": () => ({
+        status: 1,
+        stdout: "",
+        stderr: 'Put "https://api.github.com/x": read tcp: connection reset by peer\n',
+      }),
+      "a gh that timed out": () => {
+        throw Object.assign(new Error("spawnSync gh ETIMEDOUT"), { code: "ETIMEDOUT" });
+      },
+      "a body cut short": () => ({ status: 0, stdout: included(200, "{"), stderr: "" }),
+    };
+    for (const [what, given] of Object.entries(lost)) {
+      const hub = github((state) => {
+        state.protection = null;
+        state.actions.sha_pinning_required = false;
+        state.answers[`PUT ${ACTIONS}`] = (_, write) => {
+          write();
+          return given();
+        };
+      });
+      assert.equal(hub.call(true), 0, what);
+      assert.deepEqual(
+        hub.written().map(({ method, address }) => `${method} ${address}`),
+        [`PUT ${ACTIONS}`, `PUT ${PROTECTION}`],
+        what,
+      );
+      const output = hub.output.join("\n");
+      assert.doesNotMatch(output, /Not written|Nothing was written/u, what);
+      if (what !== "a body cut short")
+        assert.match(
+          output,
+          /actions: GitHub shows it written, although the answer was PUT /u,
+          what,
+        );
+      assert.match(output, /Written: actions, branch protection\./u, what);
+      assert.match(hub.output.at(-1), /is now protected as the file says/u, what);
+    }
+  });
+
+  test("says what was written and what is not known when GitHub cannot be read after a write", () => {
     const hub = github((state) => {
       state.protection = null;
       state.actions.sha_pinning_required = false;
     });
     const { state } = hub;
     state.answers[`PUT ${PROTECTION}`] = () => {
-      state.unreachable.add(`GET ${REPOSITORY}/actions/permissions`);
+      state.unreachable.add(`GET ${ACTIONS}`);
       throw new Error("spawnSync gh ETIMEDOUT");
     };
     assert.throws(() => hub.call(true), /ENOENT/u);
     assert.deepEqual(hub.output.slice(-2), [
-      "Writing branch protection: no answer says whether it succeeded (spawnSync gh ETIMEDOUT), " +
-        "so it is unknown whether it was written.",
-      "Already written: actions.",
+      "Written: actions.",
+      "Writing branch protection: GitHub could not be read after it, so it is not known " +
+        `whether it was written (the answer was PUT ${PROTECTION}: no answer (spawnSync gh ETIMEDOUT)).`,
     ]);
   });
 
-  test("does not say nothing was written when GitHub answers the first write with a server error", () => {
+  test("sends no further write when GitHub cannot be read after the first of two", () => {
     const hub = github((state) => {
       state.protection = null;
       state.actions.sha_pinning_required = false;
-      state.answers[`PUT ${REPOSITORY}/actions/permissions`] = (_, write) => {
-        write();
-        return {
-          status: 1,
-          stdout: included(502, JSON.stringify({ message: "Server Error" })),
-          stderr: "gh: Server Error (HTTP 502)\n",
-        };
+      state.answers[`PUT ${ACTIONS}`] = (now, write) => {
+        now.unreachable.add(`GET ${ACTIONS}`);
+        return write();
       };
     });
-    assert.equal(hub.call(true), 1);
-    const output = hub.output.join("\n");
-    assert.doesNotMatch(output, /Nothing was written|failed/u);
-    assert.match(output, /Writing actions: .*Server Error.*unknown whether it was written/u);
-    assert.equal(hub.written().length, 1);
-    const after = output.split("GitHub still differs from the file:")[1];
-    assert.match(after, /- protection: GitHub has null/u);
-    assert.doesNotMatch(after, /actions\./u);
+    assert.throws(() => hub.call(true), /ENOENT/u);
+    assert.deepEqual(
+      hub.written().map(({ method, address }) => `${method} ${address}`),
+      [`PUT ${ACTIONS}`],
+    );
+    assert.deepEqual(hub.output.slice(-1), [
+      "Writing actions: GitHub could not be read after it, so it is not known " +
+        `whether it was written (the answer was PUT ${ACTIONS}: HTTP 204).`,
+    ]);
   });
 
-  test("takes the status of a write from the answer, not from a code its message holds", () => {
+  test("explains a write that is not written by the status of its answer, not by a code its message holds", () => {
     for (const address of [ACTIONS, PROTECTION]) {
       const hub = github((state) => {
         if (address === ACTIONS) state.actions.sha_pinning_required = false;
         else state.protection = null;
-        state.answers[`PUT ${address}`] = (_, write) => {
-          write();
-          return {
-            status: 1,
-            stdout: included(502, JSON.stringify({ message: "upstream failed (HTTP 422)" })),
-            stderr: "gh: upstream failed (HTTP 422) (HTTP 502)\n",
-          };
-        };
+        state.answers[`PUT ${address}`] = () => ({
+          status: 1,
+          stdout: included(502, JSON.stringify({ message: "upstream failed (HTTP 422)" })),
+          stderr: "gh: upstream failed (HTTP 422) (HTTP 502)\n",
+        });
       });
       assert.equal(hub.call(true), 1, address);
       const output = hub.output.join("\n");
-      assert.doesNotMatch(output, /Nothing was written|failed:/u, address);
       assert.match(
         output,
-        /no answer says whether it succeeded \(PUT .*: upstream failed \(HTTP 422\) \(HTTP 502\)\)/u,
+        /; the answer was PUT .*: upstream failed \(HTTP 422\) \(HTTP 502\)\.\nNothing was written\./u,
         address,
       );
-      assert.match(hub.output.at(-1), /is now protected as the file says/u, address);
-      assert.equal(hub.asked.at(-1).address, "graphql", address);
       assert.doesNotMatch(output, new RegExp(HEADER, "u"), address);
     }
   });
 
-  test("refuses a write by its status whether the body is GitHub's JSON or text", () => {
+  test("explains a refused write by its status whether the body is GitHub's JSON or text", () => {
     for (const [stdout, stderr] of [
       [
         included(429, JSON.stringify({ message: "API rate limit exceeded" })),
@@ -576,24 +687,37 @@ describe("applying the file", () => {
       });
       assert.equal(hub.call(true), 1);
       const output = hub.output.join("\n");
-      assert.match(output, /Writing actions failed: PUT .*\(HTTP 429\)\nNothing was written\./u);
+      assert.match(
+        output,
+        /Not written: actions\. .*the answer was PUT .*\(HTTP 429\)\.\nNothing was written\./u,
+      );
       assert.doesNotMatch(output, new RegExp(HEADER, "u"));
     }
   });
 
-  test("takes a write whose gh timed out for one that may be done", () => {
-    const hub = github((state) => {
-      state.actions.sha_pinning_required = false;
-      state.answers[`PUT ${ACTIONS}`] = (_, write) => {
-        write();
-        throw Object.assign(new Error("spawnSync gh ETIMEDOUT"), { code: "ETIMEDOUT" });
-      };
-    });
-    assert.equal(hub.call(true), 1);
-    const output = hub.output.join("\n");
-    assert.doesNotMatch(output, /Nothing was written/u);
-    assert.match(output, /Writing actions: .*ETIMEDOUT.*unknown whether it was written/u);
-    assert.match(hub.output.at(-1), /is now protected as the file says/u);
+  test("says of a write without an answer only the last line gh printed, and only so much of it", () => {
+    const long = `Put "https://api.github.com/x": ${"x".repeat(1000)}`;
+    for (const [stderr, said] of [
+      [
+        "* Request at 2026-11-25 10:00:00\n> PUT /repos/1ma-ai/1ma/actions/permissions HTTP/1.1\n" +
+          "> Authorization: token gho_0123456789\n< HTTP/2.0 301 Moved Permanently\n" +
+          `< Location: https://api.github.com/repositories/1\n\n  ${long}  \n\n`,
+        `${long.slice(0, 300)}…`,
+      ],
+      ["", "gh printed nothing"],
+    ]) {
+      const hub = github((state) => {
+        state.actions.sha_pinning_required = false;
+        state.answers[`PUT ${ACTIONS}`] = () => ({ status: 1, stdout: "", stderr });
+      });
+      assert.equal(hub.call(true), 1);
+      const output = hub.output.join("\n");
+      assert.ok(
+        output.includes(`the answer was PUT ${ACTIONS}: no answer (${said}).`),
+        output.slice(0, 2000),
+      );
+      assert.doesNotMatch(output, /Authorization|Location|x{301}/u);
+    }
   });
 
   test("cannot change what only the classic rules hold, and says so", () => {
@@ -629,5 +753,18 @@ describe("applying the file", () => {
     assert.equal(hub.call(true), 1);
     assert.deepEqual(hub.written(), []);
     assert.match(hub.output.at(-1), /this script does not change them/u);
+  });
+});
+
+describe("running gh", () => {
+  test("ends a gh that does not end in time, even one that ignores SIGTERM", () => {
+    const gh = ghRunner({ program: process.execPath, timeout: 2_000 });
+    assert.equal(gh(["-e", "process.stdout.write('done')"]).stdout, "done");
+    const started = Date.now();
+    assert.throws(
+      () => gh(["-e", "process.on('SIGTERM', () => {}); setTimeout(() => {}, 30_000);"]),
+      { code: "ETIMEDOUT" },
+    );
+    assert.ok(Date.now() - started < 15_000, `held for ${Date.now() - started} ms`);
   });
 });
