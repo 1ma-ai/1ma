@@ -1,12 +1,14 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it } from "vitest";
 import { PASS_SCHEDULE_NAME, createPlugin } from "../server.js";
+import { ActionStore } from "./actions.js";
 import type { SpawnRequest } from "./observation.js";
-import { questionPayloadSchema } from "./questions.js";
+import { QuestionStore, questionPayloadSchema } from "./questions.js";
 import { START_TOOL } from "./start-tool.js";
 import { answerCard, fakeExecutor, snapshot } from "./test-helpers.js";
 
 const BOT = "thr_bot";
+const NEW_BOT = "thr_newbot";
 const PROMPT = "Rename the setting, nothing else. Do not touch the release scripts.";
 
 interface Gate {
@@ -84,7 +86,7 @@ async function setup(
       },
       { threadId, projectId: "proj_bot" },
     );
-  return { harness, spawned, spawnedElsewhere, propose, wait };
+  return { bb, harness, spawned, spawnedElsewhere, propose, wait };
 }
 
 async function confirmedWhileTargetIsChecked(t: Awaited<ReturnType<typeof setup>>) {
@@ -248,6 +250,108 @@ describe("settings that end the control role or the pass earlier in the pass", (
     expect(await t.propose()).toMatchObject({ isError: true });
     expect(t.harness.inspection.pendingInteractions).toEqual([]);
     expect(await t.harness.behavior.callRpc("work.v1.actions", {})).toEqual({ actions: [] });
+    await t.harness.lifecycle.dispose();
+  });
+});
+
+describe("a card belongs to the chat and role it was asked in", () => {
+  const decide = (
+    t: Awaited<ReturnType<typeof setup>>,
+    card: ReturnType<typeof openCard>,
+    optionId: string,
+  ) =>
+    t.harness.behavior.callRpc("questions.v1.decide", {
+      questionId: card.payload.questionId,
+      token: card.payload.token,
+      optionId,
+    });
+  const results = (t: Awaited<ReturnType<typeof setup>>) =>
+    new ActionStore(t.bb.storage.database())
+      .recent(10)
+      .map((action) => [action.state, action.result]);
+
+  it("closes the old bot's start cards and shows none of its requests in the newly pinned chat", async () => {
+    const t = await setup();
+    await t.propose();
+    await t.propose();
+    expect(openCard(t.harness).threadId).toBe(BOT);
+    await t.harness.behavior.setSettings({ mainBotThreadId: NEW_BOT });
+    await passSettled();
+    expect(t.harness.inspection.pendingInteractions).toEqual([]);
+    expect(results(t)).toEqual([
+      ["canceled", "its bot chat is no longer the pinned one"],
+      ["canceled", "its bot chat is no longer the pinned one"],
+    ]);
+    await t.harness.lifecycle.dispose();
+  });
+
+  it.each<[string, Record<string, string>, string]>([
+    [
+      "the pinned chat changed",
+      { mainBotThreadId: NEW_BOT },
+      "its bot chat is no longer the pinned one",
+    ],
+    ["the role became executor", { role: "executor" }, "this server is no longer the control"],
+  ])("refuses an old card's start as stale after %s", async (_name, change, result) => {
+    const t = await setup();
+    await t.propose();
+    const card = openCard(t.harness);
+    await t.harness.behavior.setSettings(change);
+    expect(await decide(t, card, "start")).toEqual({ outcome: "stale" });
+    await t.harness.behavior.setSettings({ role: "control" });
+    await t.harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    await passSettled();
+    expect(t.spawned).toEqual([]);
+    expect(results(t)).toEqual([["canceled", result]]);
+    await t.harness.lifecycle.dispose();
+  });
+
+  it("moves an owner's question to the newly pinned chat with a new token", async () => {
+    const t = await setup();
+    new QuestionStore(t.bb.storage.database()).ask(
+      {
+        key: "notice:fixture",
+        kind: "notice",
+        subject: "fixture",
+        expectedVersion: "1",
+        card: {
+          title: "Fixture notice",
+          observed: "observed",
+          affected: "affected",
+          recommendation: "recommendation",
+          options: [{ id: "ok", label: "OK", recommended: true }],
+        },
+        priority: 40,
+      },
+      Date.now(),
+    );
+    await t.harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    await passSettled();
+    const old = openCard(t.harness);
+    expect(old.threadId).toBe(BOT);
+    await t.harness.behavior.setSettings({ mainBotThreadId: NEW_BOT });
+    await passSettled();
+    const moved = openCard(t.harness);
+    expect(t.harness.inspection.pendingInteractions).toHaveLength(1);
+    expect(moved.threadId).toBe(NEW_BOT);
+    expect(moved.payload.title).toBe("Fixture notice");
+    expect(moved.payload.token).not.toBe(old.payload.token);
+    expect(await decide(t, old, "ok")).toEqual({ outcome: "stale" });
+    expect(await decide(t, moved, "ok")).toEqual({ outcome: "applied" });
+    await t.harness.lifecycle.dispose();
+  });
+
+  it("records a start decided during a pause and sends nothing until the pass is on again", async () => {
+    const t = await setup();
+    await t.propose();
+    const card = openCard(t.harness);
+    await t.harness.behavior.setSettings({ passEnabled: false });
+    expect(openCard(t.harness).id).toBe(card.id);
+    expect(await decide(t, card, "start")).toEqual({ outcome: "applied" });
+    await t.harness.behavior.runSchedule(PASS_SCHEDULE_NAME);
+    await passSettled();
+    expect(t.spawned).toEqual([]);
+    expect(results(t)).toEqual([["confirmed", null]]);
     await t.harness.lifecycle.dispose();
   });
 });

@@ -160,6 +160,40 @@ export class QuestionStore {
     return raw === undefined ? null : toRow(raw);
   }
 
+  retire(key: string): void {
+    this.#db
+      .prepare(`UPDATE questions SET state = 'stale' WHERE key = ? AND state IN ('queued', 'open')`)
+      .run(key);
+  }
+
+  moveOpenCards(chat: string | null): void {
+    const move = this.#db.transaction(() => {
+      const rows = this.#db
+        .prepare(`SELECT * FROM questions WHERE state = 'open' AND chat_thread_id IS NOT ?`)
+        .all(chat) as RawQuestion[];
+      for (const row of rows) {
+        this.#db.prepare(`UPDATE questions SET state = 'stale' WHERE id = ?`).run(row.id);
+        this.#db
+          .prepare(
+            `INSERT INTO questions (id, key, kind, chat_thread_id, subject, expected_version, card, priority, state, created_at, expires_at)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'queued', ?, ?)`,
+          )
+          .run(
+            `q_${randomUUID()}`,
+            row.key,
+            row.kind,
+            row.subject,
+            row.expected_version,
+            row.card,
+            row.priority,
+            row.created_at,
+            row.expires_at,
+          );
+      }
+    });
+    move();
+  }
+
   cancel(key: string): void {
     this.#db
       .prepare(
@@ -240,6 +274,7 @@ export class QuestionStore {
       const question = this.get(id);
       if (question?.state === "answered" && question.token === token)
         return question.answer === optionId ? "recorded" : "rejected";
+      if (question?.state === "stale" && question.token === token) return "stale";
       if (question === null || question.state !== "open" || question.token !== token)
         return "unknown";
       if (!question.card.options.some((option) => option.id === optionId)) return "rejected";

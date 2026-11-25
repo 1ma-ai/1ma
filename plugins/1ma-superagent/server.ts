@@ -21,6 +21,8 @@ import {
   REVIVED_KIND,
   revivedKind,
   runActions,
+  type ProposalOwner,
+  retireForeignProposals,
   startKind,
   unknownKind,
 } from "./src/action-runner.js";
@@ -119,11 +121,6 @@ export function createPlugin(options: SuperagentOptions = {}) {
       if (problem !== null) bb.log.warn(`watched repositories setting ignored: ${problem}`);
     };
     warnRepos(initial.repos);
-    settings.onChange((next) => {
-      config = toConfig(next);
-      generation += 1;
-      warnRepos(next.repos);
-    });
 
     const db = bb.storage.database();
     bb.storage.migrate(db, MIGRATIONS);
@@ -139,7 +136,7 @@ export function createPlugin(options: SuperagentOptions = {}) {
     const kinds = new Map<string, QuestionKind>([
       [UNLINKED_KIND, unlinkedKind(prStore, store)],
       [CONFLICT_KIND, conflictKind(prStore, store)],
-      [START_KIND, startKind(actions)],
+      [START_KIND, startKind(actions, () => proposalOwner())],
       [UNKNOWN_KIND, unknownKind(actions)],
       [AMBIGUOUS_KIND, ambiguousKind()],
       [NOTICE_KIND, noticeKind()],
@@ -173,6 +170,20 @@ export function createPlugin(options: SuperagentOptions = {}) {
       signal: lifecycle.signal,
       changed: () => bb.rpc.experimental_invalidate([QUESTIONS_TAG]),
     });
+    const proposalOwner = (): ProposalOwner => ({
+      chat: config.mainBotThreadId,
+      control: config.role === "control",
+    });
+    settings.onChange((next) => {
+      const pinned = config.mainBotThreadId;
+      config = toConfig(next);
+      generation += 1;
+      warnRepos(next.repos);
+      retireForeignProposals(actions, questions, proposalOwner(), Date.now());
+      if (config.mainBotThreadId !== pinned) questions.moveOpenCards(config.mainBotThreadId);
+      dispatcher.closeOutdated();
+    });
+    retireForeignProposals(actions, questions, proposalOwner(), Date.now());
     const executorsFor = options.executors ?? defaultExecutors;
     let built: { generation: number; executors: readonly Executor[] } | null = null;
     const currentExecutors = () => {

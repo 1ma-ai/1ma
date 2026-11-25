@@ -130,6 +130,18 @@ export class QuestionDispatcher {
       );
   }
 
+  closeOutdated(): void {
+    const live = this.#live;
+    if (live !== null) {
+      const question = this.#deps.store.get(live.questionId);
+      if (question?.state !== "open" || question.token !== live.token) {
+        live.close.abort();
+        return;
+      }
+    }
+    this.dispatch();
+  }
+
   #closeWhenSettled(live: LiveCard): void {
     if (live.timer !== null) return;
     const question = this.#deps.store.get(live.questionId);

@@ -26,6 +26,31 @@ export const STOPPING_LATE = "stopping late";
 export const STOPPED_LATE = "stopped late";
 export const RELEASED_LATE = "kept by the owner";
 export const REVIVED_KIND = "revived_chat";
+export const PROPOSAL_UNPINNED = "its bot chat is no longer the pinned one";
+export const PROPOSAL_NOT_CONTROL = "this server is no longer the control";
+
+export interface ProposalOwner {
+  readonly chat: string | null;
+  readonly control: boolean;
+}
+
+function foreignReason(action: ActionRow, owner: ProposalOwner): string | null {
+  if (!owner.control) return PROPOSAL_NOT_CONTROL;
+  return action.botThreadId === owner.chat ? null : PROPOSAL_UNPINNED;
+}
+
+export function retireForeignProposals(
+  actions: ActionStore,
+  questions: QuestionStore,
+  owner: ProposalOwner,
+  now: number,
+): void {
+  for (const action of actions.inStates(["proposed"])) {
+    const result = foreignReason(action, owner);
+    if (result !== null && actions.transition(action.id, ["proposed"], "canceled", now, { result }))
+      questions.retire(`${START_KIND}:${action.id}`);
+  }
+}
 
 export interface ActionDeps {
   readonly actions: ActionStore;
@@ -91,9 +116,12 @@ export function revivedKind(actions: ActionStore): QuestionKind {
   };
 }
 
-export function startKind(actions: ActionStore): QuestionKind {
+export function startKind(actions: ActionStore, owner: () => ProposalOwner): QuestionKind {
   return {
-    currentVersion: (subject) => actions.get(subject)?.state ?? null,
+    currentVersion: (subject) => {
+      const action = actions.get(subject);
+      return action === null || foreignReason(action, owner()) !== null ? null : action.state;
+    },
     onAnswer(question, optionId, now) {
       if (optionId === "start")
         actions.transition(question.subject, ["proposed"], "confirmed", now);
