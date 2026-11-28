@@ -5,25 +5,19 @@ on:
     branches: [main]
     paths:
       - "desktop/**"
-      - "!desktop/**/*.md"
       - "brand/**"
       - "plugins/1ma-brand/**"
       - "plugins/1ma-theme/**"
       - "plugins/1ma-server-switcher/**"
       - "plugins/1ma-auto-updates/**"
+      - "package.json"
+      - "pnpm-workspace.yaml"
       - "pnpm-lock.yaml"
       - ".github/workflows/desktop.yml"
+      - "scripts/lib/changed-paths.mjs"
+      - "scripts/lib/workflow-result.mjs"
+      - "!desktop/**/*.md"
   pull_request:
-    paths:
-      - "desktop/**"
-      - "!desktop/**/*.md"
-      - "brand/**"
-      - "plugins/1ma-brand/**"
-      - "plugins/1ma-theme/**"
-      - "plugins/1ma-server-switcher/**"
-      - "plugins/1ma-auto-updates/**"
-      - "pnpm-lock.yaml"
-      - ".github/workflows/desktop.yml"
   workflow_dispatch:
 
 concurrency:
@@ -39,15 +33,48 @@ env:
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
 
 jobs:
+  changes:
+    name: Desktop paths changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.paths.outputs.changed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: paths
+        name: Does this pull request touch what the workflow checks
+        env:
+          # The list of `on.push.paths` above; scripts/lib/workflows.test.mjs holds them equal.
+          PATHS: |
+            desktop/**
+            brand/**
+            plugins/1ma-brand/**
+            plugins/1ma-theme/**
+            plugins/1ma-server-switcher/**
+            plugins/1ma-auto-updates/**
+            package.json
+            pnpm-workspace.yaml
+            pnpm-lock.yaml
+            .github/workflows/desktop.yml
+            scripts/lib/changed-paths.mjs
+            scripts/lib/workflow-result.mjs
+            !desktop/**/*.md
+        run: node scripts/lib/changed-paths.mjs
+
   patches:
     name: 1ma patches and rebrand apply to the pinned bb release
+    needs: changes
+    if: needs.changes.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22.x"
       - name: Install the desktop tooling
@@ -70,7 +97,7 @@ jobs:
         run: node desktop/scripts/check-plugin-nul.mjs
       - name: Keep the rebrand diff for review
         run: git -C "$RUNNER_TEMP/bb" diff HEAD~1 HEAD > "$RUNNER_TEMP/rebrand.diff"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rebrand-diff
           path: ${{ runner.temp }}/rebrand.diff
@@ -86,10 +113,10 @@ jobs:
       run:
         working-directory: bb-src
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24.x"
       - name: Install the desktop tooling
@@ -117,7 +144,7 @@ jobs:
           corepack enable
           pnpm --version
           echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ env.PNPM_STORE }}
           key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/upstream.json') }}
@@ -152,7 +179,7 @@ jobs:
           pnpm exec turbo run build --filter=bb-app --output-logs=errors-only
           cp "$RUNNER_TEMP/overview.md" "$overview"
           grep -q "$marker" packages/bb-app/server/dist/builtin-plugins/1ma-brand/PLUGIN_OVERVIEW.md
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: 1ma-server-linux
           path: ${{ runner.temp }}/server/*
@@ -168,10 +195,10 @@ jobs:
       run:
         working-directory: bb-src
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22.x"
       - name: Install the desktop tooling
@@ -201,7 +228,7 @@ jobs:
           corepack enable
           pnpm --version
           echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ env.PNPM_STORE }}
           key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/upstream.json') }}
@@ -245,7 +272,7 @@ jobs:
         run: pnpm exec turbo run smoke:packaged --filter=@bb/desktop --force --output-logs=new-only
       - name: Generate the version feed
         run: pnpm --dir apps/desktop run desktop:version-feed
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: 1ma-desktop-macos-arm64
           path: |
@@ -255,3 +282,23 @@ jobs:
             bb-src/apps/desktop/release/desktop-version.json
             bb-src/1ma-provenance.json
           if-no-files-found: error
+
+  # The one check of this workflow that a merge into main requires: it reports on
+  # every pull request. Touched paths need every job to succeed, untouched paths
+  # need every job skipped; scripts/lib/workflow-result.mjs spells the verdict out,
+  # because GitHub itself takes a skipped job for a passed one.
+  result:
+    name: Desktop result
+    if: always()
+    needs: [changes, patches, linux-server, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Every job the event calls for passed, or the paths are untouched
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          OFF_PULL_REQUESTS: linux-server macos
+        run: node scripts/lib/workflow-result.mjs

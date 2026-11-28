@@ -24,7 +24,8 @@
     "oxfmt": "^0.64.0",
     "oxlint": "^1.79.0",
     "typescript": "^5.9.0",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.0",
+    "yaml": "^2.9.1"
   },
   "engines": {
     "node": ">=24.0.0",
