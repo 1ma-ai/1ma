@@ -6,8 +6,8 @@
 //   import  (bb and 1ma stopped)  installs that export into 1ma's data folder
 //                         with 1ma's CLI, then copies what an export leaves on
 //                         the machine: its identity (host-id, auth.json), thread
-//                         files, local plugins, Pi's earlier conversations and
-//                         the plugins' machine data.
+//                         files, local plugins and the plugins' machine data,
+//                         and Pi's earlier conversations from bb's home folder.
 //
 // The export carries the server: the database, settings, attachments, skills,
 // theme and installed plugins. 1ma rewrites the plugin paths under ~/.bb at its
@@ -25,12 +25,15 @@
 
 import { spawnSync } from "node:child_process";
 import {
+  constants,
+  copyFileSync,
   cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   statSync,
@@ -41,10 +44,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const HOST_FILES = ["host-id", "auth.json"];
-// pi-bridge-sessions is where bb before 0.50 kept Pi's conversations; 1ma's Pi
-// plugin picks each one up from the same folder of its own data.
-export const HOST_DIRECTORIES = ["thread-storage", "local-plugins", "pi-bridge-sessions"];
+export const HOST_DIRECTORIES = ["thread-storage", "local-plugins"];
 export const PLUGIN_HOST_DIRECTORIES = ["host-data", "bridge-data"];
+// bb before 0.50 kept Pi's conversations in BB_PI_BRIDGE_SESSION_DIR or in this
+// folder of the home folder, whatever its data folder was. 1ma's Pi plugin reads
+// them from its bridge data in 1ma's data folder.
+const PI_LEGACY_SESSIONS = path.join(".bb", "pi-bridge-sessions");
+export const PI_SESSIONS = "plugins/provider-pi/bridge-data/sessions";
+const MAX_LINKS = 40;
 // Copying these would leave stale duplicates: the database points at the
 // originals, and 1ma removes them there when their threads are archived.
 export const LEFT_IN_PLACE = [
@@ -60,13 +67,22 @@ const ACTIVITY_GRACE_MS = 2 * 60_000;
 const DAEMON_LOCK = "daemon.lock.lock";
 const DAEMON_LOCK_FRESH_MS = 60_000;
 
-export function parseArgs(argv) {
+export function parseArgs(argv, env = process.env) {
   const [command, ...rest] = argv;
   if (command !== "export" && command !== "import")
     throw new Error(
-      "usage: migrate-from-bb.mjs export --out <file> | import --archive <file> --cli <1ma bb.js> [--move-aside] [--dry-run] [--archive-is-current]",
+      "usage: migrate-from-bb.mjs export --out <file> | import --archive <file> --cli <1ma bb.js> [--pi-sessions <folder>] [--move-aside] [--dry-run] [--archive-is-current]",
     );
-  const options = { command, from: null, to: null, out: null, archive: null, cli: null, bb: null };
+  const options = {
+    command,
+    from: null,
+    to: null,
+    piSessions: null,
+    out: null,
+    archive: null,
+    cli: null,
+    bb: null,
+  };
   const flags = {
     "--move-aside": "moveAside",
     "--dry-run": "dryRun",
@@ -75,6 +91,7 @@ export function parseArgs(argv) {
   const values = {
     "--from": "from",
     "--to": "to",
+    "--pi-sessions": "piSessions",
     "--out": "out",
     "--archive": "archive",
     "--cli": "cli",
@@ -92,6 +109,10 @@ export function parseArgs(argv) {
   }
   options.from ??= path.join(homedir(), ".bb");
   options.to ??= path.join(homedir(), ".1ma");
+  const configuredPiSessions = env.BB_PI_BRIDGE_SESSION_DIR?.trim();
+  options.piSessions ??= configuredPiSessions
+    ? path.resolve(configuredPiSessions)
+    : path.join(homedir(), PI_LEGACY_SESSIONS);
   if (command === "export" && !options.out) throw new Error("export needs --out <file>");
   if (command === "import" && (!options.archive || !options.cli))
     throw new Error("import needs --archive <file> and --cli <path to 1ma's bb.js>");
@@ -175,6 +196,35 @@ export function hostCopyPlan(from) {
   return entries;
 }
 
+// Pi's session files, one per thread, as 1ma's Pi plugin looks them up.
+export function piSessionPlan(dir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".jsonl") && statSync(path.join(dir, name)).isFile())
+    .toSorted();
+}
+
+// A session the 1ma data folder already has is newer than bb's and stays.
+// The machine entries copied before keep bb's symbolic links as they are, so
+// the folder may lead out of the 1ma data folder: nothing is written there.
+// Inside it, the folder is made where the links lead.
+export function copyPiSessions({ from, to, plan }) {
+  const target = path.join(to, PI_SESSIONS);
+  let copied = 0;
+  for (const name of plan) {
+    if (existsSync(path.join(target, name))) continue;
+    const physical = real(target);
+    if (!within(physical, real(to)))
+      throw new Error(
+        `Pi's earlier conversations would be written outside ${to}: ${target} is a symbolic link to ${physical}, copied from bb as it is. Replace the link in bb's data folder with a real folder, or pass --pi-sessions with an empty folder to import without them, then run the import again.`,
+      );
+    mkdirSync(physical, { recursive: true });
+    copyFileSync(path.join(from, name), path.join(target, name), constants.COPYFILE_EXCL);
+    copied += 1;
+  }
+  return copied;
+}
+
 export function copyHost({ from, to, plan }) {
   for (const { relative } of plan) {
     const target = path.join(to, relative);
@@ -221,16 +271,45 @@ function within(child, parent) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-// A folder that does not exist yet resolves through its nearest existing
-// parent, so both sides of a comparison pass the same symbolic links.
-function real(dir) {
-  const missing = [];
-  let existing = path.resolve(dir);
-  while (!existsSync(existing) && path.dirname(existing) !== existing) {
-    missing.unshift(path.basename(existing));
-    existing = path.dirname(existing);
+// A name under a regular file does not exist either; lstat reports it as ENOTDIR.
+function isLink(file) {
+  try {
+    return lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink() === true;
+  } catch (error) {
+    if (error.code === "ENOTDIR") return false;
+    throw error;
   }
-  return path.join(realpathSync(existing), ...missing);
+}
+
+// The place the kernel reaches for a path, existing or not: each symbolic link
+// is followed where it stands, `..` leaves the folder reached so far, and a
+// name that does not exist yet keeps its place.
+export function real(dir) {
+  const rest = path.resolve(dir).split("/").toReversed();
+  let reached = "/";
+  for (let links = 0; rest.length > 0;) {
+    const name = rest.pop();
+    if (name === "" || name === ".") continue;
+    if (name === "..") {
+      reached = path.dirname(reached);
+      continue;
+    }
+    const next = path.join(reached, name);
+    if (!isLink(next)) {
+      reached = next;
+      continue;
+    }
+    if ((links += 1) > MAX_LINKS) throw new Error(`${dir} passes through a loop of symbolic links`);
+    const text = readlinkSync(next);
+    if (text.startsWith("/")) reached = "/";
+    rest.push(...text.split("/").toReversed());
+  }
+  return reached;
+}
+
+// A path as one argument of a POSIX shell command.
+function shellQuoted(text) {
+  return `'${text.replaceAll("'", "'\\''")}'`;
 }
 
 function overlaps(a, b) {
@@ -284,6 +363,12 @@ export function exportBb(options, log = console.log) {
 function checkBeforeImport(options) {
   const { from, to } = options;
   if (overlaps(from, to)) throw new Error(`${from} and ${to} must be two separate folders`);
+  if (overlaps(options.piSessions, to))
+    throw new Error(`Pi's earlier conversations in ${options.piSessions} must be outside ${to}`);
+  if (isLink(to))
+    throw new Error(
+      `${to} is a symbolic link to ${real(to)}. The import moves and renames the folder it is given, and would do that to the link and not to the data behind it: pass --to ${shellQuoted(real(to))}`,
+    );
   if (!existsSync(path.join(from, "bb.db")) || !existsSync(path.join(from, "host-id")))
     throw new Error(`${from} is not a bb data folder (no bb.db or host-id)`);
   if (!existsSync(options.archive)) throw new Error(`${options.archive} does not exist`);
@@ -325,14 +410,18 @@ export function importIntoOneMa(options, log = console.log, now = new Date()) {
     movedAside = `${to}.before-migration-${stamp}`;
   }
   const plan = hostCopyPlan(from);
+  const piPlan = piSessionPlan(options.piSessions);
   const shared = SHARED_WITH_BB.filter((relative) => existsSync(path.join(from, relative)));
   log(`bb data: ${from}\n1ma data: ${to}\narchive: ${options.archive}`);
   if (movedAside) log(`move the current ${to} aside to ${movedAside}`);
   log(
     `import the archive with ${options.cli}, then copy from bb: ${plan.map((entry) => entry.relative).join(", ")}`,
   );
+  log(
+    `Pi's earlier conversations: ${piPlan.length} from ${options.piSessions}, copied into ${path.join(to, PI_SESSIONS)}`,
+  );
   log(`left where they are, 1ma works in them inside ${from}: ${shared.join(", ") || "none here"}`);
-  if (options.dryRun) return { plan, movedAside, shared, dryRun: true };
+  if (options.dryRun) return { plan, piPlan, movedAside, shared, dryRun: true };
 
   if (movedAside) renameSync(to, movedAside);
   let record;
@@ -350,6 +439,7 @@ export function importIntoOneMa(options, log = console.log, now = new Date()) {
         `the archive was exported from ${imported.sourceDataDir} (machine ${imported.sourceServerHostId}), not from ${from} (machine ${hostId})`,
       );
     copyHost({ from, to, plan });
+    const piCopied = copyPiSessions({ from: options.piSessions, to, plan: piPlan });
     record = {
       migratedAt: now.toISOString(),
       from,
@@ -357,6 +447,7 @@ export function importIntoOneMa(options, log = console.log, now = new Date()) {
       bbVersion: imported.bbVersion,
       importedEntries: imported.importedEntries.length,
       copied: plan.map((entry) => entry.relative),
+      piSessions: { from: options.piSessions, copied: piCopied, kept: piPlan.length - piCopied },
       sharedWithBb: shared,
       movedAside,
     };
@@ -371,7 +462,7 @@ export function importIntoOneMa(options, log = console.log, now = new Date()) {
     );
   }
   log(
-    `imported ${record.importedEntries} files exported by bb ${record.bbVersion} and copied ${plan.length} machine entries`,
+    `imported ${record.importedEntries} files exported by bb ${record.bbVersion}, copied ${plan.length} machine entries and ${record.piSessions.copied} of Pi's earlier conversations`,
   );
   if (shared.length > 0)
     log(
@@ -379,7 +470,7 @@ export function importIntoOneMa(options, log = console.log, now = new Date()) {
     );
   log("next: start 1ma. On its first start it finishes the import and rewrites the plugin paths.");
   log(
-    `bb connect stays off in 1ma until you run: bb server allow-connect --data-dir ${to} (only once bb is no longer used, or both servers fight over the tunnel)`,
+    `bb connect stays off in 1ma until you run: bb server allow-connect --data-dir ${shellQuoted(to)} (only once bb is no longer used, or both servers fight over the tunnel)`,
   );
   return record;
 }
