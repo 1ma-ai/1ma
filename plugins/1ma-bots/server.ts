@@ -726,57 +726,54 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   const isOwnTurnStart = (row: EventRow) =>
     row.type === "turn/started" && row.data.parentToolCallId === undefined;
   type TurnRequest = Extract<EventRow, { type: "client/turn/requested" }>["data"];
-  // A request bb sent while the conversation was busy (auto, steer) may join the
-  // running turn or start the next one; only the provider's acceptance tells.
-  // A history older than acceptances has no target and reads as new-turn.
-  const asksForNewTurn = (request: TurnRequest) =>
-    request.target.kind === "new-turn" || request.target.kind === "thread-start";
 
-  // The turn now running in a conversation, when the owner started it: the
-  // latest turn the provider confirmed (turn/started) and the request bb
-  // recorded just before it (client/turn/requested, not rejected): the one the
-  // provider accepted into that turn, or one that asked for a new turn and has
-  // no acceptance. bb records a request only after every dispatch hook and wait
-  // let it through. A message steered into a running turn, or one whose turn the
-  // provider has not confirmed, never counts as a new turn. A turn the provider
-  // started on its own, with no request before it (ACP reports agent output
-  // after a turn as a new one), continues the turn before it.
+  // The turn now running in a conversation, when the owner started it. Only the
+  // provider's acceptance (turn/input/accepted, in the scope of the turn it
+  // entered) ties a request bb recorded (client/turn/requested) to a turn:
+  // turn/started names no request, and a request may wait while the provider
+  // starts and ends a turn on its own (ACP reports agent output after a turn as
+  // a new one). The first acceptance in a turn names the request that opened
+  // it, if bb recorded that request before the turn started; later ones are
+  // messages steered into it. A turn with no such acceptance the provider
+  // started on its own: it continues the turn before it. A request nothing has
+  // accepted yet is not a turn. bb reads a request stored before targets as
+  // new-turn and stores no mark of its version, so a history from before
+  // acceptances cannot be told from a request still waiting; its turns read as
+  // ones the provider started on its own.
   const ownerTurnOf = async (threadId: string): Promise<number | null> => {
-    let started: EventRow | null = null;
-    const rejected = new Set<string>();
-    const acceptedIn = new Map<string, EventRow["scope"]>();
+    const firstAcceptedIn = new Map<string, string>();
+    const recordedLater = new Set<string>();
+    let opened: { seq: number; requestId: string } | null = null;
     for await (const row of eventsOf(threadId, [
       "turn/started",
       "turn/input/accepted",
       "client/turn/requested",
-      "client/turn/rejected",
     ])) {
-      if (isOwnTurnStart(row)) started = row;
-      if (row.type === "client/turn/rejected") rejected.add(row.data.requestId);
-      if (row.type === "turn/input/accepted") acceptedIn.set(row.data.clientRequestId, row.scope);
-      if (row.type !== "client/turn/requested" || started === null) continue;
-      if (rejected.has(row.data.requestId)) continue;
-      const scope = acceptedIn.get(row.data.requestId);
-      if (
-        scope === undefined ? !asksForNewTurn(row.data) : !isDeepStrictEqual(scope, started.scope)
-      )
-        continue;
-      return row.data.initiator === "user" && row.data.senderThreadId === null ? started.seq : null;
+      if (row.type === "turn/input/accepted") {
+        firstAcceptedIn.set(JSON.stringify(row.scope), row.data.clientRequestId);
+      } else if (row.type === "client/turn/requested") {
+        if (row.data.requestId === opened?.requestId) {
+          return row.data.initiator === "user" && row.data.senderThreadId === null
+            ? opened.seq
+            : null;
+        }
+        recordedLater.add(row.data.requestId);
+      } else if (opened === null && isOwnTurnStart(row)) {
+        const requestId = firstAcceptedIn.get(JSON.stringify(row.scope));
+        if (requestId !== undefined && !recordedLater.has(requestId))
+          opened = { seq: row.seq, requestId };
+      }
     }
     return null;
   };
 
   // When the provider last took input into a conversation after `since`: a new
-  // turn, or a message steered into the running one. What bb's own notice about
-  // a sub-thread started does not count, nor does a retry of that turn, nor a
-  // turn the provider started with no request.
+  // turn, or a message steered into the running one. Only its acceptance tells:
+  // a request still waiting, or a turn the provider started with no request,
+  // is no input. What bb's own notice about a sub-thread started does not
+  // count, nor does a retry of that turn.
   const lastInputAfter = async (threadId: string, since: number): Promise<number | null> => {
-    const events = eventsOf(threadId, [
-      "turn/started",
-      "turn/input/accepted",
-      "client/turn/requested",
-      "client/turn/rejected",
-    ]);
+    const events = eventsOf(threadId, ["turn/input/accepted", "client/turn/requested"]);
     const rows: EventRow[] = [];
     const rowAt = async (index: number) => {
       if (index === rows.length) {
@@ -792,44 +789,13 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         if (row.type === "client/turn/requested" && fits(row.data)) return row.data;
       }
     };
-    // Acceptances and refusals come after their request, so the rows read down
-    // to a request already hold them.
-    const isTaken = (requestId: string) =>
-      rows.some(
-        (other) =>
-          (other.type === "turn/input/accepted" && other.data.clientRequestId === requestId) ||
-          (other.type === "client/turn/rejected" && other.data.requestId === requestId),
-      );
-    // The request a turn with no acceptance of its own took: one between it and
-    // the turn before it that asked for a new turn and nothing took. None: the
-    // provider started the turn itself, with no input.
-    const requestOfTurn = async (index: number) => {
-      for (let at = index + 1; ; at += 1) {
-        const row = await rowAt(at);
-        if (row === undefined || isOwnTurnStart(row)) return undefined;
-        if (
-          row.type === "client/turn/requested" &&
-          asksForNewTurn(row.data) &&
-          !isTaken(row.data.requestId)
-        )
-          return row.data;
-      }
-    };
     for (let index = 0; ; index += 1) {
       const row = await rowAt(index);
       if (row === undefined || row.createdAt <= since) return null;
-      let request: TurnRequest | undefined;
-      if (row.type === "turn/input/accepted") {
-        request = await requestOf(({ requestId }) => requestId === row.data.clientRequestId);
-      } else if (isOwnTurnStart(row)) {
-        const hasOwnInput = rows.some(
-          (other) =>
-            other.type === "turn/input/accepted" && isDeepStrictEqual(other.scope, row.scope),
-        );
-        if (hasOwnInput) continue;
-        request = await requestOfTurn(index);
-        if (request === undefined) continue;
-      } else continue;
+      if (row.type !== "turn/input/accepted") continue;
+      let request: TurnRequest | undefined = await requestOf(
+        ({ requestId }) => requestId === row.data.clientRequestId,
+      );
       // Messages sent together are one request with the kind of the first, a
       // retry included. A retry sent alone runs the attempt before it again, or
       // asks to continue it once the provider took it, so it is what that

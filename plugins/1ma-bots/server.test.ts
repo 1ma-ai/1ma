@@ -65,14 +65,15 @@ function setup(settings: Record<string, number> = {}) {
     ]);
   };
   // kind "start": the provider starts a new turn; "steer": the message joins
-  // the running turn; "rejected": the provider refuses the request.
-  // accepted: the provider also confirms which request a new turn took.
+  // the running turn; "rejected": the provider refuses the request;
+  // "requested": bb recorded it and nothing has taken it yet.
+  // accepted: false, a new turn whose acceptance nobody published.
   const recordTurn = (
     threadId: string,
     initiator: "user" | "agent" | "system",
     sender: string | null,
     kind: "start" | "steer" | "rejected" | "requested" = "start",
-    { accepted = false, ...request }: TurnExtra = {},
+    { accepted = true, ...request }: TurnExtra = {},
   ) => {
     const requestId = `req_${seq + 1}`;
     const running = (events.get(threadId) ?? []).findLast((row) => row.type === "turn/started");
@@ -101,6 +102,11 @@ function setup(settings: Record<string, number> = {}) {
     push(threadId, "turn/started", data, scope);
     if (requestId !== null)
       push(threadId, "turn/input/accepted", { clientRequestId: requestId }, scope);
+  };
+  // The provider takes a request into the turn it runs.
+  const acceptIntoRunningTurn = (threadId: string, requestId: string) => {
+    const running = events.get(threadId)!.findLast((row) => row.type === "turn/started")!;
+    push(threadId, "turn/input/accepted", { clientRequestId: requestId }, running.scope);
   };
   const settle = (threadId: string) =>
     host.harness.behavior.emitThreadEvent("thread.idle", {
@@ -343,6 +349,7 @@ function setup(settings: Record<string, number> = {}) {
     bb: host.bb,
     recordTurn,
     startTurn,
+    acceptIntoRunningTurn,
     attempt,
     settle,
     delivery,
@@ -1368,6 +1375,52 @@ describe("a turn the provider started on its own", () => {
     await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
   });
 
+  it("does not give the owner's message a new exchange while it waits through a turn it started on its own", async () => {
+    const t = await threeBots();
+    t.recordTurn("thr_a", "user", null);
+    for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+    t.recordTurn("thr_a", "user", null, "requested");
+    t.startTurn("thr_a", null);
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+  });
+
+  it("gives the turn that took the owner's message a new exchange though it started one on its own in between", async () => {
+    const t = await threeBots();
+    t.recordTurn("thr_a", "user", null);
+    for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+    const request = t.recordTurn("thr_a", "user", null, "requested");
+    t.startTurn("thr_a", null);
+    t.startTurn("thr_a", request);
+    expect(await t.letter("thr_a", t.b.id)).toContain("Letter 1/4");
+  });
+
+  it("does not take the owner's message steered into a turn it started on its own as the one that opened it", async () => {
+    const t = await threeBots();
+    t.recordTurn("thr_a", "user", null);
+    for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+    t.startTurn("thr_a", null);
+    const steer = t.recordTurn("thr_a", "user", null, "requested", {
+      target: { kind: "auto", expectedTurnId: null },
+    });
+    t.acceptIntoRunningTurn("thr_a", steer);
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+  });
+
+  it("with the owner's message steered into it, writes in the new exchange of the owner's turn before it", async () => {
+    const t = await threeBots();
+    t.recordTurn("thr_a", "user", null);
+    for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+    t.recordTurn("thr_a", "user", null);
+    t.startTurn("thr_a", null);
+    const steer = t.recordTurn("thr_a", "user", null, "requested", {
+      target: { kind: "auto", expectedTurnId: null },
+    });
+    t.acceptIntoRunningTurn("thr_a", steer);
+    expect(await t.letter("thr_a", t.b.id)).toContain("Letter 1/4");
+    for (let i = 0; i < 3; i++) await t.letter("thr_a", t.b.id);
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+  });
+
   it("every turn it starts after the owner's writes in that one exchange", async () => {
     const t = await threeBots();
     t.recordTurn("thr_a", "user", null, "start", { accepted: true });
@@ -1402,6 +1455,45 @@ describe("a turn the provider started on its own", () => {
       target: { kind: "auto", expectedTurnId: "turn_2" },
     });
     t.startTurn("thr_a", requestId);
+    expect(await t.letter("thr_a", t.b.id)).toContain("Letter 1/4");
+  });
+});
+
+describe("a turn that took several messages", () => {
+  async function spent() {
+    const t = await threeBots();
+    t.recordTurn("thr_a", "user", null);
+    for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+    return t;
+  }
+
+  it("belongs to the letter it took first, not to the owner's message bb recorded before it started", async () => {
+    const t = await spent();
+    const letter = t.recordTurn("thr_a", "agent", "thr_b", "requested");
+    const message = t.recordTurn("thr_a", "user", null, "requested", {
+      target: { kind: "auto", expectedTurnId: null },
+    });
+    t.startTurn("thr_a", letter);
+    t.acceptIntoRunningTurn("thr_a", message);
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+  });
+
+  it("belongs to the owner's message it took first, though a letter joined it", async () => {
+    const t = await spent();
+    const message = t.recordTurn("thr_a", "user", null, "requested");
+    const letter = t.recordTurn("thr_a", "agent", "thr_b", "requested", {
+      target: { kind: "auto", expectedTurnId: null },
+    });
+    t.startTurn("thr_a", message);
+    t.acceptIntoRunningTurn("thr_a", letter);
+    expect(await t.letter("thr_a", t.b.id)).toContain("Letter 1/4");
+  });
+
+  it("after a letter's turn, the owner's message that opens its own turn gives it a new exchange", async () => {
+    const t = await spent();
+    t.recordTurn("thr_a", "agent", "thr_b");
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+    t.recordTurn("thr_a", "user", null);
     expect(await t.letter("thr_a", t.b.id)).toContain("Letter 1/4");
   });
 });
@@ -1453,7 +1545,7 @@ describe("bb's own notice that a sub-thread was attached or detached", () => {
   });
 
   it.each([true, false])(
-    "the owner's message sent together with a retried notice brings the conversation back (accepted: %s)",
+    "the owner's message sent together with a retried notice brings the conversation back once the provider takes it (accepted: %s)",
     async (accepted) => {
       const t = await doneChat();
       const retryOfRequestId = t.notice("rejected");
@@ -1466,9 +1558,18 @@ describe("bb's own notice that a sub-thread was attached or detached", () => {
         inputGroups,
         input: inputGroups.flat(),
       });
-      expect(await t.isDone()).toBe(false);
+      expect(await t.isDone()).toBe(!accepted);
     },
   );
+
+  it("keeps Done while the owner's message waits through a turn the provider started on its own", async () => {
+    const t = await doneChat();
+    const request = t.recordTurn("thr_a", "user", null, "requested");
+    t.startTurn("thr_a", null);
+    expect(await t.isDone()).toBe(true);
+    t.startTurn("thr_a", request);
+    expect(await t.isDone()).toBe(false);
+  });
 
   it("a retry of the owner's refused turn brings the conversation back", async () => {
     const t = await doneChat();
@@ -1599,19 +1700,16 @@ describe("bb's own notice that a sub-thread was attached or detached", () => {
 
   // bb answers no page of events that are together over 8 MiB.
   const longText = [{ type: "text", text: "x".repeat(220 * 1024), mentions: [] }];
-  it.each([true, false])(
-    "long messages before the mark do not hide the owner's new one (accepted: %s)",
-    async (accepted) => {
-      const t = await doneChat();
-      await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: false });
-      for (let i = 0; i < 40; i += 1)
-        t.recordTurn("thr_a", "user", null, "start", { input: longText });
-      await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: true });
-      expect(await t.isDone()).toBe(true);
-      t.recordTurn("thr_a", "user", null, "start", { accepted });
-      expect(await t.isDone()).toBe(false);
-    },
-  );
+  it("long messages before the mark do not hide the owner's new one", async () => {
+    const t = await doneChat();
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: false });
+    for (let i = 0; i < 40; i += 1)
+      t.recordTurn("thr_a", "user", null, "start", { input: longText });
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: true });
+    expect(await t.isDone()).toBe(true);
+    t.recordTurn("thr_a", "user", null);
+    expect(await t.isDone()).toBe(false);
+  });
 
   it("a message too long for any answer of bb leaves Done", async () => {
     const t = await doneChat();
@@ -1639,29 +1737,23 @@ describe("bb's own notice that a sub-thread was attached or detached", () => {
     expect(await t.isDone()).toBe(done);
   });
 
-  it.each([true, false])(
-    "does not hide a message sent together with it (accepted: %s)",
-    async (accepted) => {
-      const text = (value: string) => ({ type: "text", text: value, mentions: [] });
-      const inputGroups = [[text("A sub-thread was attached")], [text("Please recheck")]];
-      const t = await doneChat();
-      t.notice("start", { accepted, inputGroups, input: inputGroups.flat() });
-      expect(await t.isDone()).toBe(false);
-    },
-  );
+  it("does not hide a message sent together with it", async () => {
+    const text = (value: string) => ({ type: "text", text: value, mentions: [] });
+    const inputGroups = [[text("A sub-thread was attached")], [text("Please recheck")]];
+    const t = await doneChat();
+    t.notice("start", { inputGroups, input: inputGroups.flat() });
+    expect(await t.isDone()).toBe(false);
+  });
 
-  it.each([true, false])(
-    "keeps Done when its turn runs one inside it (accepted: %s)",
-    async (accepted) => {
-      const t = await doneChat();
-      t.notice("start", { accepted });
-      t.startTurn("thr_a", null, { parentToolCallId: "item_delegate" });
-      expect(await t.isDone()).toBe(true);
-      t.recordTurn("thr_a", "user", null, "start", { accepted });
-      t.startTurn("thr_a", null, { parentToolCallId: "item_delegate" });
-      expect(await t.isDone()).toBe(false);
-    },
-  );
+  it("keeps Done when its turn runs one inside it", async () => {
+    const t = await doneChat();
+    t.notice("start");
+    t.startTurn("thr_a", null, { parentToolCallId: "item_delegate" });
+    expect(await t.isDone()).toBe(true);
+    t.recordTurn("thr_a", "user", null);
+    t.startTurn("thr_a", null, { parentToolCallId: "item_delegate" });
+    expect(await t.isDone()).toBe(false);
+  });
 
   it("does not hide a message accepted into a turn run inside its own", async () => {
     const t = await doneChat();
