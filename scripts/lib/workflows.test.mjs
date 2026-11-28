@@ -103,10 +103,11 @@ const CONDITIONAL_STEPS = {
 // installs, preparing the tree) are not listed: without them the job fails
 // anyway; of such a step only a command the later ones do without is listed.
 //
-// A command counts in the text of a line of `run` before a comment. This is
-// not a shell parser: it does not tell whether the shell reaches the command.
-// One in a heredoc, in a function nobody calls, behind a condition that is
-// never true or in the text of an `echo` still counts.
+// Only Bots has to use a single, exact command. The other entries check
+// command text, which cannot show whether the shell reaches it.
+const BOTS_TEST_STEP = "bots-e2e.yml e2e Run the end-to-end tests";
+const BOTS_TEST_COMMAND =
+  "node --test --test-concurrency=1 --test-timeout=2400000 e2e/bots/bots.test.mjs";
 const WORK_STEPS = {
   "ci.yml check pnpm run check:marketplace": [
     ["pnpm run check:marketplace"],
@@ -136,10 +137,7 @@ const WORK_STEPS = {
     ["set -euo pipefail", "sha256sum -c -", '"$RUNNER_TEMP/actionlint"'],
     "actionlint's verdict, from the binary its checksums name",
   ],
-  "bots-e2e.yml e2e Run the end-to-end tests": [
-    ["e2e/bots/bots.test.mjs"],
-    "the end-to-end tests are what the check reports",
-  ],
+  [BOTS_TEST_STEP]: [[BOTS_TEST_COMMAND], "the end-to-end tests are what the check reports"],
   "desktop.yml patches Test the rebrand rules": [
     ["--filter 1ma-desktop-tooling run test"],
     "the tests of the tooling that applies the patches and the rebrand",
@@ -241,6 +239,7 @@ const WORK_STEPS = {
 const RELEASE_INPUTS = {
   macos: {
     name: "1ma-desktop-macos-arm64",
+    directoryEnv: "DIST",
     paths: [
       "bb-src/apps/desktop/release/*.dmg",
       "bb-src/apps/desktop/release/*.zip",
@@ -249,7 +248,11 @@ const RELEASE_INPUTS = {
       "bb-src/1ma-provenance.json",
     ],
   },
-  "linux-server": { name: "1ma-server-linux", paths: ["${{ runner.temp }}/server/*"] },
+  "linux-server": {
+    name: "1ma-server-linux",
+    directoryEnv: "DIST_SERVER",
+    paths: ["${{ runner.temp }}/server/*"],
+  },
 };
 
 // The events a workflow with a required check starts on, no more and no
@@ -361,7 +364,13 @@ function nothingMasksAFailure(workflow) {
 
 const workStepOf = (key) => {
   const [file, job, ...words] = key.split(" ");
-  return { file, job, name: words.join(" "), runs: WORK_STEPS[key][0] };
+  return {
+    file,
+    job,
+    name: words.join(" "),
+    runs: WORK_STEPS[key][0],
+    exact: key === BOTS_TEST_STEP,
+  };
 };
 
 function uncommented(line) {
@@ -390,10 +399,18 @@ function uncommented(line) {
 const commandLines = (step) => (step.run ?? "").split("\n").map(uncommented);
 
 function doesItsWork(workflow) {
-  for (const { file, job, name, runs } of Object.keys(WORK_STEPS).map(workStepOf)) {
+  for (const { file, job, name, runs, exact } of Object.keys(WORK_STEPS).map(workStepOf)) {
     if (file !== workflow.file) continue;
     const step = (workflow.jobs[job]?.steps ?? []).find((entry) => nameOf(entry) === name);
     assert.ok(step !== undefined, `${workflow.name} ${job} lacks "${name}"`);
+    if (exact) {
+      assert.equal(
+        step.run?.trim(),
+        runs[0],
+        `${workflow.name} ${job} "${name}" must run exactly ${runs[0]}`,
+      );
+      continue;
+    }
     const lines = commandLines(step);
     for (const run of runs)
       assert.ok(
@@ -538,27 +555,69 @@ function testsFollowBuilds(build, tests) {
     assert.ok(built.includes(path), `bb tests leave out ${path}`);
 }
 
-const downloadedBy = (release) =>
-  jobsOf(release).flatMap(([, job]) =>
-    (job.steps ?? []).flatMap((step) =>
-      commandLines(step)
-        .filter((line) => /\bgh run download\b/u.test(line))
-        .map((line) => /\s--name\s+(?<name>[^\s"'$]+)/u.exec(line)?.groups.name),
-    ),
+const DOWNLOAD_COMMAND =
+  /^gh run download "\$RUN_ID" --repo "\$GITHUB_REPOSITORY" --name (?<name>[\w-]+) --dir (?<directory>[\w-]+)$/u;
+function downloadedBy(release) {
+  const download = stepOf(release, "release", "Download the build");
+  const build = stepOf(release, "release", "Check the build run and bb's tests for its commit");
+  const publish = stepOf(release, "release", "Create the pre-release");
+  assert.ok(download !== undefined, `${release.name} lacks the download step`);
+  assert.equal(
+    build?.env?.RUN_ID,
+    "${{ inputs.run_id }}",
+    `${release.name} must check the input run`,
   );
+  assert.equal(
+    download.env?.RUN_ID,
+    build.env.RUN_ID,
+    `${release.name} must download the checked run`,
+  );
+  assert.equal(
+    publish?.run?.trim(),
+    "node 1ma/desktop/scripts/release.mjs",
+    `${release.name} must run release.mjs`,
+  );
+  assert.equal(
+    download["working-directory"],
+    publish["working-directory"],
+    `${release.name} must download and publish from the same working directory`,
+  );
+  for (const [, job] of jobsOf(release))
+    for (const step of job.steps ?? []) {
+      if (step === download) continue;
+      assert.doesNotMatch(
+        step.run ?? "",
+        /^[ \t]*gh[ \t]+run[ \t]+download\b/mu,
+        `${release.name} must download artifacts in one step`,
+      );
+    }
+  const commands = (download.run ?? "")
+    .split("\n")
+    .map((line) => line.trim().replace(/[ \t]+/gu, " "));
+  return {
+    inputs: commands.filter(Boolean).map((command) => {
+      const fields = DOWNLOAD_COMMAND.exec(command)?.groups;
+      assert.ok(
+        fields !== undefined,
+        `${release.name} must use one --name and one --dir per download of the checked run`,
+      );
+      return fields;
+    }),
+    destinations: publish.env ?? {},
+  };
+}
 const isUpload = (step) => step.uses?.startsWith("actions/upload-artifact@") ?? false;
 function uploadsWhatTheReleaseTakes(build, release) {
-  const names = downloadedBy(release);
+  const { inputs, destinations } = downloadedBy(release);
   for (const { name } of Object.values(RELEASE_INPUTS))
     assert.equal(
-      names.filter((downloaded) => downloaded === name).length,
+      inputs.filter((downloaded) => downloaded.name === name).length,
       1,
       `${release.name} must download ${name} exactly once`,
     );
   const waited = new Set(resultsOf(build).flatMap(([, job]) => needsOf(job)));
   const work = workOf(build).filter((id) => waited.has(id));
-  for (const name of names) {
-    assert.ok(name !== undefined, `${release.name} downloads an artifact this test cannot name`);
+  for (const { name, directory } of inputs) {
     const uploads = work.flatMap((id) =>
       (build.jobs[id].steps ?? [])
         .filter((step) => isUpload(step) && step.with?.name === name)
@@ -577,19 +636,30 @@ function uploadsWhatTheReleaseTakes(build, release) {
     assert.ok(!Object.hasOwn(step, "continue-on-error"), `${where} may fail and pass`);
     const input = RELEASE_INPUTS[id];
     assert.ok(input?.name === name, `${where}: this test lists nothing the release needs of it`);
+    const destination = destinations[input.directoryEnv];
+    assert.equal(
+      directory,
+      destination,
+      `${name} downloads to ${directory}, expected ${input.directoryEnv} directory ${destination}`,
+    );
     const paths = new Set(
       String(step.with.path ?? "")
         .split("\n")
         .map((line) => line.trim()),
     );
-    for (const path of paths)
+    for (const path of paths) {
       assert.ok(!path.startsWith("!"), `${where} has a negated path ${path}`);
+      assert.ok(
+        !path.includes("${{") || input.paths.includes(path),
+        `${where} has an unsupported expression in path ${path}`,
+      );
+    }
     for (const path of input.paths) assert.ok(paths.has(path), `${where} leaves out ${path}`);
   }
 }
 
 const stepOf = (workflow, job, name) =>
-  workflow.jobs[job].steps.find((step) => nameOf(step) === name);
+  workflow.jobs[job]?.steps?.find((step) => nameOf(step) === name);
 // `on` as a map of events, whichever way the workflow writes it.
 const eventMapOf = (workflow) => {
   if (typeof workflow.on === "string" || Array.isArray(workflow.on))
@@ -785,14 +855,14 @@ function register({ workflows, required }) {
           stepOf(w, "e2e", "Run the end-to-end tests").run =
             "# node --test e2e/bots/bots.test.mjs\necho skipped";
         }),
-        /e2e "Run the end-to-end tests" does not run e2e\/bots\/bots\.test\.mjs/u,
+        /e2e "Run the end-to-end tests" must run exactly node --test/u,
       );
-      for (const { file, job, name } of Object.keys(WORK_STEPS).map(workStepOf)) {
+      for (const { file, job, name, exact } of Object.keys(WORK_STEPS).map(workStepOf)) {
         // A step known by its run text is gone once the text changes.
         const emptied =
           stepOf(copyOf(file), job, name)?.name === undefined
             ? `${job} lacks "${name}"`
-            : `${job} "${name}" does not run`;
+            : `${job} "${name}" ${exact ? "must run exactly" : "does not run"}`;
         breaks(
           copyOf(file, (w) => {
             stepOf(w, job, name).run = "true";
@@ -818,42 +888,39 @@ function register({ workflows, required }) {
       }
     });
 
-    test("a command of a required check's work that only a comment on its line names", () => {
-      breaks(
-        copyOf("bots-e2e.yml", (w) => {
-          stepOf(w, "e2e", "Run the end-to-end tests").run =
-            "true # node --test e2e/bots/bots.test.mjs";
-        }),
-        /e2e "Run the end-to-end tests" does not run e2e\/bots\/bots\.test\.mjs/u,
-      );
+    test("a Bots test step with extra shell text or a changed test argument", () => {
       for (const run of [
-        'echo "# not a comment" && node --test e2e/bots/bots.test.mjs',
-        "echo '# not a comment'; node --test e2e/bots/bots.test.mjs",
-        String.raw`echo "a\"b" && node --test e2e/bots/bots.test.mjs`,
-        String.raw`echo "a\" # still quoted" && node --test e2e/bots/bots.test.mjs`,
-        String.raw`echo \# && node --test e2e/bots/bots.test.mjs`,
-        String.raw`echo issue\ #1 && node --test e2e/bots/bots.test.mjs`,
-        "issue#1=x node --test e2e/bots/bots.test.mjs",
+        `true # ${BOTS_TEST_COMMAND}`,
+        `true;# ${BOTS_TEST_COMMAND}`,
+        `echo issue#1 && ${BOTS_TEST_COMMAND}`,
+        "value=word; : ${value#*|#}; " + BOTS_TEST_COMMAND,
+        BOTS_TEST_COMMAND.replace("--test-concurrency=1", "--test-concurrency=2"),
       ])
-        assert.doesNotThrow(
-          () =>
-            shapeOf(
-              copyOf("bots-e2e.yml", (w) => {
-                stepOf(w, "e2e", "Run the end-to-end tests").run = run;
-              }),
-              required,
-            ),
-          run,
+        breaks(
+          copyOf("bots-e2e.yml", (w) => {
+            stepOf(w, "e2e", "Run the end-to-end tests").run = run;
+          }),
+          /e2e "Run the end-to-end tests" must run exactly node --test/u,
         );
     });
 
-    test("a work command that appears only in a comment after a Bash separator", () => {
+    test("the Bots test mentioned only in a comment inside command substitution", () => {
       breaks(
         copyOf("bots-e2e.yml", (w) => {
           stepOf(w, "e2e", "Run the end-to-end tests").run =
-            "true;# node --test e2e/bots/bots.test.mjs";
+            ': "$(: # node --test e2e/bots/bots.test.mjs\n)"';
         }),
-        /e2e "Run the end-to-end tests" does not run e2e\/bots\/bots\.test\.mjs/u,
+        /e2e "Run the end-to-end tests" must run exactly node --test/u,
+      );
+    });
+
+    test("the Bots test mentioned only in a computed comment", () => {
+      breaks(
+        copyOf("bots-e2e.yml", (w) => {
+          stepOf(w, "e2e", "Run the end-to-end tests").run =
+            "true ${{ '# node --test e2e/bots/bots.test.mjs' }}";
+        }),
+        /e2e "Run the end-to-end tests" must run exactly node --test/u,
       );
     });
 
@@ -886,11 +953,48 @@ function register({ workflows, required }) {
       );
     });
 
+    test("a release download whose directory differs from the release script's input", () => {
+      const release = copyOf("desktop-release.yml", (w) => {
+        const download = stepOf(w, "release", "Download the build");
+        download.run = download.run.replace("--dir dist\n", "--dir elsewhere\n");
+      });
+      assert.throws(
+        () => uploadsWhatTheReleaseTakes(copyOf("desktop.yml"), release),
+        /1ma-desktop-macos-arm64 downloads to elsewhere, expected DIST directory dist/u,
+      );
+    });
+
+    test("a release download that names two artifacts in one command", () => {
+      const release = copyOf("desktop-release.yml", (w) => {
+        const download = stepOf(w, "release", "Download the build");
+        download.run = download.run.replace(
+          "--dir dist\n",
+          "--name an-extra-artifact --dir dist\n",
+        );
+      });
+      assert.throws(
+        () => uploadsWhatTheReleaseTakes(copyOf("desktop.yml"), release),
+        /must use one --name and one --dir/u,
+      );
+    });
+
+    test("an upload with a computed exclusion of the release version file", () => {
+      const build = copyOf("desktop.yml", (w) => {
+        const upload = w.jobs.macos.steps.find(
+          (step) => isUpload(step) && step.with?.name === "1ma-desktop-macos-arm64",
+        );
+        assert.ok(upload !== undefined, "Desktop has no macOS artifact upload");
+        upload.with.path += "\n${{ '!bb-src/apps/desktop/release/desktop-version.json' }}";
+      });
+      assert.throws(
+        () => uploadsWhatTheReleaseTakes(build, copyOf("desktop-release.yml")),
+        /has an unsupported expression in path/u,
+      );
+    });
+
     test("an artifact desktop-release.yml takes that Desktop does not upload whole", () => {
       const release = copyOf("desktop-release.yml");
-      const names = downloadedBy(release);
-      assert.ok(names.length > 0);
-      for (const name of names) {
+      for (const { name } of Object.values(RELEASE_INPUTS)) {
         const uploadOf = (w) => {
           const [found] = workOf(w).flatMap((id) =>
             (w.jobs[id].steps ?? [])

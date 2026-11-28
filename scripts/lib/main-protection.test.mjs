@@ -10,6 +10,17 @@ const PROTECTION = `${REPOSITORY}/branches/main/protection`;
 const ACTIONS = `${REPOSITORY}/actions/permissions`;
 const RULES = `${REPOSITORY}/rules/branches/main`;
 const FILE = `${REPOSITORY}/contents/.github/main-protection.json?ref=main`;
+const PROTECTION_URL = `https://api.github.com/${PROTECTION}`;
+const REVIEW_RULE = { dismiss_stale_reviews: false, require_code_owner_reviews: true };
+const PUSH_RESTRICTIONS = {
+  url: `${PROTECTION_URL}/restrictions`,
+  users_url: `${PROTECTION_URL}/restrictions/users`,
+  teams_url: `${PROTECTION_URL}/restrictions/teams`,
+  apps_url: `${PROTECTION_URL}/restrictions/apps`,
+  users: [],
+  teams: [],
+  apps: [],
+};
 
 // An answer as gh --include prints it: the status line, the headers, an empty
 // line, the body.
@@ -36,7 +47,7 @@ function ruleOf(classic) {
 // GitHub as the script sees it through gh: what it answers and what was asked.
 function github(change = () => {}) {
   const on = (enabled) => ({ url: "https://api.github.com/x", enabled });
-  const url = `https://api.github.com/${PROTECTION}`;
+  const url = PROTECTION_URL;
   const state = {
     name: wanted.repository,
     actions: { ...wanted.actions, selected_actions_url: "https://api.github.com/x" },
@@ -204,7 +215,10 @@ describe("comparing GitHub with the file", () => {
     const hub = github((state) => {
       state.protection.enforce_admins.enabled = false;
       state.protection.required_status_checks.checks[0].app_id = null;
-      state.protection.required_pull_request_reviews = { required_approving_review_count: 1 };
+      state.protection.required_pull_request_reviews = {
+        ...REVIEW_RULE,
+        required_approving_review_count: 1,
+      };
     });
     assert.equal(hub.call(), 1);
     const output = hub.output.join("\n");
@@ -580,6 +594,79 @@ describe("comparing GitHub with the file", () => {
 });
 
 describe("applying the file", () => {
+  for (const [field, malformed] of [
+    ["required_pull_request_reviews", { ...REVIEW_RULE, dismiss_stale_reviews: "false" }],
+    ["restrictions", { ...PUSH_RESTRICTIONS, users: "x" }],
+  ]) {
+    test(`refuses to plan a write for changed strict checks with malformed ${field} fields`, () => {
+      const hub = github((state) => {
+        state.protection.required_status_checks.strict = true;
+        state.protection[field] = malformed;
+      });
+      assert.throws(() => hub.call(true), {
+        message: `GET ${PROTECTION}: the answer could not be read (HTTP 200)`,
+      });
+      assert.deepEqual(hub.written(), []);
+    });
+  }
+
+  test("requires the known fields of enabled review and push settings to have their REST types", () => {
+    const invalid = [
+      ["required_pull_request_reviews", { dismiss_stale_reviews: false }],
+      ["required_pull_request_reviews", { ...REVIEW_RULE, required_approving_review_count: 0.5 }],
+      ["required_pull_request_reviews", { ...REVIEW_RULE, require_last_push_approval: "true" }],
+      ["required_pull_request_reviews", { ...REVIEW_RULE, dismissal_restrictions: { url: 0 } }],
+      ["required_pull_request_reviews", { ...REVIEW_RULE, bypass_pull_request_allowances: [] }],
+      ["restrictions", { ...PUSH_RESTRICTIONS, apps_url: undefined }],
+      ["restrictions", { ...PUSH_RESTRICTIONS, teams: ["a-team"] }],
+    ];
+    for (const [field, malformed] of invalid) {
+      const hub = github((state) => {
+        state.protection.required_status_checks.strict = true;
+        state.protection[field] = malformed;
+      });
+      assert.throws(
+        () => hub.call(true),
+        { message: `GET ${PROTECTION}: the answer could not be read (HTTP 200)` },
+        JSON.stringify(malformed),
+      );
+      assert.deepEqual(hub.written(), []);
+    }
+  });
+
+  test("patches only the strict checks while review and push settings are off", () => {
+    const hub = github((state) => {
+      state.protection.required_status_checks.strict = true;
+    });
+    assert.equal(hub.call(true), 0);
+    assert.deepEqual(hub.written(), [
+      {
+        method: "PATCH",
+        address: `${PROTECTION}/required_status_checks`,
+        body: wanted.protection.required_status_checks,
+      },
+    ]);
+  });
+
+  test("reads enabled review and push settings with extra fields from GitHub", () => {
+    const hub = github((state) => {
+      state.protection.required_pull_request_reviews = {
+        ...REVIEW_RULE,
+        required_approving_review_count: 1,
+        require_last_push_approval: true,
+        dismissal_restrictions: { users: [], url: PROTECTION_URL },
+        bypass_pull_request_allowances: { apps: [] },
+        enabled: "a future field",
+      };
+      state.protection.restrictions = { ...PUSH_RESTRICTIONS, enabled: false };
+    });
+    assert.equal(hub.call(), 1);
+    const output = hub.output.join("\n");
+    assert.match(output, /protection\.required_pull_request_reviews: GitHub has \{/u);
+    assert.match(output, /protection\.restrictions: GitHub has \{/u);
+    assert.deepEqual(hub.written(), []);
+  });
+
   test("sends no write when REST says the branch is unprotected and GraphQL shows a rule", () => {
     const hub = github((state) => {
       state.protection = null;

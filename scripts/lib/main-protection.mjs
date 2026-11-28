@@ -253,6 +253,44 @@ const isCheck = (value) =>
   typeof value.context === "string" &&
   (value.app_id === null || Number.isInteger(value.app_id));
 
+const isBoolean = (value) => typeof value === "boolean";
+const isString = (value) => typeof value === "string";
+const isActorList = listOf(isObject);
+const ACTOR_LISTS = { users: isActorList, teams: isActorList, apps: isActorList };
+const ACTOR_URLS = { url: isString, users_url: isString, teams_url: isString };
+const DETAILED_PROTECTION_FIELDS = new Set([
+  "required_status_checks",
+  "required_pull_request_reviews",
+  "restrictions",
+]);
+const switchFieldsOf = (value) =>
+  Object.entries(value).filter(
+    ([name, field]) =>
+      !DETAILED_PROTECTION_FIELDS.has(name) && isObject(field) && Object.hasOwn(field, "enabled"),
+  );
+
+const fieldsMatch = (value, required, optional = {}) =>
+  isObject(value) &&
+  Object.entries(required).every(([name, fits]) => fits(value[name])) &&
+  Object.entries(optional).every(
+    ([name, fits]) => !Object.hasOwn(value, name) || fits(value[name]),
+  );
+
+const isReviewProtection = (value) =>
+  fieldsMatch(
+    value,
+    { dismiss_stale_reviews: isBoolean, require_code_owner_reviews: isBoolean },
+    {
+      url: isString,
+      required_approving_review_count: Number.isInteger,
+      require_last_push_approval: isBoolean,
+      dismissal_restrictions: (rules) => fieldsMatch(rules, {}, { ...ACTOR_LISTS, ...ACTOR_URLS }),
+      bypass_pull_request_allowances: (allowances) => fieldsMatch(allowances, {}, ACTOR_LISTS),
+    },
+  );
+const isPushRestrictions = (value) =>
+  fieldsMatch(value, { ...ACTOR_LISTS, ...ACTOR_URLS, apps_url: isString });
+
 // The protection of the branch asked about. Every on/off setting in it has a
 // boolean `enabled`, and so has each one the file names when GitHub reports it;
 // one GitHub leaves out is off. The required checks have to name their source
@@ -272,12 +310,10 @@ const isProtectionOf = (address, wanted) => (value) => {
     restrictions,
   } = value;
   return (
-    Object.values(value).every(
-      (field) => !isObject(field) || !Object.hasOwn(field, "enabled") || isSwitch(field),
-    ) &&
+    switchFieldsOf(value).every(([, field]) => isSwitch(field)) &&
     named.every((name) => !Object.hasOwn(value, name) || isSwitch(value[name])) &&
-    (reviews == null || isObject(reviews)) &&
-    (restrictions == null || isObject(restrictions)) &&
+    (reviews == null || isReviewProtection(reviews)) &&
+    (restrictions == null || isPushRestrictions(restrictions)) &&
     (checks == null ||
       (isObject(checks) && typeof checks.strict === "boolean" && listOf(isCheck)(checks.checks)))
   );
@@ -326,9 +362,7 @@ export function read(gh, wanted) {
     live = null;
   }
   const flags = Object.fromEntries(
-    Object.entries(live ?? {}).flatMap(([name, value]) =>
-      typeof value?.enabled === "boolean" ? [[name, value.enabled]] : [],
-    ),
+    switchFieldsOf(live ?? {}).map(([name, { enabled }]) => [name, enabled]),
   );
   const { required_signatures: signatures = false, ...switches } = flags;
   return {
