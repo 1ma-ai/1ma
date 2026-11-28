@@ -452,22 +452,28 @@ Requirements:
 - **When a withdrawn key stops working.** An app refuses a package under a withdrawn key from the
   moment it holds the trust change. Before that it cannot tell that the change happened: the old
   trust it is shown is genuine. So the delay has a limit of its own. The trust is a statement signed
-  with the reserve key; its term counts from its signing (proposed 30 days; the delivery document
-  names the maximum). The stolen release key cannot sign such a statement. An app whose newest
-  statement is past its term installs nothing until it gets one in term («could not confirm the keys
-  are current»); if the owner does not re-sign in time, installs stop everywhere until they do. The
-  owner re-signs about a week before the term ends, so a statement signed shortly before a change
-  can reach an app only after it. The limit is therefore the end of the latest statement signed
-  before the change: at most one term, 30 days, after the change, whatever the app was shown. **In
-  plain words for the owner:** for up to 30 days after you withdraw a stolen key, an app that has
+  with the reserve key; its term counts from its signing and is the same for every statement
+  (proposed 30 days; the delivery document fixes it). The stolen release key cannot sign such a
+  statement. An app whose newest statement is past its term installs nothing until it gets one in
+  term («could not confirm the keys are current»); if the owner does not re-sign in time, installs
+  stop everywhere until they do. The job reminds the owner a week before the trust statement ends,
+  apart from the pointer's reminder, and the owner re-signs then, so a statement signed shortly
+  before a change can reach an app only after it. The limit is therefore the latest end among the
+  statements signed before the change that still trust the old key; with one term for all of them,
+  at most one term, 30 days, after the change, whatever the app was shown.
+  **In plain words for the owner:** for up to 30 days after you withdraw a stolen key, an app that has
   not yet received the change can still install a package signed with that key; after that, or as
   soon as the change reaches it, it cannot. The manual way has no such window: the person installing
   compares against the current trust received by the owner's own way, before the downloaded package
   runs.
+- **Time the check can trust.** Every term in this section, the pointer's too, is checked against
+  time the app has established reliably, not the Mac's clock alone: a clock set back or lagging does
+  not extend a term. The delivery document chooses the source of time and the allowed difference.
+  When the app cannot confirm the time, it installs nothing («could not confirm the time»).
 - **Refused before anything is unpacked**: an unsigned, foreign or withdrawn key, a wrong channel or
   architecture, a pointer and package that do not match, a lower release number, the same number
   with other contents, a pointer past its term («could not confirm this is the latest»), a trust
-  statement past its term. The same
+  statement past its term, a time that cannot be confirmed. The same
   rule for the automatic way, the button, the schedule, the command and the manual procedure. 0009
   is off in client builds, every entrance of it, until it does this.
 - **Dependencies**: a signed server package does not prove what `npm install` later resolves; the
@@ -493,7 +499,8 @@ system and a clean one from an old download, with their different expected resul
 obtained before the change; the same number with other contents; a legitimate manual roll-back. Also
 a clean installation from an old download after the change, three ways: no connection, refused; only
 the old, still valid trust statement, accepted only until that statement's term ends and refused
-after it, on a controlled clock; the change received, refused. Two overlapping genuine statements:
+after it, on a controlled clock; the change received, refused. After the term ends the statement
+is refused also with the Mac's clock lagging or set back; with no confirmable time, installs stop. Two overlapping genuine statements:
 the first seen before the change, the second signed before it and delivered after the first runs
 out; accepted until the second's term ends, refused at its end or as soon as the change arrives. No
 re-signed statement in time: installs refused once the last one runs out. A package under the
