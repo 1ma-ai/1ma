@@ -254,14 +254,6 @@
   },
   "keep": [
     {
-      "text": " moved to bb git ",
-      "reason": "names the bb git command, which keeps its name until the CLI is renamed (phase 3)"
-    },
-    {
-      "text": "Moved to bb git ",
-      "reason": "names the bb git command, which keeps its name until the CLI is renamed (phase 3)"
-    },
-    {
       "text": "A thread id is required: bb provider-retry ",
       "reason": "CLI usage hint for the bb provider-retry command"
     },
@@ -306,16 +298,6 @@
       "reason": "owner decision 2026-11-16 (rebrand stage 2): the store says plainly that this third-party catalog is not reviewed by 1ma"
     },
     {
-      "text": "bb connect is turned off on this server. Enable its plugin to get a private getbb.app address.",
-      "to": "1ma Connect is not available on this server yet. It will give this 1ma a private address that only you can open.",
-      "reason": "owner decision 2026-11-16 (rebrand stage 2): the onboarding Devices row stays and is renamed; bb connect is not shipped in 1ma, so there is no plugin to enable until 1ma Connect exists"
-    },
-    {
-      "text": "bb connect gives this bb a private getbb.app address that only you can open.",
-      "to": "1ma Connect gives this 1ma a private address that only you can open.",
-      "reason": "owner decision 2026-11-16 (rebrand stage 2): the onboarding Devices row stays and is renamed for 1ma Connect"
-    },
-    {
       "text": "Written by bb: runs the bb command of the bb installed on this computer.",
       "to": "Written by 1ma: runs the bb command of the 1ma installed on this computer.",
       "reason": "CLI launcher marker: 1ma must not take over the bb command of a bb installed on the same computer; the CLI keeps its bb name until phase 3"
@@ -347,6 +329,11 @@
     }
   ],
   "product": [
+    {
+      "file": "apps/app/src/components/sidebar/SidebarUpdatesBadge.tsx",
+      "text": "bb ${…}",
+      "reason": "the heading of the app's own row in the sidebar updates card, the product and the version it updates to; bb followed by a value at the start of a text reads as a command line otherwise"
+    },
     {
       "file": "apps/app/src/components/settings/ReleaseNotesPanel.tsx",
       "text": "bb ${…} changelog",
@@ -408,6 +395,18 @@
       "reason": "the updates card for the app itself is labelled with the product name; single words in tests are data elsewhere (project names, provider filters) and never follow automatically"
     },
     {
+      "file": "apps/app/src/components/sidebar/SidebarUpdatesBadge.test.tsx",
+      "find": "\"bb 0.49.0\"",
+      "replace": "\"1ma 0.49.0\"",
+      "reason": "the heading of the app's own row in the sidebar updates card is the product and the version it updates to; the product followed by a value shares one word with the source and never follows automatically"
+    },
+    {
+      "file": "apps/app/src/components/sidebar/SidebarUpdatesBadge.test.tsx",
+      "find": "\"bb 5c1cf4e\"",
+      "replace": "\"1ma 5c1cf4e\"",
+      "reason": "the same heading for an update built from source, where the version is a commit"
+    },
+    {
       "file": "plugins/bb-guide/app.test.ts",
       "find": "label: \"spec\", from: 34, to: 39 }",
       "replace": "label: \"spec\", from: 35, to: 40 }",
@@ -418,12 +417,6 @@
       "find": "expect(alerts[0]?.textContent).not.toContain(\"Restart bb\");",
       "replace": "expect(alerts[0]?.textContent).not.toContain(\"Restart 1ma\");",
       "reason": "the degraded banner must not tell the user to restart the app; in 1ma that text would read Restart 1ma, so the old wording would make the check pass without testing anything"
-    },
-    {
-      "file": "apps/app/src/components/plugin/management/PluginUpdatesCard.test.tsx",
-      "find": "expect(blockedStatus.textContent).not.toContain(\"Update bb\");",
-      "replace": "expect(blockedStatus.textContent).not.toContain(\"Update 1ma\");",
-      "reason": "a blocked plugin update must not suggest updating the app; in 1ma that advice reads Update 1ma., so the old wording would make the check pass without testing anything"
     },
     {
       "file": "apps/server/test/services/plugin-catalog/bb-official-generator.test.ts",

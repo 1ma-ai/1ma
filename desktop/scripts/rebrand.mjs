@@ -205,12 +205,32 @@ export function rebrandString(text, context, rules) {
   }
   return { result: compose(text, decisions, rules.replacement), decisions };
 }
-function cookedToRaw(raw) {
-  const map = [];
+// Where each cooked unit of a literal starts and ends in its raw text, read as
+// TypeScript's scanner reads it; a line continuation belongs to neither
+// neighbour. A template turns a line break into one \n, and a tagged template
+// keeps an escape it cannot read as written.
+function cookedToRaw(raw, { template = false, tagged = false } = {}) {
+  const starts = [];
+  const ends = [];
+  const unit = (start, end) => {
+    starts.push(start);
+    ends.push(end);
+  };
+  const digits = (from, pattern, limit) => {
+    let at = from;
+    while (at < limit && pattern.test(raw[at] ?? "")) at += 1;
+    return at;
+  };
   let i = 0;
   while (i < raw.length) {
+    if (template && raw[i] === "\r") {
+      const length = raw[i + 1] === "\n" ? 2 : 1;
+      unit(i, i + length);
+      i += length;
+      continue;
+    }
     if (raw[i] !== "\\") {
-      map.push(i);
+      unit(i, i + 1);
       i += 1;
       continue;
     }
@@ -223,19 +243,30 @@ function cookedToRaw(raw) {
       i += 2;
       continue;
     }
-    let length = 2;
+    let end = i + 2;
     let units = 1;
-    if (next === "x") length = 4;
-    else if (next === "u" && raw[i + 2] === "{") {
+    let asWritten = false;
+    if (/[0-7]/.test(next)) {
+      end = digits(i + 2, /[0-7]/, i + (next <= "3" ? 4 : 3));
+      asWritten = tagged && !(next === "0" && !/[0-9]/.test(raw[i + 2] ?? ""));
+    } else if (next === "8" || next === "9") asWritten = tagged;
+    else if (next === "x") {
+      end = digits(i + 2, /[0-9a-f]/i, i + 4);
+      asWritten = end !== i + 4;
+    } else if (next === "u" && raw[i + 2] === "{") {
       const close = raw.indexOf("}", i);
-      length = close - i + 1;
+      end = close === -1 ? raw.length : close + 1;
       units = Number.parseInt(raw.slice(i + 3, close), 16) > 0xffff ? 2 : 1;
-    } else if (next === "u") length = 6;
-    for (let unit = 0; unit < units; unit += 1) map.push(i);
-    i += length;
+    } else if (next === "u") {
+      end = digits(i + 2, /[0-9a-f]/i, i + 6);
+      asWritten = end !== i + 6;
+    }
+    if (asWritten) for (let at = i; at < end; at += 1) unit(at, at + 1);
+    else for (let count = 0; count < units; count += 1) unit(i, end);
+    i = end;
   }
-  map.push(raw.length);
-  return map;
+  starts.push(raw.length);
+  return { starts, ends, end: i };
 }
 
 function calleeName(call) {
@@ -291,20 +322,30 @@ function contextOf(node) {
   return { kind: "value" };
 }
 
+// The raw range that length cooked units from an index cover. A map that does
+// not read the literal to its end with as many units as TypeScript gives it is
+// refused rather than used.
+function rawOffsets(file, segment) {
+  const map = segment.escapes ? cookedToRaw(segment.raw, segment) : null;
+  if (map && (map.ends.length !== segment.cooked.length || map.end !== segment.raw.length))
+    throw new Error(`${file}: cannot map the literal at ${segment.rawStart}`);
+  const start = (index) => segment.rawStart + (map ? map.starts[index] : index);
+  const end = (index) => segment.rawStart + (map ? map.ends[index] : index + 1);
+  return (at, length) => [start(at), length === 0 ? start(at) : end(at + length - 1)];
+}
+
 function editsFor(file, text, segment, decisions, replacement) {
-  const map = segment.escapes ? cookedToRaw(segment.raw) : null;
-  const toRaw = (index) => segment.rawStart + (map ? map[index] : index);
+  const range = rawOffsets(file, segment);
   const edits = [];
   for (const decision of decisions) {
     if (decision.kind === "product") {
-      const at = toRaw(decision.index);
-      const found = text.slice(at, at + 2);
+      const [start, end] = range(decision.index, 2);
+      const found = text.slice(start, end);
       if (found.toLowerCase() !== "bb")
-        throw new Error(`${file}: cannot map "bb" at ${at} (found ${JSON.stringify(found)})`);
-      edits.push({ start: at, end: at + 2, text: replacement });
+        throw new Error(`${file}: cannot map "bb" at ${start} (found ${JSON.stringify(found)})`);
+      edits.push({ start, end, text: replacement });
     } else if (decision.kind === "replace" || decision.kind === "name") {
-      const start = toRaw(decision.index);
-      const end = toRaw(decision.index + decision.length);
+      const [start, end] = range(decision.index, decision.length);
       if (end - start !== decision.length)
         throw new Error(`${file}: an override covers escaped text at ${start}`);
       const unsafe = segment.regex ? /(?<!\\)\/|[\n\r]/u : /["'`\\$]/u;
@@ -316,6 +357,13 @@ function editsFor(file, text, segment, decisions, replacement) {
   return edits;
 }
 
+function taggedTemplate(node) {
+  let current = node.parent;
+  if (current && ts.isTemplateSpan(current)) current = current.parent;
+  if (current && ts.isTemplateExpression(current)) current = current.parent;
+  return Boolean(current && ts.isTaggedTemplateExpression(current));
+}
+
 function literalSegment(node, source, text) {
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
     const rawStart = node.getStart(source) + 1;
@@ -324,15 +372,21 @@ function literalSegment(node, source, text) {
       rawStart,
       raw: text.slice(rawStart, node.end - 1),
       escapes: !(node.parent && ts.isJsxAttribute(node.parent)),
+      template: ts.isNoSubstitutionTemplateLiteral(node),
+      tagged: taggedTemplate(node),
     };
   }
-  if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node))
+  if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) {
+    const rawStart = node.getStart(source) + 1;
     return {
       cooked: node.text,
-      rawStart: node.getStart(source) + 1,
-      raw: node.rawText ?? "",
+      rawStart,
+      raw: text.slice(rawStart, node.end - (ts.isTemplateTail(node) ? 1 : 2)),
       escapes: true,
+      template: true,
+      tagged: taggedTemplate(node),
     };
+  }
   if (ts.isJsxText(node))
     return {
       cooked: node.text,
@@ -355,6 +409,12 @@ function literalEdits(file, text, options) {
     const full = segments.map((segment) => segment.cooked).join(PLACEHOLDER);
     if (!/bb/i.test(full)) return;
     if (context.kind === "module" || context.kind === "key") return;
+    let offset = 0;
+    const local = segments.map((segment) => {
+      const start = offset;
+      offset += segment.cooked.length + PLACEHOLDER.length;
+      return { segment, start, end: start + segment.cooked.length, decisions: [] };
+    });
     const { result, decisions } = decide(full, { ...context, file });
     record?.(
       file,
@@ -362,12 +422,6 @@ function literalEdits(file, text, options) {
       display ? result.replaceAll(PLACEHOLDER, "${…}") : result,
       decisions,
     );
-    let offset = 0;
-    const local = segments.map((segment) => {
-      const start = offset;
-      offset += segment.cooked.length + PLACEHOLDER.length;
-      return { segment, start, end: start + segment.cooked.length, decisions: [] };
-    });
     for (const decision of decisions) {
       if (decision.index === undefined) continue;
       const part = local.find((item) => item.start <= decision.index && decision.index < item.end);
@@ -400,22 +454,15 @@ function literalEdits(file, text, options) {
       const literal = node.getText(source);
       const pattern = literal.slice(1, literal.lastIndexOf("/"));
       if (/bb/i.test(pattern)) {
+        const segment = {
+          cooked: pattern,
+          rawStart: node.getStart(source) + 1,
+          raw: pattern,
+          escapes: false,
+          regex: true,
+        };
         const { decisions } = regexes(pattern, { negative: negativeAssertion(node) });
-        edits.push(
-          ...editsFor(
-            file,
-            text,
-            {
-              cooked: pattern,
-              rawStart: node.getStart(source) + 1,
-              raw: pattern,
-              escapes: false,
-              regex: true,
-            },
-            decisions,
-            rules.replacement,
-          ),
-        );
+        edits.push(...editsFor(file, text, segment, decisions, rules.replacement));
       }
       return;
     }
@@ -569,7 +616,7 @@ export function createIndex(rules) {
       byKey.set(key, list);
     }
   };
-  const variants = (text, product, kept, scope, explicit, rebranded) => {
+  const variants = (text, product, kept, scope, explicit, rebranded, rule = null) => {
     const base = { text, map: Array.from({ length: text.length }, (_, i) => i) };
     const squashed = collapsed(text);
     const cut = trimmed(squashed.text);
@@ -583,6 +630,7 @@ export function createIndex(rules) {
         scope,
         explicit,
         rebranded,
+        rule,
         match: lowered(form.text),
         product: move(product),
         kept: move(kept),
@@ -659,13 +707,14 @@ export function createIndex(rules) {
         if (followable(from)) replaceEntry(from, decision.to, scope);
       }
     },
-    keep(text, scope = null, explicit = false) {
-      variants(text, [], occurrences(text), scope, explicit, false);
+    keep(text, scope = null, explicit = false, rule = null) {
+      variants(text, [], occurrences(text), scope, explicit, false, rule);
     },
+    used: rules.used,
   };
   for (const entry of rules.keep)
     if (entry.file === undefined)
-      index.keep(entry.text.replaceAll("${…}", PLACEHOLDER), null, true);
+      index.keep(entry.text.replaceAll("${…}", PLACEHOLDER), null, true, entry);
   return index;
 }
 
@@ -677,16 +726,25 @@ export function createIndex(rules) {
 // rests on where both happen to end and needs three words. Only sources of the test's package and its
 // dependencies count (scope). Explicit rules win; then the longest overlap; then,
 // for an overlap of three words or more, sources treated like the test's own
-// package (renamed or left alone); a remaining tie keeps bb. A bb the rules
+// package (renamed or left alone); then a source the test repeats in full, over
+// one that merely contains the same characters (a label "bb update" beside a
+// command line "bb updates app …"); a remaining tie keeps bb. A keep rule
+// counts as used when the result without it would differ. A bb the rules
 // would keep in the test itself (a command, code, an identifier, a bb cloud
 // service) is never changed (veto). The relaxed mode, used only to flag
-// suspicious negative assertions, accepts two-word partial overlaps and lets a
-// renamed source win a tie.
-export function propagate(
-  text,
-  index,
-  { regex = false, scope = null, veto = null, keep = [], rebranded = true, relaxed = false } = {},
-) {
+// suspicious negative assertions, accepts two-word partial overlaps, puts a
+// renamed source the test repeats in full before the test's own kind, and lets
+// a renamed source win a tie.
+export function propagate(text, index, options = {}) {
+  const {
+    regex = false,
+    scope = null,
+    veto = null,
+    keep = [],
+    rebranded = true,
+    relaxed = false,
+    without = null,
+  } = options;
   const haystack = lowered(text);
   const marks = occurrences(haystack);
   const evidence = new Map();
@@ -694,7 +752,9 @@ export function propagate(
   const rank = (found) => [
     found.explicit ? 1 : 0,
     found.length,
+    relaxed && found.repeated && found.kind === "product" && found.rebranded ? 1 : 0,
     found.explicit || (found.words >= 3 && found.rebranded === rebranded) ? 1 : 0,
+    found.repeated ? 1 : 0,
     (found.kind === "kept") !== relaxed ? 1 : 0,
   ];
   const consider = (offset, found) => {
@@ -717,7 +777,8 @@ export function propagate(
   const visible = (entry) => entry.scope === null || scope === null || scope.has(entry.scope);
   const candidates = new Set();
   for (const key of anchorKeys(haystack))
-    for (const entry of index.byKey.get(key) ?? []) if (visible(entry)) candidates.add(entry);
+    for (const entry of index.byKey.get(key) ?? [])
+      if (visible(entry) && (without === null || entry.rule !== without)) candidates.add(entry);
   for (const entry of index.replaces) {
     if (!visible(entry)) continue;
     for (const form of entry.forms) {
@@ -745,6 +806,7 @@ export function propagate(
         if (entry.explicit && end - start !== needle.length) continue;
         if (haystack.slice(start, end) !== needle.slice(start - shift, end - shift)) continue;
         const whole = end - start === needle.length || end - start === haystack.length;
+        const repeated = end - start === needle.length && end - start === haystack.length;
         while (start < end && /\s/u.test(haystack[start])) start += 1;
         while (end > start && /\s/u.test(haystack[end - 1])) end -= 1;
         const overlap = haystack.slice(start, end);
@@ -758,8 +820,10 @@ export function propagate(
             length: overlap.length,
             words,
             kind,
+            repeated,
             explicit: entry.explicit,
             rebranded: entry.rebranded,
+            rule: entry.rule,
           });
         }
       }
@@ -797,7 +861,12 @@ export function propagate(
     if (veto?.(text, offset)) continue;
     decisions.push({ index: offset, kind: "product" });
   }
-  return { result: compose(text, decisions, index.replacement), decisions };
+  const result = compose(text, decisions, index.replacement);
+  if (without === null)
+    for (const rule of new Set([...evidence.values()].map((found) => found.rule)))
+      if (rule && propagate(text, index, { ...options, without: rule }).result !== result)
+        index.used?.add(rule);
+  return { result, decisions };
 }
 
 // A template part aligned on a bb of the test string, with the template parts
@@ -1300,36 +1369,44 @@ export function rebrandTree(root, rules, { write = false } = {}) {
           decisions.push({ ...decision, index: decision.index + start });
       return { result: compose(pattern, decisions, rules.replacement), decisions };
     };
-    const flag = (literal, decided, relaxed) => {
-      const reviewed = (testEdits.get(file) ?? []).some((entry) => entry.find.includes(literal));
-      if (relaxed.result !== decided.result && !reviewed)
+    const edits = literalEdits(file, text, {
+      rules,
+      decide: (cooked) => named(cooked) ?? propagate(cooked, index, options),
+      regexes: (pattern) => byAlternative(pattern, {}),
+    });
+    text = rewrite(file, edits, text, testsChanged);
+    const rewritten = text;
+    for (const entry of testEdits.get(file) ?? []) {
+      if (entry.find === "")
+        throw new Error(
+          `${file}: a testReplace rule has an empty find; give it the text to change`,
+        );
+      if (!text.includes(entry.find))
+        throw new Error(`${file}: testReplace "${entry.find}" no longer matches; review it`);
+      text = text.replaceAll(entry.find, () => entry.replace);
+      if (!testsChanged.includes(file)) testsChanged.push(file);
+    }
+    if (write && text !== rewritten) writeFileSync(path.join(root, file), text);
+    // A negative assertion is checked on the text the test will run, by value:
+    // a testReplace rule counts only by what it leaves there.
+    const check = (literal, relaxed) => {
+      if (relaxed.result !== literal)
         suspicious.push(
           `${file}: ${JSON.stringify(literal)} stays as is, but a renamed source suggests ${JSON.stringify(relaxed.result)}`,
         );
     };
-    const edits = literalEdits(file, text, {
+    literalEdits(file, text, {
       rules,
       decide: (cooked, context) => {
-        const decided = named(cooked) ?? propagate(cooked, index, options);
         if (context.negative && !named(cooked))
-          flag(cooked, decided, propagate(cooked, index, { ...options, relaxed: true }));
-        return decided;
+          check(cooked, propagate(cooked, index, { ...options, relaxed: true }));
+        return { result: cooked, decisions: [] };
       },
       regexes: (pattern, context) => {
-        const decided = byAlternative(pattern, {});
-        if (context.negative) flag(pattern, decided, byAlternative(pattern, { relaxed: true }));
-        return decided;
+        if (context.negative) check(pattern, byAlternative(pattern, { relaxed: true }));
+        return { decisions: [] };
       },
     });
-    text = rewrite(file, edits, text, testsChanged);
-    for (const entry of testEdits.get(file) ?? []) {
-      if (!text.includes(entry.find))
-        throw new Error(`${file}: testReplace "${entry.find}" no longer matches; review it`);
-      const next = text.replaceAll(entry.find, entry.replace);
-      if (!testsChanged.includes(file)) testsChanged.push(file);
-      if (write) writeFileSync(path.join(root, file), next);
-      text = next;
-    }
   }
   for (const file of [...testEdits.keys(), ...testKeeps.keys()])
     if (!files.includes(file)) throw new Error(`a test rule names a missing file: ${file}`);
@@ -1345,14 +1422,31 @@ export function rebrandTree(root, rules, { write = false } = {}) {
     throw new Error(
       `These negative assertions in bb's tests may check text the rebrand renamed, so they could pass without testing anything. Add a testReplace or testKeep entry with a reason for each:\n${suspicious.join("\n")}`,
     );
+  const unmatched = ["replace", "product", "keep"].flatMap((kind) =>
+    (rules[kind] ?? [])
+      .filter((entry) => entry.file === undefined && !rules.used.has(entry))
+      .map((entry) => ({ kind, text: entry.text })),
+  );
   return {
     context: { index, graph, rules, veto },
+    unmatched,
     inventory,
     changed: [...changed, ...testsChanged],
     sourcesChanged: changed,
     testsChanged,
     counts,
   };
+}
+
+// A rule without a file is checked against the whole of bb: when bb rewords or
+// drops the text, the decision the rule recorded stops applying without a sign.
+export function requireEveryRuleMatches(unmatched) {
+  if (unmatched.length === 0) return;
+  throw new Error(
+    `These rules in desktop/rebrand/rules.json match nothing in bb any more. Find what bb says there now and move or remove each rule:\n${unmatched
+      .map(({ kind, text }) => `${kind}: ${JSON.stringify(text)}`)
+      .join("\n")}`,
+  );
 }
 
 export function formatInventory(inventory) {
@@ -1377,9 +1471,10 @@ function main(argv) {
   }
   const rules = loadRules();
   const lockPath = path.join(REBRAND_DIR, "inventory.json");
-  const { inventory, changed, counts } = rebrandTree(path.resolve(tree), rules, {
+  const { inventory, changed, counts, unmatched } = rebrandTree(path.resolve(tree), rules, {
     write: command === "apply",
   });
+  requireEveryRuleMatches(unmatched);
   const actual = formatInventory(inventory);
   if (command === "update") {
     writeFileSync(lockPath, actual);

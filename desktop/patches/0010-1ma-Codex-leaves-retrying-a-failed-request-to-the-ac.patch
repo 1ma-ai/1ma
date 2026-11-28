@@ -38,10 +38,10 @@ index 19c3632..385ba1f 100644
      const launch = resolveAppServerLaunch({});
      expect(launch).toEqual({ command: "codex", args: ["app-server"] });
 diff --git a/plugins/provider-codex/src/bridge/bridge.ts b/plugins/provider-codex/src/bridge/bridge.ts
-index ccda32c..7d33dc2 100644
+index 08ffd36..85df96b 100644
 --- a/plugins/provider-codex/src/bridge/bridge.ts
 +++ b/plugins/provider-codex/src/bridge/bridge.ts
-@@ -392,6 +392,8 @@ export function resolveAppServerLaunch(env: NodeJS.ProcessEnv = process.env): {
+@@ -394,6 +394,8 @@ export function resolveAppServerLaunch(env: NodeJS.ProcessEnv = process.env): {
        "-c",
        "model_providers.bb-account-pool.supports_websockets=false",
        "-c",

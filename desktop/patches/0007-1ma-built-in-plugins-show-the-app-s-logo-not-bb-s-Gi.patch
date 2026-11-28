@@ -28,10 +28,10 @@ index 15b5f2b..7d2c56b 100644
      <Avatar
        role="img"
 diff --git a/apps/app/src/views/ToolsView.plugin-detail.test.tsx b/apps/app/src/views/ToolsView.plugin-detail.test.tsx
-index 7cce1c8..e2fe817 100644
+index 3585ead..cf0c016 100644
 --- a/apps/app/src/views/ToolsView.plugin-detail.test.tsx
 +++ b/apps/app/src/views/ToolsView.plugin-detail.test.tsx
-@@ -983,9 +983,14 @@ describe("BB Official plugin detail routing", () => {
+@@ -987,9 +987,14 @@ describe("BB Official plugin detail routing", () => {
        expect(within(header).getAllByText("BB Official")).toHaveLength(1);
        expect(
          within(header).getByRole("img", {

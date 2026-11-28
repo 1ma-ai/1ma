@@ -1,7 +1,8 @@
 name: Desktop bb tests
 
-# Runs bb's own test suite, in the shards bb's CI uses, on the tree 1ma Desktop
-# builds from: the pinned bb release with the 1ma patches, assets and rebrand.
+# Runs bb's own test suite, in the shards bb's CI uses, and bb's lint and
+# typecheck on the tree 1ma Desktop builds from: the pinned bb release with the
+# 1ma patches, assets and rebrand.
 # A manual run with rebrand=false gives the baseline without the rebrand.
 # The paths cover everything the Desktop build depends on, so every build on
 # main has a test run for its commit: desktop-release.yml requires one.
@@ -73,6 +74,46 @@ jobs:
           (cd "$planner" && node scripts/plan-ci.mjs --full) > "$RUNNER_TEMP/selection.json"
           echo "tests=$(node -e 'process.stdout.write(JSON.stringify(require(process.argv[1]).tests))' "$RUNNER_TEMP/selection.json")" >> "$GITHUB_OUTPUT"
 
+  static:
+    name: bb lint and typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Install the desktop tooling
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts --filter 1ma-desktop-tooling
+      - name: Prepare bb with the 1ma patches, assets and rebrand
+        env:
+          REBRAND: ${{ github.event_name != 'workflow_dispatch' || inputs.rebrand }}
+        run: |
+          args=(--out "$RUNNER_TEMP/bb-src")
+          if [[ "$REBRAND" == "false" ]]; then args+=(--no-rebrand); fi
+          node desktop/scripts/prepare.mjs "${args[@]}"
+      - name: Install bb's own pnpm, as bb's CI does
+        working-directory: ${{ runner.temp }}/bb-src
+        run: |
+          version="$(node --print 'require("./package.json").packageManager.replace(/^pnpm@/, "")')"
+          GITHUB_WORKSPACE="$PWD" PNPM_VERSION="$version" bash .github/actions/setup-workspace/install-pnpm.sh
+      - name: Install bb dependencies
+        working-directory: ${{ runner.temp }}/bb-src
+        run: bash .github/actions/setup-workspace/install-dependencies.sh
+      - name: Put the 1ma plugins in as built-in plugins
+        working-directory: ${{ runner.temp }}/bb-src
+        run: node "$GITHUB_WORKSPACE/desktop/scripts/embed-plugins.mjs" "$PWD"
+      # bb's static-checks job. bb forbids code comments in the packages that
+      # have a lint script, and its type-aware lint catches promises left
+      # unhandled; a patch that breaks either would otherwise pass here.
+      - name: Lint and typecheck, as bb's CI does
+        working-directory: ${{ runner.temp }}/bb-src
+        run: pnpm exec turbo run lint lint:type-aware typecheck --continue --output-logs=errors-only --concurrency=4
+
   tests:
     name: bb tests (${{ matrix.shard }})
     needs: plan
@@ -141,7 +182,9 @@ jobs:
       # Owner decision 24.11.2026: tests of bb parts 1ma does not ship are not
       # run. @bb/ai-gateway is bb's cloud AI gateway (its rate-limit test counts
       # per clock minute and fails when the requests straddle one);
-      # pr-approval-workflows tests bb's own GitHub PR gate (pr-gate.yml) and
+      # @bb/connect-next is bb's hosted connection gateway (its region test
+      # restarts frps and failed when the restart did not come up, run
+      # 46126332987, on a bb tree that passed six times before); pr-approval-workflows tests bb's own GitHub PR gate (pr-gate.yml) and
       # times out on loaded runners. rm fails once bb moves the file, so the
       # entry is reviewed with the new release.
       - name: Leave out the tests of bb parts 1ma does not ship
@@ -156,7 +199,7 @@ jobs:
         # with a reason in desktop/known-test-failures.json; any other failure fails.
         run: |
           set +e
-          ${{ contains(matrix.filter, '--filter=@bb/desktop') && 'xvfb-run -a' || '' }} pnpm exec turbo run test ${{ matrix.filter }} --filter='!@bb/ai-gateway' --continue --output-logs=new-only --concurrency=4 2>&1 | tee "$RUNNER_TEMP/test.log"
+          ${{ contains(matrix.filter, '--filter=@bb/desktop') && 'xvfb-run -a' || '' }} pnpm exec turbo run test ${{ matrix.filter }} --filter='!@bb/ai-gateway' --filter='!@bb/connect-next' --continue --output-logs=new-only --concurrency=4 2>&1 | tee "$RUNNER_TEMP/test.log"
           status="${PIPESTATUS[0]}"
           set -e
           node "$GITHUB_WORKSPACE/desktop/scripts/known-test-failures.mjs" "$RUNNER_TEMP/test.log" "$status"

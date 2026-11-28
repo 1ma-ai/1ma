@@ -33,10 +33,10 @@ index 7c25886..81b6900 100644
    const appImagePath = args.env.APPIMAGE?.trim() ?? "";
    if (appImagePath.length === 0) {
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 59a72bb..92cdadc 100644
+index 926a08b..41a5298 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -3351,7 +3351,7 @@ async function runDesktopApp(): Promise<void> {
+@@ -3369,7 +3369,7 @@ async function runDesktopApp(): Promise<void> {
      desktopAutoUpdateService.start();
    } else {
      desktopLogger.info(

@@ -44,10 +44,10 @@ index 27d0806..dfd00d2 100644
  An unconfigured shared source remains selectable and shows setup guidance.
  Failed refreshes retain the last available measurements with a retry notice.
 diff --git a/plugins/provider-usage/app.test.tsx b/plugins/provider-usage/app.test.tsx
-index 4de085c..1fb6a18 100644
+index a0d5083..6d96c7f 100644
 --- a/plugins/provider-usage/app.test.tsx
 +++ b/plugins/provider-usage/app.test.tsx
-@@ -297,7 +297,7 @@ describe("provider usage footer disclosure", () => {
+@@ -306,7 +306,7 @@ describe("provider usage footer disclosure", () => {
      ).toBeTruthy();
      expect(slot.getByText("97%")).toBeTruthy();
      expect(
@@ -57,7 +57,7 @@ index 4de085c..1fb6a18 100644
  
      fireEvent.pointerDown(machinePicker, { button: 0 });
 diff --git a/plugins/provider-usage/app.tsx b/plugins/provider-usage/app.tsx
-index b685753..f43386c 100644
+index b82b8d1..e7442f8 100644
 --- a/plugins/provider-usage/app.tsx
 +++ b/plugins/provider-usage/app.tsx
 @@ -36,6 +36,7 @@ import {

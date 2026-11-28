@@ -58,6 +58,16 @@ jobs:
         run: pnpm --filter 1ma-desktop-tooling run test
       - name: Prepare bb with the 1ma patches, assets and rebrand
         run: node desktop/scripts/prepare.mjs --out "$RUNNER_TEMP/bb"
+      - name: Run bb's own source checks on the patched tree
+        run: |
+          base=$(node -p "require('./desktop/upstream.json').commit")
+          cd "$RUNNER_TEMP/bb"
+          node scripts/check-source-nul.mjs
+          node scripts/check-provider-literal-ratchet.mjs --base "$base"
+          node scripts/check-test-process-identity.mjs
+          node scripts/check-branch-ref-owner.mjs
+      - name: Check the embedded 1ma plugins for literal NUL bytes, as bb checks its own sources
+        run: node desktop/scripts/check-plugin-nul.mjs
       - name: Keep the rebrand diff for review
         run: git -C "$RUNNER_TEMP/bb" diff HEAD~1 HEAD > "$RUNNER_TEMP/rebrand.diff"
       - uses: actions/upload-artifact@v4
