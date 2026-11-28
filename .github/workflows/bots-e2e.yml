@@ -2,17 +2,6 @@ name: Bots end-to-end
 
 on:
   pull_request:
-    paths:
-      - "plugins/1ma-bots/**"
-      - "plugins/1ma-sidebar/**"
-      - "e2e/bots/**"
-      - "e2e/lib/**"
-      - ".github/workflows/bots-e2e.yml"
-      # How the plugins are installed and built: bb-app's own SDK comes from
-      # packageExtensions in pnpm-workspace.yaml.
-      - "package.json"
-      - "pnpm-workspace.yaml"
-      - "pnpm-lock.yaml"
   workflow_dispatch:
 
 concurrency:
@@ -26,8 +15,42 @@ env:
   PLAYWRIGHT_VERSION: 1.55.0
 
 jobs:
+  changes:
+    name: Bots end-to-end paths changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.paths.outputs.changed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: paths
+        name: Does this pull request touch what the workflow checks
+        env:
+          # package.json, pnpm-workspace.yaml, pnpm-lock.yaml and .nvmrc are how
+          # the plugins are installed and built: bb-app's own SDK comes from
+          # packageExtensions in pnpm-workspace.yaml. The two scripts decide
+          # whether this workflow runs and what its result is.
+          PATHS: |
+            plugins/1ma-bots/**
+            plugins/1ma-sidebar/**
+            e2e/bots/**
+            e2e/lib/**
+            .github/workflows/bots-e2e.yml
+            scripts/lib/changed-paths.mjs
+            scripts/lib/workflow-result.mjs
+            package.json
+            pnpm-workspace.yaml
+            pnpm-lock.yaml
+            .nvmrc
+        run: node scripts/lib/changed-paths.mjs
+
   e2e:
     name: One 1ma server with the bots and sidebar plugins
+    needs: changes
+    if: needs.changes.outputs.changed == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -35,11 +58,11 @@ jobs:
         run: |
           echo "E2E_ROOT=$RUNNER_TEMP/bots-e2e" >> "$GITHUB_ENV"
           echo "E2E_PLAYWRIGHT_DIR=$RUNNER_TEMP/playwright" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -88,8 +111,27 @@ jobs:
           done
       - name: Sidebar screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bots-sidebar-screenshots
           path: ${{ env.E2E_ROOT }}/bots/screenshots
           if-no-files-found: warn
+
+  # The one check of this workflow that a merge into main requires: it reports on
+  # every pull request. Touched paths need every job to succeed, untouched paths
+  # need every job skipped; scripts/lib/workflow-result.mjs spells the verdict out,
+  # because GitHub itself takes a skipped job for a passed one.
+  result:
+    name: Bots end-to-end result
+    if: always()
+    needs: [changes, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Every job the event calls for passed, or the paths are untouched
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/lib/workflow-result.mjs

@@ -9,10 +9,10 @@ Subject: [PATCH] 1ma: built-in plugins load before installed ones
  2 files changed, 68 insertions(+), 2 deletions(-)
 
 diff --git a/apps/server/src/services/plugins/plugin-runtime.ts b/apps/server/src/services/plugins/plugin-runtime.ts
-index e1fadaf..f6428f9 100644
+index f33cc94..aa22992 100644
 --- a/apps/server/src/services/plugins/plugin-runtime.ts
 +++ b/apps/server/src/services/plugins/plugin-runtime.ts
-@@ -2202,8 +2202,12 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
+@@ -2249,8 +2249,12 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
    }
  
    async function loadAll(): Promise<void> {

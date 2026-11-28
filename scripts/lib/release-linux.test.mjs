@@ -167,27 +167,6 @@ describe("deploying", () => {
     assert.ok(lines.includes("1ma-theme: built into the app, comes with its updates; left alone"));
   });
 
-  test("each install from the release is marked with the repository and commit first", () => {
-    const marked = [];
-    const fake = fakeBb({ sources: onServer });
-    deployPlugins({
-      entries,
-      replaceManaged: false,
-      bb: fake.bb,
-      log: () => {},
-      mark: (directory) => {
-        marked.push(directory);
-        fake.calls.push(`mark ${directory}`);
-      },
-    });
-    assert.deepEqual(fake.calls, [
-      "mark /release/plugins/1ma-theme",
-      "install /release/plugins/1ma-theme",
-      "mark /release/plugins/1ma-brand",
-      "install /release/plugins/1ma-brand",
-    ]);
-  });
-
   test("managed installs are left alone without --replace-managed", () => {
     const fake = fakeBb({
       sources: {

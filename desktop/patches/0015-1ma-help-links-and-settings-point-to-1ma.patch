@@ -25,19 +25,19 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  .../settings/UpdatesSettingsSection.test.tsx  | 375 +++++++-----------
  .../settings/UpdatesSettingsSection.tsx       |  71 +---
  .../settings/release-notes-model.test.ts      | 110 +++++
- .../settings/release-notes-model.ts           |  42 +-
+ .../settings/release-notes-model.ts           |  37 +-
  .../src/components/settings/release-notes.ts  |  12 +-
  .../components/settings/settings-nav.test.ts  |  21 +
  .../src/components/settings/settings-nav.tsx  |  10 +-
  .../settings/settings-search-anchors.test.tsx |   5 +-
  .../settings/settings-search.test.ts          |   9 +
  .../components/settings/settings-search.ts    |   2 +
- .../components/settings/settings-sections.ts  |  18 +-
+ .../components/settings/settings-sections.ts  |  13 +-
  .../app/src/components/sidebar/AppSidebar.tsx |   8 -
  .../sidebar/sidebarFooterPreferences.ts       |   9 +-
  apps/desktop/src/menu.ts                      |   3 +-
  apps/desktop/test/menu.test.ts                |  19 +-
- 18 files changed, 411 insertions(+), 365 deletions(-)
+ 18 files changed, 401 insertions(+), 365 deletions(-)
 
 diff --git a/apps/app/src/components/plugin/PluginSidebarFooterItems.test.tsx b/apps/app/src/components/plugin/PluginSidebarFooterItems.test.tsx
 index 37080be..fe9cdc0 100644
@@ -216,10 +216,10 @@ index e84bbe9..0f9dee9 100644
              </BbUpdatesCard>
            </div>
 diff --git a/apps/app/src/components/settings/UpdatesSettingsSection.test.tsx b/apps/app/src/components/settings/UpdatesSettingsSection.test.tsx
-index ea4f093..233c6f7 100644
+index e6cd45a..2750976 100644
 --- a/apps/app/src/components/settings/UpdatesSettingsSection.test.tsx
 +++ b/apps/app/src/components/settings/UpdatesSettingsSection.test.tsx
-@@ -525,18 +525,11 @@ describe("UpdatesSettingsSection", () => {
+@@ -534,18 +534,11 @@ describe("UpdatesSettingsSection", () => {
        });
      }
  
@@ -240,7 +240,7 @@ index ea4f093..233c6f7 100644
        expect(recordTelemetryEvent).not.toHaveBeenCalled();
      });
  
-@@ -566,197 +559,64 @@ describe("UpdatesSettingsSection", () => {
+@@ -575,197 +568,64 @@ describe("UpdatesSettingsSection", () => {
        renderSection();
        fireEvent.click(releaseNotesButton(nightly));
  
@@ -471,7 +471,7 @@ index ea4f093..233c6f7 100644
  
        function useSourceCheckout(
          current: string,
-@@ -785,47 +645,6 @@ The published lede.
+@@ -794,47 +654,6 @@ The published lede.
          );
        }
  
@@ -519,7 +519,7 @@ index ea4f093..233c6f7 100644
        it("offers no changelog when nothing is incoming", async () => {
          useSourceCheckout("0.48.0", null);
          renderSection();
-@@ -3009,31 +2828,83 @@ The published lede.
+@@ -3067,31 +2886,83 @@ The published lede.
        return bbCard;
      }
  
@@ -613,7 +613,7 @@ index ea4f093..233c6f7 100644
        });
      });
  
-@@ -3074,6 +2945,58 @@ The published lede.
+@@ -3132,6 +3003,58 @@ The published lede.
      ).toBeNull();
    });
  
@@ -673,10 +673,10 @@ index ea4f093..233c6f7 100644
      "shows a desktop-hosted server's own version when the viewing host is %s",
      async (localHostId) => {
 diff --git a/apps/app/src/components/settings/UpdatesSettingsSection.tsx b/apps/app/src/components/settings/UpdatesSettingsSection.tsx
-index 13ee422..37182cd 100644
+index 107ecd1..6e45aa9 100644
 --- a/apps/app/src/components/settings/UpdatesSettingsSection.tsx
 +++ b/apps/app/src/components/settings/UpdatesSettingsSection.tsx
-@@ -118,14 +118,14 @@ import {
+@@ -110,14 +110,14 @@ import {
  } from "@/hooks/queries/system-queries";
  import { sdk } from "@/lib/sdk";
  import {
@@ -693,7 +693,7 @@ index 13ee422..37182cd 100644
  
  const BULK_RETRY_THRESHOLD = 1;
  
-@@ -481,32 +481,19 @@ interface BbAppUpdateRowsProps {
+@@ -473,32 +473,19 @@ interface BbAppUpdateRowsProps {
  
  export interface ReleaseNotesToggle {
    version: string;
@@ -731,7 +731,7 @@ index 13ee422..37182cd 100644
      </button>
    );
  }
-@@ -2038,18 +2025,15 @@ function resolveReleaseNotesVersion(input: ReleaseVersionInput): string | null {
+@@ -2048,18 +2035,15 @@ function resolveReleaseNotesVersion(input: ReleaseVersionInput): string | null {
        input.systemVersion?.currentVersion ??
        null);
    return installed !== null &&
@@ -753,16 +753,16 @@ index 13ee422..37182cd 100644
  export function UpdatesSettingsSection() {
    const queryClient = useQueryClient();
    const inventory = useUpdateInventory();
-@@ -2072,8 +2056,6 @@ export function UpdatesSettingsSection() {
-     number | null
-   >(null);
+@@ -2079,8 +2063,6 @@ export function UpdatesSettingsSection() {
+   const setAutoAppUpdate = useSetAutoAppUpdate();
+   const cancelScheduledAppUpdate = useCancelScheduledAppUpdate();
    const appUpdate = appUpdateStatus.data;
 -  const [openReleaseNotes, setOpenReleaseNotes] =
 -    useState<ReleaseNotesRow | null>(null);
    const pluginUpdateCheck = usePluginUpdateCheck(null, {
      enabled: inventory.plugins !== null,
    });
-@@ -2242,28 +2224,7 @@ export function UpdatesSettingsSection() {
+@@ -2213,28 +2195,7 @@ export function UpdatesSettingsSection() {
      if (version === null) {
        return null;
      }
@@ -792,7 +792,7 @@ index 13ee422..37182cd 100644
    }
    const serverAppRow = (
      <BbAppUpdateRows
-@@ -2323,14 +2284,10 @@ export function UpdatesSettingsSection() {
+@@ -2294,14 +2255,10 @@ export function UpdatesSettingsSection() {
    return (
      <div className="space-y-6">
        <BbUpdatesCard>
@@ -807,9 +807,9 @@ index 13ee422..37182cd 100644
 +          : null}
          {serverAppRow}
 -        {releaseNotesPanel("server")}
-         {updateWhenIdleEnabled &&
-         appUpdate !== undefined &&
+         {appUpdate !== undefined &&
          (appUpdate.support.kind === "supported" ||
+           appUpdate.desktopUpdateSupported === true) ? (
 diff --git a/apps/app/src/components/settings/release-notes-model.test.ts b/apps/app/src/components/settings/release-notes-model.test.ts
 index 56a945a..338982b 100644
 --- a/apps/app/src/components/settings/release-notes-model.test.ts
@@ -932,10 +932,10 @@ index 56a945a..338982b 100644
  
  Fetched lede.
 diff --git a/apps/app/src/components/settings/release-notes-model.ts b/apps/app/src/components/settings/release-notes-model.ts
-index 6c4c240..078562b 100644
+index 6c4c240..311e94b 100644
 --- a/apps/app/src/components/settings/release-notes-model.ts
 +++ b/apps/app/src/components/settings/release-notes-model.ts
-@@ -7,11 +7,17 @@ import type { ChangelogEntry } from "../../../../../changelog-parser";
+@@ -7,11 +7,16 @@ import type { ChangelogEntry } from "../../../../../changelog-parser";
  
  const RELEASE_VERSION_PATTERN = /^\d+(?:\.\d+){1,3}$/;
  const NIGHTLY_VERSION_PATTERN = /^(\d+(?:\.\d+){1,3})-nightly\.\d+(?:\.\d+)*$/;
@@ -945,7 +945,6 @@ index 6c4c240..078562b 100644
    return RELEASE_VERSION_PATTERN.test(version);
  }
  
-+/** A published 1ma build: `<bb release>-1ma.<build>.<revision>`. */
 +export function isOneMaVersion(version: string): boolean {
 +  return ONE_MA_VERSION_PATTERN.test(version);
 +}
@@ -953,7 +952,7 @@ index 6c4c240..078562b 100644
  export function nightlyBaseVersion(version: string): string | null {
    return NIGHTLY_VERSION_PATTERN.exec(version)?.[1] ?? null;
  }
-@@ -29,6 +35,36 @@ function compareReleaseVersions(left: string, right: string): number {
+@@ -29,6 +34,32 @@ function compareReleaseVersions(left: string, right: string): number {
    return 0;
  }
  
@@ -961,10 +960,6 @@ index 6c4c240..078562b 100644
 +  return isReleaseVersion(version) || isOneMaVersion(version);
 +}
 +
-+/**
-+ * Orders bb releases and 1ma builds as SemVer does, like the desktop updater:
-+ * a 1ma build is a prerelease of its bb release.
-+ */
 +function comparePublishedVersions(left: string, right: string): number {
 +  const leftBuild = ONE_MA_VERSION_PATTERN.exec(left);
 +  const rightBuild = ONE_MA_VERSION_PATTERN.exec(right);
@@ -990,7 +985,7 @@ index 6c4c240..078562b 100644
  export interface ReleaseVersionInput {
    isDesktop: boolean;
    desktopInfo: BbDesktopInfo | null;
-@@ -63,7 +99,7 @@ export function resolveReleaseUpdateVersion({
+@@ -63,7 +94,7 @@ export function resolveReleaseUpdateVersion({
      installed =
        appUpdate?.current.version ?? systemVersion?.currentVersion ?? null;
    }
@@ -999,7 +994,7 @@ index 6c4c240..078562b 100644
      return null;
    }
    if (installed !== null) {
-@@ -71,8 +107,8 @@ export function resolveReleaseUpdateVersion({
+@@ -71,8 +102,8 @@ export function resolveReleaseUpdateVersion({
        return null;
      }
      if (
@@ -1083,10 +1078,10 @@ index 2d7dba2..ee1c9c0 100644
 +  });
  });
 diff --git a/apps/app/src/components/settings/settings-nav.tsx b/apps/app/src/components/settings/settings-nav.tsx
-index 85b0b50..b3c593e 100644
+index 06c1995..007a0e6 100644
 --- a/apps/app/src/components/settings/settings-nav.tsx
 +++ b/apps/app/src/components/settings/settings-nav.tsx
-@@ -11,6 +11,7 @@ import {
+@@ -14,6 +14,7 @@ import {
    SETTINGS_SECTION_ROUTE_PATH,
  } from "@/lib/route-paths";
  import {
@@ -1094,7 +1089,7 @@ index 85b0b50..b3c593e 100644
    isSettingsSectionId,
    SETTINGS_NAV_SECTIONS,
    type SettingsNavSection,
-@@ -40,10 +41,11 @@ export function filterSettingsNavSections({
+@@ -43,10 +44,11 @@ export function filterSettingsNavSections({
  }): readonly SettingsNavSection[] {
    return SETTINGS_NAV_SECTIONS.filter(
      (section) =>
@@ -1174,18 +1169,13 @@ index 9f08062..4a83983 100644
        const icon = { kind: "section" as const, name: section.icon };
        const to = getSettingsSectionRoutePath(section.id);
 diff --git a/apps/app/src/components/settings/settings-sections.ts b/apps/app/src/components/settings/settings-sections.ts
-index 2b8f333..a290c93 100644
+index 2b8f333..dc2df05 100644
 --- a/apps/app/src/components/settings/settings-sections.ts
 +++ b/apps/app/src/components/settings/settings-sections.ts
-@@ -33,8 +33,24 @@ export type SettingsNavSection = (typeof SETTINGS_NAV_SECTIONS)[number];
+@@ -33,8 +33,19 @@ export type SettingsNavSection = (typeof SETTINGS_NAV_SECTIONS)[number];
  
  export type SettingsSectionId = SettingsNavSection["id"];
  
-+/**
-+ * Sections 1ma does not offer: they lead to bb's mobile app and bb's
-+ * community. The ids stay in the type so upstream code keeps compiling; the
-+ * nav, search, command palette and routes skip them.
-+ */
 +const HIDDEN_SETTINGS_SECTION_IDS: ReadonlySet<SettingsSectionId> = new Set([
 +  "mobile",
 +  "community",
@@ -1204,10 +1194,10 @@ index 2b8f333..a290c93 100644
  
  export function getSettingsSectionRoutePath(
 diff --git a/apps/app/src/components/sidebar/AppSidebar.tsx b/apps/app/src/components/sidebar/AppSidebar.tsx
-index 5e1c47d..7a9cf8f 100644
+index d168632..7be4c41 100644
 --- a/apps/app/src/components/sidebar/AppSidebar.tsx
 +++ b/apps/app/src/components/sidebar/AppSidebar.tsx
-@@ -296,14 +296,6 @@ export function AppSidebar({
+@@ -312,14 +312,6 @@ export function AppSidebar({
                    },
                  ]
                : []),
@@ -1223,10 +1213,10 @@ index 5e1c47d..7a9cf8f 100644
                id: "report-bug",
                onActivate: () => {
 diff --git a/apps/app/src/components/sidebar/sidebarFooterPreferences.ts b/apps/app/src/components/sidebar/sidebarFooterPreferences.ts
-index bdddc73..500cd4a 100644
+index f0cb00f..c82d0fe 100644
 --- a/apps/app/src/components/sidebar/sidebarFooterPreferences.ts
 +++ b/apps/app/src/components/sidebar/sidebarFooterPreferences.ts
-@@ -44,7 +44,7 @@ export function useMeasureSidebarFooterCapacity(
+@@ -42,7 +42,7 @@ export function useMeasureSidebarFooterCapacity(
    }, [rowRef, moreRef, setCapacity]);
  }
  
@@ -1235,7 +1225,7 @@ index bdddc73..500cd4a 100644
  export type FooterItem = { key: string; label: string; icon: string } & (
    | { kind: "builtin"; id: BuiltinFooterId }
    | { kind: "plugin"; slot: PluginSidebarFooterItemSlot }
-@@ -72,13 +72,6 @@ export function useSidebarFooterPreferences() {
+@@ -70,13 +70,6 @@ export function useSidebarFooterPreferences() {
    const hasRail = useSidebarNavigationPlacement() === "rail";
    const items: FooterItem[] = [
      ...(hasRail ? [] : [SETTINGS_FOOTER_ITEM]),
@@ -1250,7 +1240,7 @@ index bdddc73..500cd4a 100644
        kind: "plugin",
        key: footerPreferenceKey(slot),
 diff --git a/apps/desktop/src/menu.ts b/apps/desktop/src/menu.ts
-index 7e6924a..358c65b 100644
+index 43cc7db..8c12f37 100644
 --- a/apps/desktop/src/menu.ts
 +++ b/apps/desktop/src/menu.ts
 @@ -20,7 +20,8 @@ const OPEN_SETTINGS_MENU_LABEL = "Settings…";
@@ -1264,7 +1254,7 @@ index 7e6924a..358c65b 100644
  const TOGGLE_DEVELOPER_TOOLS_ACCELERATOR = "Command+Option+I";
  const RELOAD_ACCELERATOR = "CommandOrControl+R";
 diff --git a/apps/desktop/test/menu.test.ts b/apps/desktop/test/menu.test.ts
-index 25f1a1a..4f3edb7 100644
+index b05ef42..4321a85 100644
 --- a/apps/desktop/test/menu.test.ts
 +++ b/apps/desktop/test/menu.test.ts
 @@ -4,9 +4,10 @@ import type { BaseWindow, MenuItemConstructorOptions } from "electron";
@@ -1279,7 +1269,7 @@ index 25f1a1a..4f3edb7 100644
  
  import {
    buildApplicationMenuTemplate,
-@@ -403,6 +404,22 @@ describe("application menu", () => {
+@@ -405,6 +406,22 @@ describe("application menu", () => {
      },
    );
  

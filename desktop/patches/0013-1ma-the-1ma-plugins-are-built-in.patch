@@ -22,7 +22,7 @@ using bb's list.
  7 files changed, 74 insertions(+), 10 deletions(-)
 
 diff --git a/apps/server/src/services/plugins/builtin-registry.ts b/apps/server/src/services/plugins/builtin-registry.ts
-index ab47686..9822203 100644
+index 5f831c6..21c84af 100644
 --- a/apps/server/src/services/plugins/builtin-registry.ts
 +++ b/apps/server/src/services/plugins/builtin-registry.ts
 @@ -291,6 +291,31 @@ export const BUNDLED_PLUGINS: readonly BundledPluginDefinition[] = [
@@ -92,7 +92,7 @@ index 4066ed3..8fa9e84 100644
  
    function refuseBuiltinShadow(pluginId: string): void {
 diff --git a/apps/server/src/services/plugins/plugin-runtime.ts b/apps/server/src/services/plugins/plugin-runtime.ts
-index f6428f9..5c71456 100644
+index aa22992..f6c1c7e 100644
 --- a/apps/server/src/services/plugins/plugin-runtime.ts
 +++ b/apps/server/src/services/plugins/plugin-runtime.ts
 @@ -64,7 +64,7 @@ import { parsePluginSource } from "./install-sources.js";
@@ -104,7 +104,7 @@ index f6428f9..5c71456 100644
  import { readPluginSettingsValuesSync } from "./plugin-settings.js";
  import {
    nextCronRunAt,
-@@ -1495,7 +1495,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
+@@ -1534,7 +1534,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
      const bundledIndex =
        name === null
          ? -1
@@ -114,10 +114,10 @@ index f6428f9..5c71456 100644
        bundledIndex: bundledIndex === -1 ? null : bundledIndex,
        installedAt: row.installedAt,
 diff --git a/apps/server/src/services/plugins/plugin-service.ts b/apps/server/src/services/plugins/plugin-service.ts
-index 19d343a..8fefebf 100644
+index d5da1d6..ec9f3b2 100644
 --- a/apps/server/src/services/plugins/plugin-service.ts
 +++ b/apps/server/src/services/plugins/plugin-service.ts
-@@ -129,7 +129,7 @@ import {
+@@ -134,7 +134,7 @@ import {
  import { readPluginManifest, type PluginManifest } from "./manifest.js";
  import {
    RETIRED_BUNDLED_PLUGINS,
@@ -126,7 +126,7 @@ index 19d343a..8fefebf 100644
  } from "./builtin-registry.js";
  import {
    type BbPluginApi,
-@@ -629,7 +629,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
+@@ -640,7 +640,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
      }
    }
    const bundledPlugins =
@@ -208,10 +208,10 @@ index e88b6c3..bf4c359 100644
      { recursive: true },
    );
 diff --git a/turbo.json b/turbo.json
-index a7afee7..38a3b70 100644
+index a091ab3..fe8b5fb 100644
 --- a/turbo.json
 +++ b/turbo.json
-@@ -211,7 +211,8 @@
+@@ -231,7 +231,8 @@
        "inputs": [
          "$TURBO_DEFAULT$",
          "$TURBO_ROOT$/apps/server/src/services/plugins/builtin-registry.ts",

@@ -167,10 +167,10 @@ index a944cef..7c25886 100644
  }
  
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 3f538f9..58aa52c 100644
+index 244453b..8e41d69 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -2956,8 +2956,8 @@ async function runDesktopApp(): Promise<void> {
+@@ -2974,8 +2974,8 @@ async function runDesktopApp(): Promise<void> {
  
    app.setAppUserModelId(
      DESKTOP_RELEASE_CHANNEL === "nightly"
