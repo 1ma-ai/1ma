@@ -400,15 +400,12 @@ export function useBotConversations(bots: readonly SidebarBot[]) {
           (order.get(right.id) ?? Number.MAX_SAFE_INTEGER) || right.createdAt - left.createdAt;
       const seenOf = new Map<string, SeenRow>();
       for (const { id, parentThreadId } of shown) {
-        const branch = branchOf(id);
-        const place = branch.map((above) => places.get(above)).find((found) => found !== undefined);
-        if (place === undefined) continue;
         seenOf.set(id, {
           threadId: id,
-          assignment: place.assignment,
           parentThreadId,
-          branch: branch.map((threadId) => ({
+          branch: branchOf(id).map((threadId) => ({
             threadId,
+            assignment: places.get(threadId)?.assignment ?? null,
             completed: places.get(threadId)?.completed ?? false,
           })),
           shownDone: doneIds.has(id),

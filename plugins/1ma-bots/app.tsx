@@ -35,7 +35,7 @@ export default definePluginApp((app) => {
     order: 61,
     useData() {
       const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
-      const move = useRpcMutation({ contract: botsRpc, method: "bots.v2.moveThreads" });
+      const move = useRpcMutation({ contract: botsRpc, method: "bots.v2.moveToTop" });
       const { threads } = useSidebarThreads();
       return { bots: list.data?.bots ?? [], move, threads };
     },

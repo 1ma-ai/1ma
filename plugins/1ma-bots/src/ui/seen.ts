@@ -1,12 +1,6 @@
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk/app";
 import { branchOf, keepsOpen } from "../branch.js";
-import type {
-  Assignment,
-  BotSummary,
-  BotThread,
-  MoveThreadsInput,
-  SeenThread,
-} from "../contract.js";
+import type { Assignment, BotSummary, BotThread, MoveToTopInput, SeenThread } from "../contract.js";
 
 export function findBot(
   bots: readonly BotSummary[],
@@ -64,31 +58,26 @@ export function seenThread(
   threadId: string,
 ): SeenThread | null {
   const row = threads.find((thread) => thread.id === threadId);
-  const branch = branchIn(bots, threads, threadId).map((id) => ({
-    id,
-    place: findBot(bots, id)?.thread,
-  }));
-  const member = branch.find(({ place }) => place !== undefined);
-  if (row === undefined || member?.place === undefined) return null;
-  return {
-    threadId,
-    assignment: member.place.assignment,
-    parentThreadId: row.parentThreadId,
-    branch: branch.map(({ id, place }) => ({
+  const branch = branchIn(bots, threads, threadId).map((id) => {
+    const place = findBot(bots, id)?.thread;
+    return {
       threadId: id,
+      assignment: place?.assignment ?? null,
       completed: place?.completed ?? false,
-    })),
-  };
+    };
+  });
+  if (row === undefined || branch.length === 0) return null;
+  return { threadId, parentThreadId: row.parentThreadId, branch };
 }
 
-// The move that puts the conversation first under its own parent; null when
-// that changes nothing in its group (open or done) of the bot's tree.
+// Moves the conversation first under its own parent; null when that changes
+// nothing in its group (open or done) of the bot's tree.
 export function topMove(
   bot: BotSummary,
   bots: readonly BotSummary[],
   threads: readonly TreeRow[],
   threadId: string,
-): MoveThreadsInput | null {
+): MoveToTopInput | null {
   const parentOf = (id: string) => branchIn(bots, threads, id)[1] ?? null;
   const keptOpen = new Set(
     threads
@@ -107,20 +96,11 @@ export function topMove(
   const source = seenRow(threadId);
   if (source === null) return null;
   const parentThreadId = parentOf(threadId);
-  const siblings = bot.threads
+  const first = bot.threads
     .filter((member) => isShown(threads, member.threadId))
     .filter((member) => parentOf(member.threadId) === parentThreadId)
-    .flatMap((member) => seenRow(member.threadId) ?? []);
-  const [first] = siblings;
-  if (
-    first === undefined ||
-    siblings.find((row) => row.shownDone === source.shownDone)?.threadId === threadId
-  )
-    return null;
-  return {
-    botId: bot.id,
-    sources: [source],
-    target: { ...first, placement: "before" },
-    levelShown: null,
-  };
+    .flatMap((member) => seenRow(member.threadId) ?? [])
+    .find((row) => row.shownDone === source.shownDone);
+  if (first === undefined || first.threadId === threadId) return null;
+  return { botId: bot.id, thread: source };
 }

@@ -19,6 +19,8 @@ import {
   type AssignInput,
   type ChatDefaults,
   type MoveThreadsInput,
+  type MoveToTopInput,
+  type SeenRow,
   type SeenThread,
 } from "./src/contract.js";
 import { branchOf, keepsOpen } from "./src/branch.js";
@@ -285,28 +287,42 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
 
   const isMarked = (threadId: string) => store.completedAt(threadId) !== null;
 
-  // Whether a conversation stands where the window showed it: in the same bot
-  // since the same assignment, under the same parent in bb and in the tree, with
-  // the same marks.
-  const isAsSeen = (
-    { rows, branches }: Standing,
-    botId: string,
-    seen: SeenThread,
-    markOf: (seenMark: SeenThread["branch"][number]) => boolean = ({ threadId }) =>
-      isMarked(threadId),
-  ) => {
-    const branch = branches.get(seen.threadId)?.threadIds ?? [];
-    const assignment = branch.map((id) => store.assignmentOf(id)).find((found) => found !== null);
-    return (
-      rows.get(seen.threadId)?.parentThreadId === seen.parentThreadId &&
-      isDeepStrictEqual(assignment, { botId, assignment: seen.assignment }) &&
-      isDeepStrictEqual(
-        branch,
-        seen.branch.map(({ threadId }) => threadId),
-      ) &&
-      seen.branch.every((mark) => mark.completed === markOf(mark))
+  type SeenPlace = SeenThread["branch"][number];
+  const isPlaceAsSeen = (botId: string, { threadId, assignment }: SeenPlace) =>
+    isDeepStrictEqual(
+      store.assignmentOf(threadId),
+      assignment === null ? null : { botId, assignment },
     );
+
+  // Whether a conversation stands where the window showed it: under the same
+  // parent in bb and in the tree, and it and the ones above it in the same bot
+  // since the same assignment, with the same marks.
+  const isAsSeen = ({ rows, branches }: Standing, botId: string, seen: SeenThread) =>
+    rows.get(seen.threadId)?.parentThreadId === seen.parentThreadId &&
+    isDeepStrictEqual(branches.get(seen.threadId), {
+      botId,
+      threadIds: seen.branch.map(({ threadId }) => threadId),
+    }) &&
+    seen.branch.every(
+      (place) => isPlaceAsSeen(botId, place) && place.completed === isMarked(place.threadId),
+    );
+
+  // The same and what keeps marked branches open.
+  const drawnStandingOf = async (threadIds: readonly string[]) => {
+    const standing = await standingOf(threadIds);
+    const marked = [...standing.branches.values()]
+      .flatMap((branch) => branch?.threadIds ?? [])
+      .filter(isMarked);
+    const ids = [...new Set(marked)];
+    return { ...standing, kept: await keptOpen(ids, await shownRows(ids)) };
   };
+  type DrawnStanding = Awaited<ReturnType<typeof drawnStandingOf>>;
+
+  const isDrawnDone = ({ kept }: DrawnStanding, branch: SeenRow["branch"]) =>
+    branch.some(({ threadId }) => isMarked(threadId) && !kept.has(threadId));
+
+  const isDrawnAsSeen = (standing: DrawnStanding, botId: string, seen: SeenRow) =>
+    isAsSeen(standing, botId, seen) && isDrawnDone(standing, seen.branch) === seen.shownDone;
 
   // The first open conversation at the top of the bot's tree, in its order; the
   // first done one when all are done.
@@ -337,6 +353,18 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     if (reopened) changed();
   };
 
+  // The bot's first conversation under this one in its tree, or at the top.
+  const firstUnder = async (botId: string, parentThreadId: string | null) => {
+    for (const page of pages(store.get(botId).threads.map((member) => member.threadId))) {
+      const branches = await branchesOf([...(await shownRows(page)).keys()]);
+      const first = page.find(
+        (id) => branches.has(id) && (branches.get(id)?.threadIds[1] ?? null) === parentThreadId,
+      );
+      if (first !== undefined) return first;
+    }
+    return null;
+  };
+
   // Puts conversations beside another one of the same bot, under its parent in
   // the bot's tree when the window showed that level, or inside another one: all
   // of it, or nothing.
@@ -344,45 +372,29 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     const { placement } = target;
     const beside = placement === "inside" ? null : { threadId: target.threadId, placement };
     const places = [...sources, target];
-    type Place = (typeof places)[number];
-    const parentOf = (place: Place) => place.branch[1]?.threadId ?? null;
+    const parentOf = (place: SeenRow) => place.branch[1]?.threadId ?? null;
     const parentThreadId = beside === null ? target.threadId : parentOf(target);
     const threadIds = sources.map((source) => source.threadId);
     const titleOf = (row: ThreadRow) => row.title ?? row.titleFallback ?? row.id;
-    const requireSeen = (isSeen: (place: Place) => boolean) => {
+    const requireSeen = (isSeen: (place: SeenRow) => boolean) => {
       if (!places.every(isSeen)) throw new BotsError("conflict", agentText.treeChanged);
     };
     return decide(
-      async () => {
-        const standing = await standingOf([...threadIds, target.threadId]);
-        const marked = [...standing.branches.values()]
-          .flatMap((branch) => branch?.threadIds ?? [])
-          .filter(isMarked);
-        const ids = [...new Set(marked)];
-        return { ...standing, kept: await keptOpen(ids, await shownRows(ids)) };
-      },
-      async ({ kept, ...standing }) => {
+      () => drawnStandingOf([...threadIds, target.threadId]),
+      async (standing) => {
         const row = (threadId: string) => standing.rows.get(threadId)!;
-        const isDone = (branch: Place["branch"]) =>
-          branch.some(({ threadId }) => isMarked(threadId) && !kept.has(threadId));
-        // "Move to top" shows no target: it is a place in the order.
-        const isShown = (place: Place) => levelShown !== null || place !== target;
         requireSeen(
           (place) =>
-            isAsSeen(
-              standing,
-              botId,
-              place,
-              isShown(place) ? undefined : (mark) => mark.completed,
-            ) &&
-            (!isShown(place) || isDone(place.branch) === place.shownDone) &&
+            isDrawnAsSeen(standing, botId, place) &&
             // bb lets an archived conversation go under another one.
             (row(place.threadId).archivedAt === null || (beside === null && place !== target)),
         );
         const isLevelShown = places.every(
-          ({ branch }) => branch.length === 1 || isDone(branch.slice(1)) === isDone(branch),
+          ({ branch }) =>
+            branch.length === 1 ||
+            isDrawnDone(standing, branch.slice(1)) === isDrawnDone(standing, branch),
         );
-        if (beside !== null && levelShown !== null && levelShown !== isLevelShown)
+        if (beside !== null && levelShown !== isLevelShown)
           throw new BotsError("conflict", agentText.treeChanged);
         if (beside !== null) store.orderAfterMove(botId, threadIds, beside);
         const moves = sources.filter(
@@ -422,12 +434,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
             });
           }
           if (beside !== null) {
-            requireSeen((place) =>
-              isDeepStrictEqual(store.assignmentOf(place.threadId), {
-                botId,
-                assignment: place.assignment,
-              }),
-            );
+            requireSeen(({ branch }) => isPlaceAsSeen(botId, branch[0]!));
             store.moveThreads(botId, threadIds, beside);
           }
         } catch (error) {
@@ -444,15 +451,34 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     );
   };
 
+  const moveToTop = ({ botId, thread }: MoveToTopInput) =>
+    decide(
+      async () => ({
+        standing: await drawnStandingOf([thread.threadId]),
+        first: await firstUnder(botId, thread.branch[1]?.threadId ?? null),
+      }),
+      ({ standing, first }) => {
+        if (
+          !isDrawnAsSeen(standing, botId, thread) ||
+          standing.rows.get(thread.threadId)!.archivedAt !== null
+        )
+          throw new BotsError("conflict", agentText.treeChanged);
+        if (first === null || first === thread.threadId) return;
+        store.moveThreads(botId, [thread.threadId], { threadId: first, placement: "before" });
+      },
+    );
+
   // The end of each bot's latest move, its undoing included; the next one waits for it.
   const moveEnds = new Map<string, Promise<void>>();
-  const moveInTurn = async (input: MoveThreadsInput) => {
-    const move = (moveEnds.get(input.botId) ?? Promise.resolve()).then(() => moveThreads(input));
+  const moveInTurn = async (botId: string, act: () => Promise<void>) => {
+    const move = (moveEnds.get(botId) ?? Promise.resolve()).then(act);
     const end = move.catch(() => undefined);
-    moveEnds.set(input.botId, end);
+    moveEnds.set(botId, end);
     await end;
-    if (moveEnds.get(input.botId) === end) moveEnds.delete(input.botId);
-    return move;
+    if (moveEnds.get(botId) === end) moveEnds.delete(botId);
+    await move;
+    changed();
+    return { ok: true as const };
   };
 
   bb.agents.configure((ctx) => {
@@ -661,6 +687,45 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     if (shown) changed();
   };
 
+  type EventRow = Awaited<ReturnType<typeof bb.sdk.threads.events.list>>[number];
+  const isTooLarge = (error: unknown) =>
+    error instanceof Error && "code" in error && error.code === "event_data_too_large";
+
+  // A conversation's events of these types, newest first. bb refuses a page whose
+  // events are together over 8 MiB (a request carries its whole text), so the same
+  // page is asked for shorter.
+  async function* eventsOf(
+    threadId: string,
+    types: readonly [EventRow["type"], ...EventRow["type"][]],
+  ): AsyncGenerator<EventRow, void> {
+    let beforeSeq: string | undefined;
+    for (let limit = EVENTS_MAX; ;) {
+      let page: EventRow[];
+      try {
+        page = await bb.sdk.threads.events.list({
+          threadId,
+          types,
+          order: "desc",
+          limit: String(limit),
+          beforeSeq,
+        });
+      } catch (error) {
+        if (!isTooLarge(error) || limit === 1) throw error;
+        limit = Math.ceil(limit / 2);
+        continue;
+      }
+      yield* page;
+      if (page.length < limit) return;
+      beforeSeq = String(page.at(-1)!.seq);
+      limit = Math.min(EVENTS_MAX, limit * 2);
+    }
+  }
+
+  // A turn of the conversation itself: the provider reports the ones its tool
+  // calls run inside it as turns too.
+  const isOwnTurnStart = (row: EventRow) =>
+    row.type === "turn/started" && row.data.parentToolCallId === undefined;
+
   // The turn now running in a conversation, when the owner started it: the
   // latest turn the provider confirmed (turn/started) and the request bb
   // recorded just before it (client/turn/requested, not rejected). bb records
@@ -668,21 +733,18 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   // message steered into a running turn is recorded after its start, so it
   // never counts as a new turn.
   const ownerTurnOf = async (threadId: string): Promise<number | null> => {
-    const rows = await bb.sdk.threads.events.list({
-      threadId,
-      types: ["turn/started", "client/turn/requested", "client/turn/rejected"],
-      order: "desc",
-      limit: "50",
-    });
-    const started = rows.find((row) => row.type === "turn/started");
-    if (started === undefined) return null;
-    const rejected = new Set(
-      rows.flatMap((row) => (row.type === "client/turn/rejected" ? [row.data.requestId] : [])),
-    );
-    for (const row of rows) {
-      if (row.seq >= started.seq || row.type !== "client/turn/requested") continue;
+    let startedAt: number | null = null;
+    const rejected = new Set<string>();
+    for await (const row of eventsOf(threadId, [
+      "turn/started",
+      "client/turn/requested",
+      "client/turn/rejected",
+    ])) {
+      if (isOwnTurnStart(row)) startedAt ??= row.seq;
+      if (row.type === "client/turn/rejected") rejected.add(row.data.requestId);
+      if (row.type !== "client/turn/requested" || startedAt === null) continue;
       if (rejected.has(row.data.requestId)) continue;
-      return row.data.initiator === "user" && row.data.senderThreadId === null ? started.seq : null;
+      return row.data.initiator === "user" && row.data.senderThreadId === null ? startedAt : null;
     }
     return null;
   };
@@ -691,42 +753,34 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   // turn, or a message steered into the running one. What bb's own notice about
   // a sub-thread started does not count, nor does a retry of that turn.
   const lastInputAfter = async (threadId: string, since: number): Promise<number | null> => {
-    type Row = Awaited<ReturnType<typeof bb.sdk.threads.events.list>>[number];
-    const rows: Row[] = [];
-    let more = true;
-    const loadOlder = async () => {
-      const page = await bb.sdk.threads.events.list({
-        threadId,
-        types: [
-          "turn/started",
-          "turn/input/accepted",
-          "client/turn/requested",
-          "client/turn/rejected",
-        ],
-        order: "desc",
-        limit: String(EVENTS_MAX),
-        beforeSeq: rows.length === 0 ? undefined : String(rows.at(-1)!.seq),
-      });
-      rows.push(...page);
-      more = page.length === EVENTS_MAX;
+    const events = eventsOf(threadId, [
+      "turn/started",
+      "turn/input/accepted",
+      "client/turn/requested",
+      "client/turn/rejected",
+    ]);
+    const rows: EventRow[] = [];
+    const rowAt = async (index: number) => {
+      if (index === rows.length) {
+        const older = await events.next();
+        if (!older.done) rows.push(older.value);
+      }
+      return rows[index];
     };
-    const requestOf = async (fits: (requestId: string, row: Row) => boolean) => {
-      for (;;) {
-        for (const row of rows)
-          if (row.type === "client/turn/requested" && fits(row.data.requestId, row))
-            return row.data;
-        if (!more) return undefined;
-        await loadOlder();
+    const requestOf = async (fits: (requestId: string, row: EventRow) => boolean) => {
+      for (let index = 0; ; index += 1) {
+        const row = await rowAt(index);
+        if (row === undefined) return undefined;
+        if (row.type === "client/turn/requested" && fits(row.data.requestId, row)) return row.data;
       }
     };
     for (let index = 0; ; index += 1) {
-      if (index === rows.length && more) await loadOlder();
-      const row = rows[index];
+      const row = await rowAt(index);
       if (row === undefined || row.createdAt <= since) return null;
       let request: Awaited<ReturnType<typeof requestOf>>;
       if (row.type === "turn/input/accepted") {
         request = await requestOf((requestId) => requestId === row.data.clientRequestId);
-      } else if (row.type === "turn/started") {
+      } else if (isOwnTurnStart(row)) {
         const hasOwnInput = rows.some(
           (other) =>
             other.type === "turn/input/accepted" && isDeepStrictEqual(other.scope, row.scope),
@@ -742,7 +796,10 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       } else continue;
       const origin = request?.retryOfRequestId;
       if (origin !== undefined) request = await requestOf((requestId) => requestId === origin);
-      if (!OWNERSHIP_NOTICES.has(request?.systemMessageKind)) return row.createdAt;
+      // Messages sent together are one request with the kind of the first.
+      const isNotice =
+        request?.inputGroups === undefined && OWNERSHIP_NOTICES.has(request?.systemMessageKind);
+      if (!isNotice) return row.createdAt;
     }
   };
 
@@ -1051,11 +1108,8 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         if (store.botOfThread(thread.threadId) !== botId || !isAsSeen(standing, botId, thread))
           throw new BotsError("conflict", agentText.treeChanged);
       }),
-    "bots.v2.moveThreads": async (input) => {
-      await moveInTurn(input);
-      changed();
-      return { ok: true as const };
-    },
+    "bots.v2.moveThreads": (input) => moveInTurn(input.botId, () => moveThreads(input)),
+    "bots.v2.moveToTop": (input) => moveInTurn(input.botId, () => moveToTop(input)),
     "bots.v2.continueInBot": async ({ threadId, seen }) => {
       const token = await decide(
         () => membersAbove(threadId),

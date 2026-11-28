@@ -26,11 +26,16 @@ const seenAssignment = z.object({ botId: z.string(), assignment: z.string() });
 // not so any more.
 const seenRow = z.object({
   threadId: z.string(),
-  // Of the conversation, or of the nearest one above it that has a place in the bot.
-  assignment: z.string(),
   parentThreadId: z.string().nullable(),
-  // The conversation and the ones it is drawn under, nearest first.
-  branch: z.array(z.object({ threadId: z.string(), completed: z.boolean() })),
+  // The conversation and the ones it is drawn under, nearest first. A sub-thread
+  // an agent made has no place in the bot.
+  branch: z.array(
+    z.object({
+      threadId: z.string(),
+      assignment: z.string().nullable(),
+      completed: z.boolean(),
+    }),
+  ),
   shownDone: z.boolean(),
 });
 export type SeenRow = z.infer<typeof seenRow>;

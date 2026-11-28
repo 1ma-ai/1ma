@@ -282,36 +282,30 @@ describe("bot conversation menu", () => {
   }
   const seen = (threadId: string, above: string[] = [], done: string[] = []) => ({
     threadId,
-    assignment: `joined_${threadId}`,
     parentThreadId: above[0] ?? null,
-    branch: [threadId, ...above].map((id) => ({ threadId: id, completed: done.includes(id) })),
+    branch: [threadId, ...above].map((id) => ({
+      threadId: id,
+      assignment: id === "thr_spawned" ? null : `joined_${id}`,
+      completed: done.includes(id),
+    })),
   });
-  // source and target: a conversation, the ones above it, and the marked ones of these.
-  type Shown = [threadId: string, above?: string[], done?: string[]];
-  const placeBefore = (
-    source: Shown,
-    target: Shown,
-    [sourceDone, targetDone] = [false, false],
-  ) => ({
+  const toTop = (thread: ReturnType<typeof seen>, shownDone = false) => ({
     botId: "bot_a",
-    sources: [{ ...seen(...source), shownDone: sourceDone }],
-    target: { ...seen(...target), shownDone: targetDone, placement: "before" },
-    levelShown: null,
+    thread: { ...thread, shownDone },
   });
   it("moves the selected conversation ahead of the others", async () => {
     const { item, move } = await moveToTop([row("thr_a"), row("thr_b"), row("thr_c")], "thr_c");
     await item!.run({} as never);
-    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(placeBefore(["thr_c"], ["thr_a"]));
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(toTop(seen("thr_c")));
     expect((await moveToTop([row("thr_project")], "thr_project")).item).toBeNull();
   });
   it("names the parent in bb of a conversation it moves, outside the bot too", async () => {
     const tree = [row("thr_a"), row("thr_b"), row("thr_c", "thr_elsewhere"), row("thr_elsewhere")];
     const { item, move } = await moveToTop(tree, "thr_c");
     await item!.run({} as never);
-    expect(move.mutate).toHaveBeenCalledExactlyOnceWith({
-      ...placeBefore(["thr_c"], ["thr_a"]),
-      sources: [{ ...seen("thr_c"), parentThreadId: "thr_elsewhere", shownDone: false }],
-    });
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(
+      toTop({ ...seen("thr_c"), parentThreadId: "thr_elsewhere" }),
+    );
   });
   it("offers Move to top among the conversations under the same parent", async () => {
     const threads = ["thr_a", "thr_b", "thr_c"].map((threadId) => chat(threadId));
@@ -320,9 +314,7 @@ describe("bot conversation menu", () => {
     expect((await moveToTop(tree, "thr_b", open)).item).toBeNull();
     const { item, move } = await moveToTop(tree, "thr_c", open);
     await item!.run({} as never);
-    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(
-      placeBefore(["thr_c", ["thr_a"]], ["thr_b", ["thr_a"]]),
-    );
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(toTop(seen("thr_c", ["thr_a"])));
     expect((await moveToTop(tree, "thr_a", open)).item).toBeNull();
   });
   it("offers Move to top only when it changes the place in its group of the tree", async () => {
@@ -334,18 +326,7 @@ describe("bot conversation menu", () => {
     expect((await moveToTop(tree, "thr_a", doneFirst)).item).toBeNull();
     const { item, move } = await moveToTop(tree, "thr_c", doneFirst);
     await item!.run({} as never);
-    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(
-      placeBefore(["thr_c", [], ["thr_c"]], ["thr_b", [], ["thr_b"]], [true, true]),
-    );
-  });
-  it("puts a done conversation before the first open one when that stands first", async () => {
-    const threads = ["thr_a", "thr_b", "thr_c"].map((id) => chat(id, id !== "thr_a"));
-    const tree = [row("thr_a"), row("thr_b"), row("thr_c")];
-    const { item, move } = await moveToTop(tree, "thr_c", [bot("bot_a", "Editor", threads)]);
-    await item!.run({} as never);
-    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(
-      placeBefore(["thr_c", [], ["thr_c"]], ["thr_a"], [true, false]),
-    );
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(toTop(seen("thr_c", [], ["thr_c"]), true));
   });
   it("counts a done conversation kept open by its sub-thread among the open ones", async () => {
     const tree = [row("thr_a"), row("thr_b"), row("thr_c"), row("thr_low", "thr_b")];
@@ -353,9 +334,7 @@ describe("bot conversation menu", () => {
     const working = [...tree.slice(0, 3), row("thr_low", "thr_b", { status: "active" })];
     const { item, move } = await moveToTop(working, "thr_b");
     await item!.run({} as never);
-    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(
-      placeBefore(["thr_b", [], ["thr_b"]], ["thr_a"]),
-    );
+    expect(move.mutate).toHaveBeenCalledExactlyOnceWith(toTop(seen("thr_b", [], ["thr_b"])));
   });
   it.each([{ isArchived: true }, { isHidden: true }])(
     "a working sub-thread the list does not show (%o) keeps no done conversation open",
@@ -374,15 +353,7 @@ describe("bot conversation menu", () => {
       expect((await moveToTop(tree, "thr_b", open)).item).toBeNull();
       const { item, move } = await moveToTop(tree, "thr_c", open);
       await item!.run({} as never);
-      expect(move.mutate).toHaveBeenCalledExactlyOnceWith({
-        ...placeBefore(["thr_c"], ["thr_b"]),
-        target: {
-          ...seen("thr_b"),
-          parentThreadId: "thr_a",
-          shownDone: false,
-          placement: "before",
-        },
-      });
+      expect(move.mutate).toHaveBeenCalledExactlyOnceWith(toTop(seen("thr_c")));
     },
   );
   it("reopens a completed conversation from the same menu", async () => {
