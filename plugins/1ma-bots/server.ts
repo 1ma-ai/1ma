@@ -731,20 +731,27 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   // recorded just before it (client/turn/requested, not rejected). bb records
   // a request only after every dispatch hook and wait let it through, and a
   // message steered into a running turn is recorded after its start, so it
-  // never counts as a new turn.
+  // never counts as a new turn. A turn the provider started on its own, with no
+  // request before it (ACP reports agent output after a turn as a new one),
+  // continues the turn before it.
   const ownerTurnOf = async (threadId: string): Promise<number | null> => {
-    let startedAt: number | null = null;
+    let started: EventRow | null = null;
     const rejected = new Set<string>();
+    const acceptedIn = new Map<string, EventRow["scope"]>();
     for await (const row of eventsOf(threadId, [
       "turn/started",
+      "turn/input/accepted",
       "client/turn/requested",
       "client/turn/rejected",
     ])) {
-      if (isOwnTurnStart(row)) startedAt ??= row.seq;
+      if (isOwnTurnStart(row)) started = row;
       if (row.type === "client/turn/rejected") rejected.add(row.data.requestId);
-      if (row.type !== "client/turn/requested" || startedAt === null) continue;
+      if (row.type === "turn/input/accepted") acceptedIn.set(row.data.clientRequestId, row.scope);
+      if (row.type !== "client/turn/requested" || started === null) continue;
       if (rejected.has(row.data.requestId)) continue;
-      return row.data.initiator === "user" && row.data.senderThreadId === null ? startedAt : null;
+      const scope = acceptedIn.get(row.data.requestId);
+      if (scope !== undefined && !isDeepStrictEqual(scope, started.scope)) continue;
+      return row.data.initiator === "user" && row.data.senderThreadId === null ? started.seq : null;
     }
     return null;
   };
@@ -794,9 +801,10 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
           );
         request = await requestOf((requestId, asked) => asked.seq < row.seq && !isTaken(requestId));
       } else continue;
-      const origin = request?.retryOfRequestId;
+      // Messages sent together are one request with the kind of the first, a
+      // retry included: only a retry sent alone is what it retries.
+      const origin = request?.inputGroups === undefined ? request?.retryOfRequestId : undefined;
       if (origin !== undefined) request = await requestOf((requestId) => requestId === origin);
-      // Messages sent together are one request with the kind of the first.
       const isNotice =
         request?.inputGroups === undefined && OWNERSHIP_NOTICES.has(request?.systemMessageKind);
       if (!isNotice) return row.createdAt;
