@@ -155,17 +155,13 @@ function overrideRanges(text, rules, file) {
   return ranges;
 }
 
-function mentionLength(decision) {
-  return decision.kind === "product" ? 2 : decision.length;
-}
-
 function compose(text, decisions, replacement) {
   let result = text;
   const edits = decisions
     .filter((decision) => ["product", "replace", "name"].includes(decision.kind))
     .toSorted((a, b) => b.index - a.index);
   for (const edit of edits) {
-    const length = mentionLength(edit);
+    const length = edit.kind === "product" ? 2 : edit.length;
     const value = edit.kind === "product" ? replacement : edit.to;
     result = result.slice(0, edit.index) + value + result.slice(edit.index + length);
   }
@@ -209,16 +205,32 @@ export function rebrandString(text, context, rules) {
   }
   return { result: compose(text, decisions, rules.replacement), decisions };
 }
-// Where each cooked unit of a literal starts and ends in its raw text; a line
-// continuation belongs to neither neighbour.
-function cookedToRaw(raw) {
+// Where each cooked unit of a literal starts and ends in its raw text, read as
+// TypeScript's scanner reads it; a line continuation belongs to neither
+// neighbour. A template turns a line break into one \n, and a tagged template
+// keeps an escape it cannot read as written.
+function cookedToRaw(raw, { template = false, tagged = false } = {}) {
   const starts = [];
   const ends = [];
+  const unit = (start, end) => {
+    starts.push(start);
+    ends.push(end);
+  };
+  const digits = (from, pattern, limit) => {
+    let at = from;
+    while (at < limit && pattern.test(raw[at] ?? "")) at += 1;
+    return at;
+  };
   let i = 0;
   while (i < raw.length) {
+    if (template && raw[i] === "\r") {
+      const length = raw[i + 1] === "\n" ? 2 : 1;
+      unit(i, i + length);
+      i += length;
+      continue;
+    }
     if (raw[i] !== "\\") {
-      starts.push(i);
-      ends.push(i + 1);
+      unit(i, i + 1);
       i += 1;
       continue;
     }
@@ -231,22 +243,30 @@ function cookedToRaw(raw) {
       i += 2;
       continue;
     }
-    let length = 2;
+    let end = i + 2;
     let units = 1;
-    if (next === "x") length = 4;
-    else if (next === "u" && raw[i + 2] === "{") {
+    let asWritten = false;
+    if (/[0-7]/.test(next)) {
+      end = digits(i + 2, /[0-7]/, i + (next <= "3" ? 4 : 3));
+      asWritten = tagged && !(next === "0" && !/[0-9]/.test(raw[i + 2] ?? ""));
+    } else if (next === "8" || next === "9") asWritten = tagged;
+    else if (next === "x") {
+      end = digits(i + 2, /[0-9a-f]/i, i + 4);
+      asWritten = end !== i + 4;
+    } else if (next === "u" && raw[i + 2] === "{") {
       const close = raw.indexOf("}", i);
-      length = close - i + 1;
+      end = close === -1 ? raw.length : close + 1;
       units = Number.parseInt(raw.slice(i + 3, close), 16) > 0xffff ? 2 : 1;
-    } else if (next === "u") length = 6;
-    for (let unit = 0; unit < units; unit += 1) {
-      starts.push(i);
-      ends.push(i + length);
+    } else if (next === "u") {
+      end = digits(i + 2, /[0-9a-f]/i, i + 6);
+      asWritten = end !== i + 6;
     }
-    i += length;
+    if (asWritten) for (let at = i; at < end; at += 1) unit(at, at + 1);
+    else for (let count = 0; count < units; count += 1) unit(i, end);
+    i = end;
   }
   starts.push(raw.length);
-  return { starts, ends };
+  return { starts, ends, end: i };
 }
 
 function calleeName(call) {
@@ -302,97 +322,20 @@ function contextOf(node) {
   return { kind: "value" };
 }
 
-// The raw offset where the cooked unit at an index starts, and the raw range
-// that length units from an index cover.
-function rawOffsets(segment) {
-  const map = segment.escapes ? cookedToRaw(segment.raw) : null;
+// The raw range that length cooked units from an index cover. A map that does
+// not read the literal to its end with as many units as TypeScript gives it is
+// refused rather than used.
+function rawOffsets(file, segment) {
+  const map = segment.escapes ? cookedToRaw(segment.raw, segment) : null;
+  if (map && (map.ends.length !== segment.cooked.length || map.end !== segment.raw.length))
+    throw new Error(`${file}: cannot map the literal at ${segment.rawStart}`);
   const start = (index) => segment.rawStart + (map ? map.starts[index] : index);
   const end = (index) => segment.rawStart + (map ? map.ends[index] : index + 1);
-  return {
-    start,
-    range: (at, length) => [start(at), length === 0 ? start(at) : end(at + length - 1)],
-  };
-}
-
-// Where the range [start, end) of a text is once the edits are applied. A start
-// inside an edit moves to the edit's new start, an end inside it to its new end;
-// an insertion at either boundary stays outside the range.
-function moveRange([start, end], edits) {
-  const sorted = edits.toSorted((a, b) => a.start - b.start);
-  const move = (position, isEnd) => {
-    let shift = 0;
-    for (const edit of sorted) {
-      if (edit.start < position && position < edit.end)
-        return edit.start + shift + (isEnd ? edit.text.length : 0);
-      if (edit.end > position || (isEnd && edit.start === position)) break;
-      shift += edit.text.length - (edit.end - edit.start);
-    }
-    return position + shift;
-  };
-  return [move(start, false), move(end, true)];
-}
-
-// The edits that turn find into replace, by the longest common subsequence of
-// the two: text they share keeps its place, also between two changes.
-function textDiff(find, replace) {
-  let prefix = 0;
-  while (prefix < find.length && prefix < replace.length && find[prefix] === replace[prefix])
-    prefix += 1;
-  let suffix = 0;
-  while (
-    suffix < find.length - prefix &&
-    suffix < replace.length - prefix &&
-    find[find.length - 1 - suffix] === replace[replace.length - 1 - suffix]
-  )
-    suffix += 1;
-  const from = find.slice(prefix, find.length - suffix);
-  const to = replace.slice(prefix, replace.length - suffix);
-  const common = Array.from({ length: from.length + 1 }, () => new Uint32Array(to.length + 1));
-  for (let i = from.length - 1; i >= 0; i -= 1)
-    for (let j = to.length - 1; j >= 0; j -= 1)
-      common[i][j] =
-        from[i] === to[j] ? common[i + 1][j + 1] + 1 : Math.max(common[i + 1][j], common[i][j + 1]);
-  const edits = [];
-  let edit = null;
-  let i = 0;
-  let j = 0;
-  while (i < from.length || j < to.length) {
-    if (i < from.length && j < to.length && from[i] === to[j]) {
-      edit = null;
-      i += 1;
-      j += 1;
-      continue;
-    }
-    if (!edit) {
-      edit = { start: prefix + i, end: prefix + i, text: "" };
-      edits.push(edit);
-    }
-    if (j === to.length || (i < from.length && common[i + 1][j] >= common[i][j + 1])) {
-      i += 1;
-      edit.end = prefix + i;
-    } else {
-      edit.text += to[j];
-      j += 1;
-    }
-  }
-  return edits;
-}
-
-// A test rule applied to a text: find and replace are literal, and the edits
-// are what changes at every match.
-function ruleEdits(text, find, replace) {
-  const diff = textDiff(find, replace);
-  const edits = [];
-  const next = text.replaceAll(find, (_, at) => {
-    for (const { start, end, text: inserted } of diff)
-      edits.push({ start: at + start, end: at + end, text: inserted });
-    return replace;
-  });
-  return { text: next, edits };
+  return (at, length) => [start(at), length === 0 ? start(at) : end(at + length - 1)];
 }
 
 function editsFor(file, text, segment, decisions, replacement) {
-  const { range } = rawOffsets(segment);
+  const range = rawOffsets(file, segment);
   const edits = [];
   for (const decision of decisions) {
     if (decision.kind === "product") {
@@ -414,6 +357,13 @@ function editsFor(file, text, segment, decisions, replacement) {
   return edits;
 }
 
+function taggedTemplate(node) {
+  let current = node.parent;
+  if (current && ts.isTemplateSpan(current)) current = current.parent;
+  if (current && ts.isTemplateExpression(current)) current = current.parent;
+  return Boolean(current && ts.isTaggedTemplateExpression(current));
+}
+
 function literalSegment(node, source, text) {
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
     const rawStart = node.getStart(source) + 1;
@@ -422,15 +372,21 @@ function literalSegment(node, source, text) {
       rawStart,
       raw: text.slice(rawStart, node.end - 1),
       escapes: !(node.parent && ts.isJsxAttribute(node.parent)),
+      template: ts.isNoSubstitutionTemplateLiteral(node),
+      tagged: taggedTemplate(node),
     };
   }
-  if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node))
+  if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) {
+    const rawStart = node.getStart(source) + 1;
     return {
       cooked: node.text,
-      rawStart: node.getStart(source) + 1,
-      raw: node.rawText ?? "",
+      rawStart,
+      raw: text.slice(rawStart, node.end - (ts.isTemplateTail(node) ? 1 : 2)),
       escapes: true,
+      template: true,
+      tagged: taggedTemplate(node),
     };
+  }
   if (ts.isJsxText(node))
     return {
       cooked: node.text,
@@ -459,12 +415,7 @@ function literalEdits(file, text, options) {
       offset += segment.cooked.length + PLACEHOLDER.length;
       return { segment, start, end: start + segment.cooked.length, decisions: [] };
     });
-    const range = (at, length) => {
-      const part = local.find((item) => item.start <= at && at <= item.end);
-      part.offsets ??= rawOffsets(part.segment);
-      return part.offsets.range(at - part.start, length);
-    };
-    const { result, decisions } = decide(full, { ...context, file, range });
+    const { result, decisions } = decide(full, { ...context, file });
     record?.(
       file,
       display ? full.replaceAll(PLACEHOLDER, "${…}") : full,
@@ -510,10 +461,7 @@ function literalEdits(file, text, options) {
           escapes: false,
           regex: true,
         };
-        const { decisions } = regexes(pattern, {
-          negative: negativeAssertion(node),
-          range: rawOffsets(segment).range,
-        });
+        const { decisions } = regexes(pattern, { negative: negativeAssertion(node) });
         edits.push(...editsFor(file, text, segment, decisions, rules.replacement));
       }
       return;
@@ -786,8 +734,7 @@ export function createIndex(rules) {
 // service) is never changed (veto). The relaxed mode, used only to flag
 // suspicious negative assertions, accepts two-word partial overlaps, puts a
 // renamed source the test repeats in full before the test's own kind, and lets
-// a renamed source win a tie. A decision on a mention settled elsewhere (settled,
-// given its index and length) is left out, so no rule counts as used for it.
+// a renamed source win a tie.
 export function propagate(text, index, options = {}) {
   const {
     regex = false,
@@ -797,7 +744,6 @@ export function propagate(text, index, options = {}) {
     rebranded = true,
     relaxed = false,
     without = null,
-    settled = null,
   } = options;
   const haystack = lowered(text);
   const marks = occurrences(haystack);
@@ -915,15 +861,12 @@ export function propagate(text, index, options = {}) {
     if (veto?.(text, offset)) continue;
     decisions.push({ index: offset, kind: "product" });
   }
-  const open = settled
-    ? decisions.filter((decision) => !settled(decision.index, mentionLength(decision)))
-    : decisions;
-  const result = compose(text, open, index.replacement);
+  const result = compose(text, decisions, index.replacement);
   if (without === null)
     for (const rule of new Set([...evidence.values()].map((found) => found.rule)))
       if (rule && propagate(text, index, { ...options, without: rule }).result !== result)
         index.used?.add(rule);
-  return { result, decisions: open };
+  return { result, decisions };
 }
 
 // A template part aligned on a bb of the test string, with the template parts
@@ -1420,50 +1363,19 @@ export function rebrandTree(root, rules, { write = false } = {}) {
     const options = { scope, veto, keep, rebranded };
     const byAlternative = (pattern, more) => {
       const decisions = [];
-      for (const { start, text: part } of alternatives(pattern)) {
-        const settled = more.settled && ((at, length) => more.settled(at + start, length));
-        for (const decision of propagate(part, index, {
-          ...options,
-          regex: true,
-          ...more,
-          settled,
-        }).decisions)
+      for (const { start, text: part } of alternatives(pattern))
+        for (const decision of propagate(part, index, { ...options, regex: true, ...more })
+          .decisions)
           decisions.push({ ...decision, index: decision.index + start });
-      }
       return { result: compose(pattern, decisions, rules.replacement), decisions };
     };
-    // A negative assertion is checked once the file's testReplace rules ran: a
-    // mention of the literal is settled when the rules leave other text there
-    // than they found.
-    const negatives = [];
     const edits = literalEdits(file, text, {
       rules,
-      decide: (cooked, context) => {
-        const decided = named(cooked) ?? propagate(cooked, index, options);
-        if (context.negative && !named(cooked))
-          negatives.push({
-            literal: cooked,
-            decided,
-            range: context.range,
-            relax: (settled) => propagate(cooked, index, { ...options, relaxed: true, settled }),
-          });
-        return decided;
-      },
-      regexes: (pattern, context) => {
-        const decided = byAlternative(pattern, {});
-        if (context.negative)
-          negatives.push({
-            literal: pattern,
-            decided,
-            range: context.range,
-            relax: (settled) => byAlternative(pattern, { relaxed: true, settled }),
-          });
-        return decided;
-      },
+      decide: (cooked) => named(cooked) ?? propagate(cooked, index, options),
+      regexes: (pattern) => byAlternative(pattern, {}),
     });
     text = rewrite(file, edits, text, testsChanged);
-    const before = text;
-    const stages = [];
+    const rewritten = text;
     for (const entry of testEdits.get(file) ?? []) {
       if (entry.find === "")
         throw new Error(
@@ -1471,28 +1383,30 @@ export function rebrandTree(root, rules, { write = false } = {}) {
         );
       if (!text.includes(entry.find))
         throw new Error(`${file}: testReplace "${entry.find}" no longer matches; review it`);
-      const applied = ruleEdits(text, entry.find, entry.replace);
-      stages.push(applied.edits);
+      text = text.replaceAll(entry.find, () => entry.replace);
       if (!testsChanged.includes(file)) testsChanged.push(file);
-      if (write) writeFileSync(path.join(root, file), applied.text);
-      text = applied.text;
     }
-    for (const { literal, decided, range, relax } of negatives) {
-      const settled = (at, length) => {
-        let moved = moveRange(range(at, length), edits);
-        const found = before.slice(...moved);
-        for (const stage of stages) moved = moveRange(moved, stage);
-        return text.slice(...moved) !== found;
-      };
-      const relaxed = relax(settled);
-      const open = decided.decisions.filter(
-        (decision) => !settled(decision.index, mentionLength(decision)),
-      );
-      if (relaxed.result !== compose(literal, open, rules.replacement))
+    if (write && text !== rewritten) writeFileSync(path.join(root, file), text);
+    // A negative assertion is checked on the text the test will run, by value:
+    // a testReplace rule counts only by what it leaves there.
+    const check = (literal, relaxed) => {
+      if (relaxed.result !== literal)
         suspicious.push(
           `${file}: ${JSON.stringify(literal)} stays as is, but a renamed source suggests ${JSON.stringify(relaxed.result)}`,
         );
-    }
+    };
+    literalEdits(file, text, {
+      rules,
+      decide: (cooked, context) => {
+        if (context.negative && !named(cooked))
+          check(cooked, propagate(cooked, index, { ...options, relaxed: true }));
+        return { result: cooked, decisions: [] };
+      },
+      regexes: (pattern, context) => {
+        if (context.negative) check(pattern, byAlternative(pattern, { relaxed: true }));
+        return { decisions: [] };
+      },
+    });
   }
   for (const file of [...testEdits.keys(), ...testKeeps.keys()])
     if (!files.includes(file)) throw new Error(`a test rule names a missing file: ${file}`);

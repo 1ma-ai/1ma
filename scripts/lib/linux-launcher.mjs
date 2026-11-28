@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as nodeFs from "node:fs";
 import path from "node:path";
+import { parseArgs } from "node:util";
 
 /**
  * The checks around replacing the launcher build of the Linux server
@@ -17,7 +18,9 @@ import path from "node:path";
  *
  * A process is known by its number together with its start time: the number
  * alone is given to another process later, and a name or a path says nothing
- * about a process that lost its parent.
+ * about a process that lost its parent. Every command runs as the server's
+ * user: as root, `kill(pid, 0)` answers for any process and a signal reaches
+ * any process.
  */
 
 const SHIM = "bb-app-update-shim.json";
@@ -176,17 +179,34 @@ function fileWith(file, value, keys) {
   return value;
 }
 
-/** The parsed shim file; one that is not JSON or names no pid is not guessed at. */
-export function parseShim(text) {
+/**
+ * The shim file by bb's rule (`readShimLockFile` in shim-support.ts): JSON
+ * with a positive integer `pid` and non-empty strings `entryPath` and
+ * `startedAt`. Any other file is no lock for bb, and the next launcher
+ * replaces it. Answers `{ lock }`, or `{ wrong }` saying why bb does not
+ * accept the file.
+ */
+export function readShim(text) {
   let value;
   try {
     value = JSON.parse(text);
   } catch {
-    throw new Error(`${SHIM} is not JSON`);
+    return { wrong: "it is not JSON" };
   }
-  if (value === null || typeof value !== "object" || !Number.isInteger(value.pid) || value.pid < 1)
-    throw new Error(`${SHIM} names no launcher process`);
-  return value;
+  const named = (key) => typeof value?.[key] === "string" && value[key] !== "";
+  if (
+    !isObject(value) ||
+    !Number.isSafeInteger(value.pid) ||
+    value.pid < 1 ||
+    !named("entryPath") ||
+    !named("startedAt")
+  )
+    return { wrong: "it does not name the launcher by pid, entryPath and startedAt" };
+  return { lock: value };
+}
+
+function notAccepted(wrong) {
+  return `${SHIM} is not a file bb accepts (${wrong})`;
 }
 
 function descendants(table, root) {
@@ -199,7 +219,9 @@ function descendants(table, root) {
   const queue = [root];
   for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
     chain.push(next);
-    queue.push(...(children.get(next.pid) ?? []));
+    queue.push(
+      ...(children.get(next.pid) ?? []).filter((one) => !later(next.started, one.started)),
+    );
   }
   return chain;
 }
@@ -215,24 +237,125 @@ function isNode(program) {
 const CODE_OPTION = /^(?:-[a-zA-Z]*[ep]|--(?:eval|print)(?:=|$))/;
 
 /**
+ * The node options that take their value as the next argument: what
+ * `node --help` prints with a value that must be given (`--name=...`), on
+ * Node 24 and, for the ones newer releases dropped, Node 20, with the aliases
+ * printed beside them that take the value too.
+ */
+export const NODE_VALUE_OPTIONS = new Set([
+  "-C",
+  "-e",
+  "-r",
+  "--allow-fs-read",
+  "--allow-fs-write",
+  "--build-snapshot-config",
+  "--conditions",
+  "--cpu-prof-dir",
+  "--cpu-prof-interval",
+  "--cpu-prof-name",
+  "--debug-port",
+  "--diagnostic-dir",
+  "--disable-proto",
+  "--disable-warning",
+  "--dns-result-order",
+  "--env-file",
+  "--env-file-if-exists",
+  "--eval",
+  "--experimental-config-file",
+  "--experimental-default-type",
+  "--experimental-loader",
+  "--experimental-package-map",
+  "--experimental-policy",
+  "--experimental-sea-config",
+  "--experimental-test-isolation",
+  "--experimental-test-tag-filter",
+  "--heap-prof-dir",
+  "--heap-prof-interval",
+  "--heap-prof-name",
+  "--heapsnapshot-near-heap-limit",
+  "--heapsnapshot-signal",
+  "--icu-data-dir",
+  "--import",
+  "--input-type",
+  "--inspect-port",
+  "--inspect-publish-uid",
+  "--loader",
+  "--localstorage-file",
+  "--max-http-header-size",
+  "--max-old-space-size-percentage",
+  "--network-family-autoselection-attempt-timeout",
+  "--openssl-config",
+  "--policy-integrity",
+  "--redirect-warnings",
+  "--report-dir",
+  "--report-directory",
+  "--report-filename",
+  "--report-signal",
+  "--require",
+  "--run",
+  "--secure-heap",
+  "--secure-heap-min",
+  "--snapshot-blob",
+  "--test-concurrency",
+  "--test-coverage-branches",
+  "--test-coverage-exclude",
+  "--test-coverage-functions",
+  "--test-coverage-include",
+  "--test-coverage-lines",
+  "--test-global-setup",
+  "--test-isolation",
+  "--test-name-pattern",
+  "--test-random-seed",
+  "--test-reporter",
+  "--test-reporter-destination",
+  "--test-rerun-failures",
+  "--test-shard",
+  "--test-skip-pattern",
+  "--test-timeout",
+  "--title",
+  "--tls-cipher-list",
+  "--tls-keylog",
+  "--trace-event-categories",
+  "--trace-event-file-pattern",
+  "--trace-require-module",
+  "--unhandled-rejections",
+  "--use-largepages",
+  "--v8-pool-size",
+  "--watch-kill-signal",
+  "--watch-path",
+]);
+
+/**
  * The file a process runs: the program itself, or the script given to node.
- * Code given to node on the command line is an argument, not a script.
+ * Code given to node on the command line is an argument, not a script. An
+ * option of the table above takes the next argument as its value; one of the
+ * form `--name=value`, and any other option, takes none. Not read right: a
+ * value option node knows and the table does not (V8 options such as
+ * `--stack-size 2000` among them), and a process that changed its own
+ * command line (setproctitle).
  */
 export function programsOf(argv) {
   const [program, ...rest] = argv;
   if (program === undefined) return [];
   if (!isNode(program)) return [program];
-  const at = rest.findIndex((one) => !one.startsWith("-"));
-  const options = at === -1 ? rest : rest.slice(0, at);
-  if (at === -1 || options.some((one) => CODE_OPTION.test(one))) return [program];
-  return [program, rest[at]];
+  for (let at = 0; at < rest.length; at += 1) {
+    const one = rest[at];
+    if (CODE_OPTION.test(one) || one === "-") return [program];
+    if (one === "--") return rest[at + 1] === undefined ? [program] : [program, rest[at + 1]];
+    if (!one.startsWith("-")) return [program, one];
+    if (NODE_VALUE_OPTIONS.has(one)) at += 1;
+  }
+  return [program];
 }
 
 /**
  * What has to be gone after the stop: the outer launcher the shim file names,
  * the inner launcher the runtime file names (the one that starts the server),
- * every process below them, and the two folders their programs run from. Of a
- * process only its identity and its programs are written down, no argument.
+ * every process below them, the two folders their programs run from and the
+ * folder of every installed version (`<dataDir>/app-versions`: each version in
+ * it belongs to this data folder's server). Of a process only its identity
+ * and its programs are written down, no argument. A process older than the
+ * one its parent number names is not below it: that number was reused.
  *
  * `dataDir` is the absolute data folder, `shim` the text of its
  * bb-app-update-shim.json (null when it is missing), `runtime` its parsed
@@ -240,10 +363,9 @@ export function programsOf(argv) {
  */
 export function recordChain({ dataDir, shim, runtime, table, bootId, real }) {
   if (shim === null) throw new Error(`${SHIM} is missing or could not be read`);
-  const lock = fileWith(SHIM, parseShim(shim), [
-    ["pid", "number"],
-    ["entryPath", "string"],
-  ]);
+  const { lock, wrong } = readShim(shim);
+  if (wrong !== undefined)
+    throw new Error(`${notAccepted(wrong)}: it does not describe the running server`);
   fileWith(RUNTIME, runtime, [
     ["pid", "number"],
     ["entryPath", "string"],
@@ -270,7 +392,8 @@ export function recordChain({ dataDir, shim, runtime, table, bootId, real }) {
       `${RUNTIME} names the inner launcher that starts the server ${runtime.entryPath}, which is not what ${shown(inner)} runs: the file does not describe the running server`,
     );
   const folders = new Set();
-  for (const folder of builds) for (const one of [folder, real(folder)]) folders.add(one);
+  for (const folder of [...builds, path.join(dataDir, "app-versions")])
+    for (const one of [folder, real(folder)]) folders.add(one);
   return {
     bootId,
     dataDir: real(dataDir),
@@ -354,7 +477,7 @@ export function recordLines(record) {
   return [
     `Server ${record.version}, outer launcher process ${record.launcher.pid}, inner launcher process ${record.runtime.pid}.`,
     `Data folder: ${record.dataDir}`,
-    `Builds: ${record.folders.join(", ")}`,
+    `Builds and installed versions: ${record.folders.join(", ")}`,
     `${record.processes.length} processes written down:`,
     ...record.processes.map((one) => `  ${shown(one)}`),
   ];
@@ -364,21 +487,86 @@ function inside(folder, file) {
   return path.isAbsolute(file) && path.resolve(file).startsWith(`${folder}/`);
 }
 
+/** bb's CLI in a build: the `bb` command, its link in `.bin`, and the CLI it hands the work to. */
+const CLI = ["bb-app/dist/bb.js", ".bin/bb", "bb-app/host-daemon/dist/bb"].map(
+  (file) => `/node_modules/${file}`,
+);
+
+/** The folder of `folders` a program of `one` runs from, of bb's CLI only when `cli` is set. */
+function folderOf(folders, one, cli = false) {
+  return folders.find((each) =>
+    programsOf(one.argv).some(
+      (file) =>
+        inside(each, file) && (!cli || CLI.some((name) => path.resolve(file).endsWith(name))),
+    ),
+  );
+}
+
+/**
+ * The processes above `one`, nearest first. The walk stops at a parent
+ * younger than the process below it: that number was reused, and it is not
+ * the parent.
+ */
+function parentsOf(byPid, one) {
+  const parents = [];
+  let below = one;
+  for (
+    let up = byPid.get(one.ppid);
+    up !== undefined && !later(up.started, below.started) && parents.length < byPid.size;
+    up = byPid.get(up.ppid)
+  ) {
+    parents.push(up);
+    below = up;
+  }
+  return parents;
+}
+
 const SHOWN = 240;
 
 /** A process on one line, by its programs only: its arguments may hold anything. */
-export function shown(one) {
+export function shown(one, name = String(one.pid)) {
   const programs = (one.programs ?? programsOf(one.argv)).join(" ").replace(/\s+/g, " ").trim();
-  return `process ${one.pid}: ${programs.length > SHOWN ? `${programs.slice(0, SHOWN)}…` : programs || "(no program)"}`;
+  return `process ${name}: ${programs.length > SHOWN ? `${programs.slice(0, SHOWN)}…` : programs || "(no program)"}`;
+}
+
+/**
+ * How `--also` and `--not-ours` name a process: its number and its start
+ * time, as the lines of the two kinds looked at print them.
+ */
+export const tokenOf = (one) => `${one.pid}@${one.started}`;
+
+export function parseToken(option, text) {
+  const match = /^([1-9]\d*)@(\d+)$/.exec(text);
+  if (match === null)
+    throw new Error(
+      `${option} ${text}: a process is named as number@start time; copy it from the line gone printed`,
+    );
+  return { pid: Number(match[1]), started: match[2] };
 }
 
 const CERTAIN = new Set(["recorded", "child"]);
 const LOOKED_AT = new Set(["from-build", "orphan"]);
+const SET_ASIDE = new Set([...LOOKED_AT, "command"]);
+const NOTE = new Set(["shim-ignored"]);
+
+function asServerUser(record, uid) {
+  if (uid !== record.launcher.uid)
+    throw new Error(
+      `this command runs as user ${uid} and the server as user ${record.launcher.uid}: run it as the user the server runs as`,
+    );
+}
 
 /**
  * The processes of the table that may be the stopped server's, each with what
  * the evidence is. `known` (number to start time) adds processes already
  * established as the server's, whose descendants are then the server's too.
+ * The walk up from a process stops at a parent younger than the process
+ * below it: that number was reused, and it is not the parent.
+ *
+ * A process the server did not start that runs bb's CLI from a build, or is
+ * below one, is a `bb` command (kind `command`): the server's own calls of the
+ * CLI are its children. `command` lists the tokens from the process up to the
+ * outermost CLI process above it, the one its text names for `--not-ours`.
  */
 export function scan({ record, table, bootId, known = new Map() }) {
   const sameBoot = record.bootId === bootId;
@@ -386,14 +574,6 @@ export function scan({ record, table, bootId, known = new Map() }) {
   const byPid = new Map(table.map((one) => [one.pid, one]));
   const isRecorded = (one) => sameBoot && recorded.get(one.pid) === one.started;
   const isServers = (one) => isRecorded(one) || known.get(one.pid) === one.started;
-  const startedByServer = (one) => {
-    let up = byPid.get(one.ppid);
-    for (let steps = 0; up !== undefined && steps < byPid.size; steps += 1) {
-      if (isServers(up)) return true;
-      up = byPid.get(up.ppid);
-    }
-    return false;
-  };
   const lines = [];
   for (const one of table) {
     const line = { pid: one.pid, started: one.started };
@@ -401,7 +581,8 @@ export function scan({ record, table, bootId, known = new Map() }) {
       lines.push({ ...line, kind: "recorded", text: `still running, ${shown(one)}` });
       continue;
     }
-    if (startedByServer(one)) {
+    const parents = parentsOf(byPid, one);
+    if (parents.some(isServers)) {
       lines.push({
         ...line,
         kind: "child",
@@ -409,27 +590,38 @@ export function scan({ record, table, bootId, known = new Map() }) {
       });
       continue;
     }
-    const folder = record.folders.find((each) =>
-      programsOf(one.argv).some((file) => inside(each, file)),
-    );
+    const upward = [one, ...parents];
+    const outermost = upward.findLastIndex((each) => folderOf(record.folders, each, true));
+    if (outermost !== -1) {
+      const command = upward.slice(0, outermost + 1).map(({ pid, started }) => ({ pid, started }));
+      const top = tokenOf(command.at(-1));
+      lines.push({
+        ...line,
+        kind: "command",
+        command,
+        text: `${outermost === 0 ? `is a bb command run from ${folderOf(record.folders, one, true)}` : `is part of the bb command ${top}`}, ${shown(one, tokenOf(one))}: the stopped server did not start it, so it is not the server's: wait for it to end, or set it aside with gone --not-ours ${top}`,
+      });
+      continue;
+    }
+    const folder = folderOf(record.folders, one);
     if (folder !== undefined) {
       lines.push({
         ...line,
         kind: "from-build",
-        text: `runs from the build ${folder}, ${shown(one)}: it is the stopped server's unless another 1ma server was started on purpose from the same folder`,
+        text: `runs a program from the server's builds in ${folder}, ${shown(one, tokenOf(one))}: it is a piece of the stopped server, unless a launcher was started from this build after the stop`,
       });
       continue;
     }
     if (
       sameBoot &&
       one.ppid === 1 &&
-      later(one.started, record.at) &&
+      !later(record.at, one.started) &&
       one.uid === record.launcher.uid
     )
       lines.push({
         ...line,
         kind: "orphan",
-        text: `started after the record and lost its parent, ${shown(one)}: it may be a program an agent of the stopped server started, or something else on this machine`,
+        text: `started after the record and lost its parent, ${shown(one, tokenOf(one))}: it may be a program an agent of the stopped server started, or something else on this machine`,
       });
   }
   return lines;
@@ -438,13 +630,20 @@ export function scan({ record, table, bootId, known = new Map() }) {
 /**
  * Whether bb will take the data folder for held, by bb's own rule: while
  * `exists` (kill(pid, 0)) succeeds for the pid in the shim file, whatever that
- * process is, also one that ended and was not collected by its parent. `text`
- * is the file as it is now (null when it is missing), `identity` reads the
- * number and start time of a process, ended or not.
+ * process is, also one that ended and was not collected by its parent; a file
+ * bb does not accept holds nothing. `text` is the file as it is now (null when
+ * it is missing), `identity` reads the number and start time of a process,
+ * ended or not.
  */
 export function lockLine({ record, text, table, bootId, exists, identity }) {
   if (text === null) return null;
-  const { pid } = parseShim(text);
+  const { lock, wrong } = readShim(text);
+  if (wrong !== undefined)
+    return {
+      kind: "shim-ignored",
+      text: `${notAccepted(wrong)}: it holds the data folder for no process, and the next launcher replaces it`,
+    };
+  const { pid } = lock;
   if (!exists(pid)) return null;
   const holder = table.find((one) => one.pid === pid);
   if (text !== record.shim)
@@ -462,7 +661,7 @@ export function lockLine({ record, text, table, bootId, exists, identity }) {
       started: now.started,
       text: now.ended
         ? `the launcher written down, process ${pid}, has ended and waits for its parent to collect it; until then bb takes the data folder for held: wait and check again`
-        : `the launcher written down, process ${pid}, has not ended, and ${SHIM} still names it`,
+        : `the launcher written down, process ${pid}, has not ended, and ${SHIM} still names it: it is a still running line too, and \`end\` ends it`,
     };
   return {
     kind: "lock-leftover",
@@ -478,90 +677,162 @@ export function remaining({ record, table, bootId, shim, exists, identity }) {
   return [...scan({ record, table, bootId }), ...(lock === null ? [] : [lock])];
 }
 
-function lookedAt(lines, pid) {
-  return lines.find((line) => line.pid === pid && LOOKED_AT.has(line.kind));
+const names = (line, token) => line.pid === token.pid && line.started === token.started;
+
+function lookedAt(lines, token, kinds = LOOKED_AT) {
+  return lines.find((line) => names(line, token) && kinds.has(line.kind));
+}
+
+function notLookedAt(option, token, what) {
+  return new Error(
+    `${option} ${tokenOf(token)}: no line of ${what} names this process with this start time. The number may belong to another program by now: run gone again and copy from its line`,
+  );
 }
 
 /**
- * The answer of `gone`: the lines that count, and the ones looked at and found
- * not to be the server's (`notOurs`, only lines of a program that runs from
- * the build or lost its parent).
+ * The answer of `gone`: the lines that count, the ones looked at and found
+ * not to be the server's (`notOurs`, tokens of lines of a program that runs
+ * from the server's builds, lost its parent or is a `bb` command; a token of
+ * a `bb` command also sets aside every process below it), and notes that hold
+ * nothing.
  */
 export function judge(lines, notOurs = []) {
-  for (const pid of notOurs)
-    if (lookedAt(lines, pid) === undefined)
-      throw new Error(
-        `--not-ours ${pid}: no line of a program that runs from the build or lost its parent names this process`,
+  for (const token of notOurs)
+    if (lookedAt(lines, token, SET_ASIDE) === undefined)
+      throw notLookedAt(
+        "--not-ours",
+        token,
+        "a program that runs from the server's builds, lost its parent or is a bb command",
       );
-  const covered = lines.filter((line) => LOOKED_AT.has(line.kind) && notOurs.includes(line.pid));
-  return { counted: lines.filter((line) => !covered.includes(line)), covered };
+  const covered = lines.filter((line) =>
+    notOurs.some(
+      (token) =>
+        lookedAt([line], token) !== undefined ||
+        (line.kind === "command" && line.command.some((each) => names(each, token))),
+    ),
+  );
+  return {
+    counted: lines.filter((line) => !covered.includes(line) && !NOTE.has(line.kind)),
+    covered,
+    notes: lines.filter((line) => NOTE.has(line.kind)),
+  };
 }
 
 /** What `gone` prints when nothing counts. */
 export function goneText(record, covered) {
   return [
-    `Nothing of the ${record.processes.length} processes written down runs, nothing they started runs, nothing runs from ${record.folders.join(" or ")}, no program of the launcher's user lost its parent after the record${covered.length === 0 ? "" : ` other than the ${covered.length} looked at`}, and bb will not take the data folder for held.`,
-    "Not seen by this check: a program outside both builds that had already lost its parent before the record, or one that another process than process 1 adopted.",
+    `Nothing of the ${record.processes.length} processes written down runs, nothing they started runs, nothing runs from ${record.folders.join(" or ")}, no program of the launcher's user lost its parent since the record${covered.length === 0 ? "" : ` other than the ${covered.length} looked at`}, and bb will not take the data folder for held.`,
+    "Not seen by this check: a program outside these folders that had already lost its parent before the record, or one that another process than process 1 adopted.",
     ...covered.map((line) => `looked at, not the server's: ${line.text}`),
   ];
 }
 
 /**
+ * The answer of `gone` for the user `uid`: `{ code, lines }`, code 0 when
+ * nothing may be left and 1 when something is.
+ */
+export function gone({ record, uid, notOurs = [], table, bootId, shim, exists, identity }) {
+  asServerUser(record, uid);
+  const { counted, covered, notes } = judge(
+    remaining({ record, table, bootId, shim, exists, identity }),
+    notOurs,
+  );
+  const noted = notes.map((line) => line.text);
+  if (counted.length === 0) return { code: 0, lines: [...goneText(record, covered), ...noted] };
+  return {
+    code: 1,
+    lines: [
+      ...counted.map((line) => line.text),
+      ...covered.map((line) => `looked at, not the server's: ${line.text}`),
+      ...noted,
+    ],
+  };
+}
+
+/**
  * Ends what is certainly the stopped server's: the processes written down and
- * the ones they started, and the pids of `also` that this scan finds running
- * from the build or without a parent. SIGTERM to all, the table read again
- * every `step` ms for up to `grace` ms (new processes they start become
- * targets too), then SIGKILL to what is left.
+ * the ones they started, and the processes of `also` (tokens, number and start
+ * time) that this scan finds, with that start time, running from the server's
+ * builds or without a parent. SIGTERM to all, the table read again every
+ * `step` ms for up to `grace` ms (new processes they start become targets
+ * too), then SIGKILL to what is left.
  *
  * Before each signal the process's number and start time are read again, and
- * the signal goes only when they are unchanged. The kernel gives a number to
- * a new process only after it has gone through the whole number space, so
- * between that read and the signal sent at once the number cannot change
- * hands; a person typing a number seconds later has no such bound.
+ * the signal goes only when they are unchanged. Linux hands numbers out in
+ * turn and gives a freed one again when its counter next reaches it, so
+ * between that read and the signal sent at once the number changes hands only
+ * when the process ends, is collected and the counter stands exactly at its
+ * number. Without a pidfd that cannot be excluded; right after each signal the
+ * start time is read once more, and a different one is reported, as is every
+ * number in `changedHands` of the answer.
  *
  * It refuses, sending nothing, when `self` (the pid of the command) is itself
- * one of the processes it would end.
+ * one of the processes it would end, or when `uid` is not the launcher's user;
+ * `--also` it refuses for a `bb` command, and for every process while another
+ * launcher holds the data folder. When a later read makes the command or a
+ * process above it one to end, it stops, sending nothing more.
  *
- * `readTable` reads the process table, `identity` one process, `signal(pid,
- * name)` sends, `sleep(ms)` waits, `log` takes a line of what was done.
+ * `readTable` reads the process table, `identity` one process, `shim` is the
+ * text of bb-app-update-shim.json (null when it is missing) and `exists` bb's
+ * test of its pid, `signal(pid, name)` sends, `sleep(ms)` waits, `log` takes a
+ * line of what was done.
  */
 export async function end({
   record,
   bootId,
   self,
+  uid,
   also = [],
   readTable,
   identity,
+  shim = null,
+  exists,
   signal,
   sleep,
   log,
   grace = 15000,
   step = 250,
 }) {
+  asServerUser(record, uid);
   const before = readTable();
+  const lock = lockLine({ record, text: shim, table: before, bootId, exists, identity });
+  if (also.length > 0 && lock?.kind === "lock-other")
+    throw new Error(`--also is refused while another launcher holds the data folder: ${lock.text}`);
   const first = scan({ record, table: before, bootId });
   const chosen = new Map();
-  for (const pid of also) {
-    const line = lookedAt(first, pid);
-    if (line === undefined)
+  for (const token of also) {
+    if (lookedAt(first, token, new Set(["command"])) !== undefined)
       throw new Error(
-        `--also ${pid}: no line of a program that runs from the build or lost its parent names this process`,
+        `--also ${tokenOf(token)}: this process is a bb command or part of one, not the server's; the server's own calls of bb are ended without --also. Wait for it to end, or set it aside with gone --not-ours`,
       );
-    chosen.set(pid, line.started);
+    if (lookedAt(first, token) === undefined)
+      throw notLookedAt(
+        "--also",
+        token,
+        "a program that runs from the server's builds or lost its parent",
+      );
+    chosen.set(token.pid, token.started);
   }
+  const ownTree = new Error(
+    `this command was started by the server it would end (process ${self}): run it from outside that server, after the stop`,
+  );
   const own = scan({ record, table: before, bootId, known: chosen }).find(
     (line) => line.pid === self && CERTAIN.has(line.kind),
   );
-  if (own !== undefined || chosen.has(self))
-    throw new Error(
-      `this command was started by the server it would end (process ${self}): run it from outside that server, after the stop`,
-    );
+  if (own !== undefined || chosen.has(self)) throw ownTree;
   const targets = new Map();
   const take = (table) => {
+    const byPid = new Map(table.map((one) => [one.pid, one]));
+    const me = byPid.get(self);
+    const mine = new Set([
+      self,
+      ...(me === undefined ? [] : parentsOf(byPid, me).map((one) => one.pid)),
+    ]);
     const fresh = [];
     for (const line of scan({ record, table, bootId, known: targets })) {
       const target = CERTAIN.has(line.kind) || chosen.get(line.pid) === line.started;
       if (!target || targets.get(line.pid) === line.started) continue;
+      if (mine.has(line.pid)) throw ownTree;
       targets.set(line.pid, line.started);
       fresh.push(line.pid);
     }
@@ -571,16 +842,25 @@ export async function end({
     for (const [pid, started] of targets)
       if (!table.some((one) => one.pid === pid && one.started === started)) targets.delete(pid);
   };
+  const changedHands = [];
   const send = (pids, name) => {
     for (const pid of pids) {
+      const started = targets.get(pid);
       const now = identity(pid);
-      if (now === null || now.ended || now.started !== targets.get(pid)) {
+      if (now === null || now.ended || now.started !== started) {
         targets.delete(pid);
         log(`process ${pid} has ended or its number belongs to another process: no ${name}`);
         continue;
       }
       signal(pid, name);
       log(`${name} to process ${pid}`);
+      const then = identity(pid);
+      if (then !== null && then.started !== started) {
+        changedHands.push(pid);
+        log(
+          `process ${pid}: the number changed hands between the check and the signal, the ${name} may have reached another program (started at ${then.started})`,
+        );
+      }
     }
   };
   send(take(before), "SIGTERM");
@@ -595,6 +875,7 @@ export async function end({
     await sleep(step);
     keepRunning(readTable());
   }
+  return { changedHands };
 }
 
 /**
@@ -604,7 +885,8 @@ export async function end({
  * a file that appeared meanwhile. Answers `{ code, text }` when nothing was
  * to be removed or the file is removed; throws when the file changed.
  */
-export function unlock({ record, table, bootId, exists, identity, fs = nodeFs }) {
+export function unlock({ record, uid, table, bootId, exists, identity, fs = nodeFs }) {
+  asServerUser(record, uid);
   const file = path.join(record.dataDir, SHIM);
   const line = lockLine({
     record,
@@ -614,6 +896,8 @@ export function unlock({ record, table, bootId, exists, identity, fs = nodeFs })
     exists,
     identity,
   });
+  if (line?.kind === "shim-ignored")
+    return { code: 1, text: `${line.text}: there is nothing to unlock` };
   if (line?.kind !== "lock-leftover")
     return {
       code: 1,
@@ -643,4 +927,36 @@ export function unlock({ record, table, bootId, exists, identity, fs = nodeFs })
   }
   fs.unlinkSync(aside);
   throw new Error(`${SHIM} changed after it was judged: it is back in place, nothing is removed`);
+}
+
+const RECORD_OPTION = { record: { type: "string" } };
+const COMMANDS = {
+  paused: {},
+  record: { "data-dir": { type: "string" }, out: { type: "string" } },
+  gone: { ...RECORD_OPTION, "not-ours": { type: "string", multiple: true } },
+  end: { ...RECORD_OPTION, also: { type: "string", multiple: true } },
+  unlock: RECORD_OPTION,
+};
+
+/** The options given to `command`, which takes only its own; null when there is no such command. */
+export function commandOptions(command, args) {
+  if (!Object.hasOwn(COMMANDS, command)) return null;
+  const own = COMMANDS[command];
+  const { values, tokens } = parseArgs({
+    args,
+    options: Object.assign({}, ...Object.values(COMMANDS)),
+    tokens: true,
+  });
+  for (const token of tokens)
+    if (token.kind === "option" && !Object.hasOwn(own, token.name))
+      throw new Error(
+        `--${token.name} is not an option of ${command}${
+          Object.keys(own).length === 0
+            ? ", which takes none"
+            : `, which takes ${Object.keys(own)
+                .map((name) => `--${name}`)
+                .join(" and ")}`
+        }`,
+      );
+  return values;
 }

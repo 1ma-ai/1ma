@@ -809,7 +809,7 @@ describe("prepare stops when a rule for all of bb matches nothing", () => {
     };
     assert.throws(
       () => run(pattern, { testReplace: [other] }),
-      /negative assertions[\s\S]*"Restart bb soon\|Continue" stays as is/,
+      /negative assertions[\s\S]*"Restart bb soon\|Proceed" stays as is/,
     );
   });
 
@@ -879,7 +879,10 @@ describe("prepare stops when a rule for all of bb matches nothing", () => {
 
   test("a rule that changes both sides of a mention in one match leaves it named", () => {
     const around = rule(call, 'expect(screen.getByRole(title)).not.toContain("Restart bb later")');
-    assert.throws(() => run(plain, { testReplace: [around] }), diagnostic);
+    assert.throws(
+      () => run(plain, { testReplace: [around] }),
+      /negative assertions[\s\S]*"Restart bb later" stays as is/,
+    );
   });
 
   test("a rule that writes what it finds settles nothing", () => {
@@ -932,6 +935,53 @@ describe("prepare stops when a rule for all of bb matches nothing", () => {
     );
   });
 
+  const removed = rule("bb", "");
+  const restored = rule("Restart  soon", "Restart bb soon");
+
+  test("a mention a rule takes out and a later rule puts back is named", () => {
+    assert.throws(() => run(plain, { testReplace: [removed, restored] }), diagnostic);
+    assert.throws(
+      () =>
+        run(plain, { testReplace: [rule("bb", "b"), rule("Restart b soon", "Restart bb soon")] }),
+      diagnostic,
+    );
+  });
+
+  test("a keep rule a mention put back by a later rule needs counts as matching", () => {
+    const { unmatched, test } = run(plain, { testReplace: [removed, restored], keep: [inside] });
+    assert.deepEqual(unmatched, []);
+    requireEveryRuleMatches(unmatched);
+    assert.match(test, /not\.toContain\("Restart bb soon"\)/);
+  });
+
+  test("a mention taken out or put back as 1ma is settled, a changed neighbour is not", () => {
+    assert.match(
+      run(plain, { testReplace: [removed] }).test,
+      /not\.toContain\("Restart {2}soon"\)/,
+    );
+    const renamed = rule("Restart  soon", "Restart 1ma soon");
+    assert.match(
+      run(plain, { testReplace: [removed, renamed] }).test,
+      /not\.toContain\("Restart 1ma soon"\)/,
+    );
+    assert.throws(
+      () => run(plain, { testReplace: [rule(" soon", " later")] }),
+      /negative assertions[\s\S]*"Restart bb later" stays as is/,
+    );
+  });
+
+  test("a rule that only spells the same text another way settles nothing", () => {
+    for (const spelling of ["\\x62b", "\\u0062b", "b\\\nb"]) {
+      const escaped = `// bb\nexpect(title).not.toContain("Restart ${spelling} soon");\n`;
+      assert.throws(() => run(escaped, {}), diagnostic);
+      assert.throws(() => run(escaped, { testReplace: [rule(spelling, "bb")] }), diagnostic);
+      assert.match(
+        run(escaped, { testReplace: [rule(spelling, "1ma")] }).test,
+        /not\.toContain\("Restart 1ma soon"\)/,
+      );
+    }
+  });
+
   test("a keep rule inside a longer rule that no test quotes is still named", () => {
     const whole = { text: "Please Restart bb server now", reason: "test" };
     const inside = { text: "Restart bb server", reason: "test" };
@@ -969,6 +1019,53 @@ describe("prepare stops when a rule for all of bb matches nothing", () => {
     assert.throws(
       () => rebrandTree(root, only({ replace: [opening] })),
       /apps\/app\/src\/access\.tsx: an override covers escaped text/,
+    );
+  });
+
+  const rebranded = (file, text) => {
+    const root = tree({ "apps/app/package.json": manifest("@bb/app"), [file]: text });
+    after(() => rmSync(root, { recursive: true, force: true }));
+    rebrandTree(root, only({ replace: [opening] }), { write: true });
+    return readFileSync(path.join(root, file), "utf8");
+  };
+
+  test("an override after an octal escape keeps the escape", () => {
+    assert.equal(
+      rebranded("apps/app/src/access.js", 'const title = "\\40Open bb from any browser";\n'),
+      'const title = "\\40Open 1ma from any browser";\n',
+    );
+  });
+
+  test("an override after a line break in a template keeps the line break", () => {
+    for (const lineBreak of ["\r\n", "\r"])
+      for (const template of [
+        `\`hi${lineBreak}Open bb from any browser\``,
+        `\`hi${lineBreak}Open bb from \${place}\``,
+      ])
+        assert.equal(
+          rebranded("apps/app/src/access.tsx", `export const title = ${template};\n`),
+          `export const title = ${template.replace("Open bb", "Open 1ma")};\n`,
+        );
+  });
+
+  test("an override after an escape a tagged template keeps as written keeps it", () => {
+    assert.equal(
+      rebranded(
+        "apps/app/src/access.tsx",
+        "export const title = tag`\\101 Open bb from any browser`;\n",
+      ),
+      "export const title = tag`\\101 Open 1ma from any browser`;\n",
+    );
+  });
+
+  test("a literal spelled in a way the rebrand cannot map is refused", () => {
+    assert.throws(
+      () =>
+        rebranded(
+          "apps/app/src/access.tsx",
+          'export const title = "\\u{}Open bb from any browser";\n',
+        ),
+      /apps\/app\/src\/access\.tsx: cannot map the literal at 22/,
     );
   });
 
