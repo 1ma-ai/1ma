@@ -85,7 +85,7 @@ jobs:
           sparse-checkout: desktop/scripts
           persist-credentials: false
       # The Node the tool's tests run on in desktop.yml.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22.x"
       - name: Download the build
