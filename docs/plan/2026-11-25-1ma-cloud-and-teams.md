@@ -441,23 +441,29 @@ Requirements:
   chosen in the implementation document, not invented. The fingerprint for a manual installation
   reaches the owner by a way of its own, not from the download place.
 - **What recovery covers.** An installed app that already saw the thief's release, and one that missed
-  the change of trust, both accept the new set once they get it. Until an app can get the current
-  trust, from the download place or the second place named in the implementation document, it accepts
-  no new package. An installation over the same system keeps the newer trust; a clean installation
-  from an old download starts from the trust built into it and gets the current one before any
-  update. If foreign code has already run, nothing repairs itself: the owner's manual procedure
+  the change of trust, both accept the new set once they get it. Until an app holds a genuine trust
+  statement still in its term, from the download place or the second place named in the
+  implementation document, it accepts no new package. An installation over the same system keeps the
+  newer trust; a clean installation from an old download starts from the trust built into it and
+  gets a genuine statement still in its term before any update. While no trust change has reached
+  it, the automatic check accepts such a statement, even one signed before a change («When a
+  withdrawn key stops working»). If foreign code has already run, nothing repairs itself: the owner's manual procedure
   restores a checked copy and checks the data separately.
 - **When a withdrawn key stops working.** An app refuses a package under a withdrawn key from the
   moment it holds the trust change. Before that it cannot tell that the change happened: the old
-  trust it is shown is genuine. So the delay has a limit of its own. The current trust is a statement
-  signed with the reserve key, with its own term (proposed 30 days; the delivery document names the
-  maximum). An app whose newest trust statement is past its term installs nothing until it gets a
-  current one («could not confirm the keys are current»). The stolen release key cannot sign such a
-  statement. A package under the withdrawn key is therefore refused at the latest when the trust
-  statement the app holds runs out; the owner re-signs the statement before its term ends, and the
-  job reminds them a week before. The owner is told this window plainly. The manual way has no such
-  window: the person installing compares against the current trust received by the owner's own way,
-  before the downloaded package runs.
+  trust it is shown is genuine. So the delay has a limit of its own. The trust is a statement signed
+  with the reserve key; its term counts from its signing (proposed 30 days; the delivery document
+  names the maximum). The stolen release key cannot sign such a statement. An app whose newest
+  statement is past its term installs nothing until it gets one in term («could not confirm the keys
+  are current»); if the owner does not re-sign in time, installs stop everywhere until they do. The
+  owner re-signs about a week before the term ends, so a statement signed shortly before a change
+  can reach an app only after it. The limit is therefore the end of the latest statement signed
+  before the change: at most one term, 30 days, after the change, whatever the app was shown. **In
+  plain words for the owner:** for up to 30 days after you withdraw a stolen key, an app that has
+  not yet received the change can still install a package signed with that key; after that, or as
+  soon as the change reaches it, it cannot. The manual way has no such window: the person installing
+  compares against the current trust received by the owner's own way, before the downloaded package
+  runs.
 - **Refused before anything is unpacked**: an unsigned, foreign or withdrawn key, a wrong channel or
   architecture, a pointer and package that do not match, a lower release number, the same number
   with other contents, a pointer past its term («could not confirm this is the latest»), a trust
@@ -487,8 +493,11 @@ system and a clean one from an old download, with their different expected resul
 obtained before the change; the same number with other contents; a legitimate manual roll-back. Also
 a clean installation from an old download after the change, three ways: no connection, refused; only
 the old, still valid trust statement, accepted only until that statement's term ends and refused
-after it, on a controlled clock; the change received, refused. A package under the withdrawn key on
-the first manual Mac is refused before it runs. The Linux and
+after it, on a controlled clock; the change received, refused. Two overlapping genuine statements:
+the first seen before the change, the second signed before it and delivered after the first runs
+out; accepted until the second's term ends, refused at its end or as soon as the change arrives. No
+re-signed statement in time: installs refused once the last one runs out. A package under the
+withdrawn key on the first manual Mac is refused before it runs. The Linux and
 automatic Mac lines are accepted in their own stages.
 
 ### Done when
