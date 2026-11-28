@@ -1,23 +1,22 @@
 import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { parseArgs } from "node:util";
 import {
   PAUSED,
   checkRecord,
+  commandOptions,
   end,
-  goneText,
+  gone,
   identityOf,
-  judge,
   linuxBootId,
   linuxProc,
   pauseBreaks,
+  parseToken,
   pidExists,
   processTable,
   readOr,
   recordChain,
   recordLines,
-  remaining,
   unlock,
   writeRecord,
 } from "./lib/linux-launcher.mjs";
@@ -30,7 +29,8 @@ server may still run (it would work on the same data), and bb must not take the
 data folder for held (a launcher that finds it held installs no updates). The
 server's processes have no group of their own on this machine, so every line
 says what its evidence is. Nobody ends a process by number: \`end\` does it, and
-checks each process again right before each signal.
+checks each process again right before each signal. gone, end and unlock run as
+the user the server runs as, not as root; each command takes only its own options.
 
   bb updates app status --json | node scripts/linux-launcher.mjs paused
       exit 0: at this moment automatic installation is off, nothing is scheduled
@@ -41,13 +41,17 @@ checks each process again right before each signal.
       before the stop: writes down the data folder, the launchers, every process
       below them and the builds they run from (identity and programs, no arguments);
       the commands below take the data folder from this record
-  node scripts/linux-launcher.mjs gone --record <file> [--not-ours <pid>]...
+  node scripts/linux-launcher.mjs gone --record <file> [--not-ours <pid>@<start>]...
       after the stop: exit 0 when nothing may be left; --not-ours sets aside a
-      program that runs from the build or lost its parent, once looked at. Only reads.
-  node scripts/linux-launcher.mjs end --record <file> [--also <pid>]...
+      program that runs from the server's builds or lost its parent, once looked
+      at, named by the <pid>@<start> its line prints. Only reads.
+  node scripts/linux-launcher.mjs end --record <file> [--also <pid>@<start>]...
       ends what is still running or was started by it, and the programs given
-      with --also that run from the build or lost their parent; then answers as
-      gone. Run it from outside the stopped server: it refuses to end itself
+      with --also, by the <pid>@<start> of their line, that run from the
+      server's builds or lost their parent; then answers as gone. A program
+      whose number now has another start time is refused. Run it from outside
+      the stopped server: it refuses to end itself. Exit 2 also when a number
+      changed hands between the check and a signal
   node scripts/linux-launcher.mjs unlock --record <file>
       removes bb-app-update-shim.json left by the launcher that ended, whose
       number another program now has
@@ -78,11 +82,8 @@ function required(values, name) {
   return values[name];
 }
 
-function pids(values, name) {
-  return (values[name] ?? []).map((one) => {
-    if (!/^[1-9]\d*$/.test(one)) throw new Error(`--${name} ${one} is not a process number`);
-    return Number(one);
-  });
+function tokens(values, name) {
+  return (values[name] ?? []).map((one) => parseToken(`--${name}`, one));
 }
 
 function signal(pid, name) {
@@ -97,45 +98,29 @@ const identity = identityOf(linuxProc);
 const readTable = () => processTable(linuxProc);
 
 function readRecord(values) {
-  if (values["data-dir"] !== undefined)
-    throw new Error("--data-dir is not taken here: the record names the data folder");
   const record = json(required(values, "record"));
   if (record === null) throw new Error(`${values.record} does not exist`);
   return checkRecord(record, values.record);
 }
 
-function gone(record, notOurs) {
-  const { counted, covered } = judge(
-    remaining({
-      record,
-      table: readTable(),
-      bootId: linuxBootId(),
-      shim: readOr(path.join(record.dataDir, "bb-app-update-shim.json"), null),
-      exists: pidExists,
-      identity,
-    }),
+function answer(record, notOurs) {
+  const { code, lines } = gone({
+    record,
+    uid: process.getuid(),
     notOurs,
-  );
-  if (counted.length > 0) {
-    for (const line of counted) console.log(line.text);
-    for (const line of covered) console.log(`looked at, not the server's: ${line.text}`);
-    return 1;
-  }
-  for (const line of goneText(record, covered)) console.log(line);
-  return 0;
+    table: readTable(),
+    bootId: linuxBootId(),
+    shim: readOr(path.join(record.dataDir, "bb-app-update-shim.json"), null),
+    exists: pidExists,
+    identity,
+  });
+  for (const line of lines) console.log(line);
+  return code;
 }
 
 async function main([command, ...rest]) {
-  const { values } = parseArgs({
-    args: rest,
-    options: {
-      "data-dir": { type: "string" },
-      out: { type: "string" },
-      record: { type: "string" },
-      "not-ours": { type: "string", multiple: true },
-      also: { type: "string", multiple: true },
-    },
-  });
+  const values = commandOptions(command, rest);
+  if (values === null) throw new Error(USAGE);
   if (command === "paused") {
     let status;
     try {
@@ -162,25 +147,32 @@ async function main([command, ...rest]) {
     for (const line of recordLines(record)) console.log(line);
     return 0;
   }
-  if (command === "gone") return gone(readRecord(values), pids(values, "not-ours"));
+  if (command === "gone") return answer(readRecord(values), tokens(values, "not-ours"));
   if (command === "end") {
     const record = readRecord(values);
-    await end({
+    const { changedHands } = await end({
       record,
       bootId: linuxBootId(),
       self: process.pid,
-      also: pids(values, "also"),
+      uid: process.getuid(),
+      also: tokens(values, "also"),
       readTable,
       identity,
       signal,
       sleep,
       log: (line) => console.log(line),
     });
-    return gone(record, []);
+    const code = answer(record, []);
+    if (changedHands.length === 0) return code;
+    console.error(
+      `the number of process ${changedHands.join(", ")} changed hands between the check and the signal: see the lines above`,
+    );
+    return 2;
   }
   if (command === "unlock") {
     const result = unlock({
       record: readRecord(values),
+      uid: process.getuid(),
       table: readTable(),
       bootId: linuxBootId(),
       exists: pidExists,
@@ -189,7 +181,6 @@ async function main([command, ...rest]) {
     console.log(result.text);
     return result.code;
   }
-  throw new Error(USAGE);
 }
 
 try {
