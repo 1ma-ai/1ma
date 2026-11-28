@@ -38,6 +38,8 @@ interface TurnExtra {
   accepted?: boolean;
   systemMessageKind?: string;
   retryOfRequestId?: string;
+  retryAttempt?: number;
+  target?: { kind: "new-turn" } | { kind: "auto" | "steer"; expectedTurnId: string | null };
   input?: unknown[];
   inputGroups?: unknown[][];
 }
@@ -81,19 +83,21 @@ function setup(settings: Record<string, number> = {}) {
     { accepted = false, ...request }: TurnExtra = {},
   ) => {
     const requestId = `req_${seq + 1}`;
+    const running = (events.get(threadId) ?? []).findLast((row) => row.type === "turn/started");
+    const runningId = running?.scope.kind === "turn" ? running.scope.turnId : null;
     push(threadId, "client/turn/requested", {
       initiator,
       senderThreadId: sender,
       requestId,
+      target:
+        kind === "steer" ? { kind: "steer", expectedTurnId: runningId } : { kind: "new-turn" },
       ...request,
     });
     if (kind === "rejected")
       push(threadId, "client/turn/rejected", { requestId, message: "refused", reason: "provider" });
     if (kind === "start") startTurn(threadId, accepted ? requestId : null);
-    if (kind === "steer") {
-      const running = events.get(threadId)!.findLast((row) => row.type === "turn/started");
+    if (kind === "steer")
       push(threadId, "turn/input/accepted", { clientRequestId: requestId }, running?.scope);
-    }
     return requestId;
   };
   const startTurn = (
@@ -1411,6 +1415,43 @@ describe("a turn the provider started on its own", () => {
     t.startTurn("thr_a", null);
     await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
   });
+
+  it("every turn it starts after the owner's writes in that one exchange", async () => {
+    const t = await threeBots();
+    t.recordTurn("thr_a", "user", null, "start", { accepted: true });
+    expect(await t.letter("thr_a", t.b.id)).toContain("Letter 1/4");
+    for (let number = 2; number <= 4; number += 1) {
+      t.startTurn("thr_a", null);
+      expect(await t.letter("thr_a", t.b.id)).toContain(`Letter ${number}/4`);
+    }
+    t.startTurn("thr_a", null);
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+  });
+
+  it.each(["steer", "auto"] as const)(
+    "does not take the owner's %s message the provider has not confirmed yet",
+    async (kind) => {
+      const t = await threeBots();
+      t.recordTurn("thr_a", "user", null, "start", { accepted: true });
+      for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+      t.recordTurn("thr_a", "user", null, "requested", {
+        target: { kind, expectedTurnId: "turn_2" },
+      });
+      t.startTurn("thr_a", null);
+      await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+    },
+  );
+
+  it("a message sent while the turn ran gives the turn the provider took it into a new exchange", async () => {
+    const t = await threeBots();
+    t.recordTurn("thr_a", "user", null, "start", { accepted: true });
+    for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+    const requestId = t.recordTurn("thr_a", "user", null, "requested", {
+      target: { kind: "auto", expectedTurnId: "turn_2" },
+    });
+    t.startTurn("thr_a", requestId);
+    expect(await t.letter("thr_a", t.b.id)).toContain("Letter 1/4");
+  });
 });
 
 describe("the owner's message steered into a running turn", () => {
@@ -1455,7 +1496,7 @@ describe("bb's own notice that a sub-thread was attached or detached", () => {
   it("keeps Done when its refused turn is retried", async () => {
     const t = await doneChat();
     const retryOfRequestId = t.notice("rejected");
-    t.recordTurn("thr_a", "system", null, "start", { retryOfRequestId });
+    t.recordTurn("thr_a", "system", null, "start", { retryOfRequestId, retryAttempt: 2 });
     expect(await t.isDone()).toBe(true);
   });
 
@@ -1469,6 +1510,7 @@ describe("bb's own notice that a sub-thread was attached or detached", () => {
       t.recordTurn("thr_a", "system", null, "start", {
         accepted,
         retryOfRequestId,
+        retryAttempt: 2,
         inputGroups,
         input: inputGroups.flat(),
       });
@@ -1480,8 +1522,43 @@ describe("bb's own notice that a sub-thread was attached or detached", () => {
     const t = await doneChat();
     const retryOfRequestId = t.recordTurn("thr_a", "user", null, "rejected");
     expect(await t.isDone()).toBe(true);
-    t.recordTurn("thr_a", "system", null, "start", { retryOfRequestId });
+    t.recordTurn("thr_a", "system", null, "start", { retryOfRequestId, retryAttempt: 2 });
     expect(await t.isDone()).toBe(false);
+  });
+
+  it("a retry sent alone is what the attempt it continues was", async () => {
+    const t = await doneChat();
+    const retryOfRequestId = t.notice("rejected");
+    const text = (value: string) => ({ type: "text", text: value, mentions: [] });
+    const inputGroups = [[text("The notice again")], [text("Please recheck the draft")]];
+    t.recordTurn("thr_a", "system", null, "start", {
+      accepted: true,
+      retryOfRequestId,
+      retryAttempt: 2,
+      inputGroups,
+      input: inputGroups.flat(),
+    });
+    expect(await t.isDone()).toBe(false);
+    const retry = t.recordTurn("thr_a", "system", null, "requested", {
+      retryOfRequestId,
+      retryAttempt: 3,
+      input: [text("Please continue.")],
+    });
+    await t.rpc("bots.v1.setCompleted", { threadId: "thr_a", completed: true });
+    t.startTurn("thr_a", retry);
+    expect(await t.isDone()).toBe(false);
+  });
+
+  it("a retry sent alone of a notice retried alone keeps Done", async () => {
+    const t = await doneChat();
+    const retryOfRequestId = t.notice("rejected");
+    t.recordTurn("thr_a", "system", null, "rejected", { retryOfRequestId, retryAttempt: 2 });
+    t.recordTurn("thr_a", "system", null, "start", {
+      accepted: true,
+      retryOfRequestId,
+      retryAttempt: 3,
+    });
+    expect(await t.isDone()).toBe(true);
   });
 
   it.each<[string, (t: Awaited<ReturnType<typeof doneChat>>) => unknown]>([
@@ -1511,11 +1588,35 @@ describe("bb's own notice that a sub-thread was attached or detached", () => {
   it("is told from a message taken first by the request each turn accepted", async () => {
     const t = await doneChat();
     const notice = t.notice("requested");
-    t.recordTurn("thr_a", "user", null, "requested");
+    const message = t.recordTurn("thr_a", "user", null, "requested", {
+      target: { kind: "auto", expectedTurnId: null },
+    });
     t.startTurn("thr_a", notice);
     expect(await t.isDone()).toBe(true);
-    t.startTurn("thr_a", null);
+    t.startTurn("thr_a", message);
     expect(await t.isDone()).toBe(false);
+  });
+
+  it.each([true, false])(
+    "keeps Done through a turn the provider starts with no request (notice accepted before: %s)",
+    async (notice) => {
+      const t = await doneChat();
+      if (notice) {
+        t.notice("start", { accepted: true });
+        expect(await t.isDone()).toBe(true);
+      }
+      t.startTurn("thr_a", null);
+      expect(await t.isDone()).toBe(true);
+    },
+  );
+
+  it("keeps Done while the provider has not confirmed a message sent as the chat ran", async () => {
+    const t = await doneChat();
+    t.recordTurn("thr_a", "user", null, "requested", {
+      target: { kind: "auto", expectedTurnId: "turn_2" },
+    });
+    t.startTurn("thr_a", null);
+    expect(await t.isDone()).toBe(true);
   });
 
   it("does not hide the owner's message behind more than one page of notices", async () => {
