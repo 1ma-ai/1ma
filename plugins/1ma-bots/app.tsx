@@ -33,7 +33,7 @@ export default definePluginApp((app) => {
     group: experimental_THREAD_ACTION_GROUPS.organize,
     order: 61,
     useData({ threadIds }) {
-      const move = useRpcMutation({ contract: botsRpc, method: "bots.v2.moveThreads" });
+      const move = useRpcMutation({ contract: botsRpc, method: "bots.v2.moveToTop" });
       return { ...useBotTree(threadIds), move };
     },
     item({ thread, data }) {

@@ -389,15 +389,12 @@ export function useBotConversations(members: Members, threads: readonly PluginSi
       const open = shown.filter((thread) => !doneIds.has(thread.id));
       const seenOf = new Map<string, SeenRow>();
       for (const { id, parentThreadId } of shown) {
-        const branch = branchOf(id);
-        const place = branch.map((above) => members[above]).find((found) => found);
-        if (!place) continue;
         seenOf.set(id, {
           threadId: id,
-          assignment: place.assignment,
           parentThreadId,
-          branch: branch.map((threadId) => ({
+          branch: branchOf(id).map((threadId) => ({
             threadId,
+            assignment: members[threadId]?.assignment ?? null,
             completed: members[threadId]?.completed ?? false,
           })),
           shownDone: doneIds.has(id),

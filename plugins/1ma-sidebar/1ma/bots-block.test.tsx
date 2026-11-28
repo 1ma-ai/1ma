@@ -578,29 +578,32 @@ describe("nested conversations of a bot", () => {
       sidebarThreads: { projects: PROJECTS, sections: [], threads },
     });
     const shown: unknown = JSON.parse((await screen.findByTestId("seen")).textContent);
-    const top = (threadId: string, parentThreadId: string | null, done: boolean) => ({
+    const place = (threadId: string, completed = false) => ({
       threadId,
       assignment: `joined_${threadId}`,
+      completed,
+    });
+    const top = (threadId: string, parentThreadId: string | null, done: boolean) => ({
+      threadId,
       parentThreadId,
-      branch: [{ threadId, completed: done }],
+      branch: [place(threadId, done)],
       shownDone: done,
     });
-    const parent = { threadId: "thr_parent", completed: true };
-    const under = (threadId: string, assignment: string, above: string[] = []) => ({
-      threadId,
-      assignment,
-      parentThreadId: above[0] ?? "thr_parent",
-      branch: [...[threadId, ...above].map((id) => ({ threadId: id, completed: false })), parent],
+    const noPlace = (threadId: string) => ({ threadId, assignment: null, completed: false });
+    const under = (...[own, ...above]: Array<ReturnType<typeof noPlace | typeof place>>) => ({
+      threadId: own!.threadId,
+      parentThreadId: above[0]?.threadId ?? "thr_parent",
+      branch: [own, ...above, place("thr_parent", true)],
       shownDone: true,
     });
     expect(shown).toEqual({
       thr_main: top("thr_main", null, false),
       thr_parent: top("thr_parent", null, true),
       thr_alone: top("thr_alone", "thr_foreign", false),
-      thr_second: under("thr_second", "joined_thr_second"),
-      thr_first: under("thr_first", "joined_thr_first"),
-      thr_spawned: under("thr_spawned", "joined_thr_parent"),
-      thr_low: under("thr_low", "joined_thr_parent", ["thr_spawned"]),
+      thr_second: under(place("thr_second")),
+      thr_first: under(place("thr_first")),
+      thr_spawned: under(noPlace("thr_spawned")),
+      thr_low: under(noPlace("thr_low"), noPlace("thr_spawned")),
     });
   });
 

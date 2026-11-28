@@ -61,10 +61,10 @@ const PARENTS: Record<string, string> = {
 const MEMBERS = ["main", "archived", "guest", "parent", "first", "second", "restored", "done"];
 const seen = (threadId: string): SeenRow => ({
   threadId,
-  assignment: `joined_${threadId}`,
   parentThreadId: THREADS.find(({ id }) => id === threadId)?.parentThreadId ?? null,
   branch: [threadId, PARENTS[threadId] ?? []].flat().map((id) => ({
     threadId: id,
+    assignment: MEMBERS.includes(id) ? `joined_${id}` : null,
     completed: id === "done",
   })),
   shownDone: threadId === "done",

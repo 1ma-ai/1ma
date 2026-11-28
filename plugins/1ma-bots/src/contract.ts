@@ -152,13 +152,17 @@ export type Assignment = z.infer<typeof seenAssignment>;
 
 const seenThread = z.object({
   threadId: z.string(),
-  // Of the conversation, or of the nearest one above it when an agent made this
-  // sub-thread and it has no place of its own.
-  assignment: z.string(),
   // Its parent in bb, which the bot's tree may not show.
   parentThreadId: z.string().nullable(),
-  // The conversation and the ones it is drawn under, nearest first, each with its mark.
-  branch: z.array(z.object({ threadId: z.string(), completed: z.boolean() })),
+  // The conversation and the ones it is drawn under, nearest first, each with its
+  // place in the bot and its mark. A sub-thread an agent made has no place.
+  branch: z.array(
+    z.object({
+      threadId: z.string(),
+      assignment: z.string().nullable(),
+      completed: z.boolean(),
+    }),
+  ),
 });
 export type SeenThread = z.infer<typeof seenThread>;
 
@@ -172,11 +176,13 @@ export const moveThreadsInput = z.object({
   // inside: under the target, which changes no order.
   target: seenRow.extend({ placement: z.enum(["before", "after", "inside"]) }),
   // Whether the moved conversations and the target were drawn under the ones
-  // above them. Otherwise only the order changes. Null is "Move to top": its
-  // target is the first place under the same parent, open or done.
-  levelShown: z.boolean().nullable(),
+  // above them. Otherwise only the order changes.
+  levelShown: z.boolean(),
 });
 export type MoveThreadsInput = z.infer<typeof moveThreadsInput>;
+
+export const moveToTopInput = z.object({ botId: z.string(), thread: seenRow });
+export type MoveToTopInput = z.infer<typeof moveToTopInput>;
 
 const assignInput = z.object({
   threadId: z.string(),
@@ -278,6 +284,8 @@ export const botsWrites = {
     output: ok,
   },
   "bots.v2.moveThreads": { input: moveThreadsInput, output: ok },
+  // First under its own parent.
+  "bots.v2.moveToTop": { input: moveToTopInput, output: ok },
   "bots.v2.continueInBot": {
     input: z.object({ threadId: z.string(), seen: seenAssignment }),
     output: threadId,
