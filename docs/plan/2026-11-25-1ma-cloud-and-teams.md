@@ -149,12 +149,14 @@ is about 1ma's account and 1ma's letter.
 **Passing on an address.** Changing the old account's email is not enough: Supabase keeps the old
 Google sign-in with its own copy of the address and would lead the new person back to the old
 account. Before a shared mailbox or a Mac goes to somebody else, the operator ends the admission and
-deletes the old account with all its sign-in methods, or removes every one of them, and checks that
-the address now leads nowhere. Until that check passes, the operator's screen shows a refusal or the
+deletes the old account with all its sign-in methods and checks that the address now leads nowhere.
+Removing the methods one by one is not a way: Supabase refuses to remove the last sign-in method of
+an account that stays. Keeping the old record is considered only if a stage 1 check shows a way that
+closes every old sign-in, frees the address for both new sign-ins and survives a restored copy. Until the address check passes, the operator's screen shows a refusal or the
 next step, not a finished hand-over. The server issues the admission entry id for that account; the
 local binding checks the pair of account id and admission id, so a re-issued address never opens
-the old directory. Tested separately: the old account, a sign-in started in the browser before the
-hand-over, and the old local directory.
+the old directory. Tested separately: the old account, one with only a Google sign-in, a sign-in
+started in the browser before the hand-over, and the old local directory.
 
 **Data.** Named in the card: who does it, what it contains, format, term, stores, the parties' roles
 as they really act, and the basis for any transfer outside the EU (checked before level 2). Deleting
@@ -441,14 +443,25 @@ Requirements:
 - **What recovery covers.** An installed app that already saw the thief's release, and one that missed
   the change of trust, both accept the new set once they get it. Until an app can get the current
   trust, from the download place or the second place named in the implementation document, it accepts
-  no new package. A foreign package obtained before the change can no longer be installed after it. An
-  installation over the same system keeps the newer trust; a clean installation from an old download
-  starts from the trust built into it and gets the current one before any update. If foreign code
-  has already run, nothing repairs itself: the owner's manual procedure restores a checked copy and
-  checks the data separately.
+  no new package. An installation over the same system keeps the newer trust; a clean installation
+  from an old download starts from the trust built into it and gets the current one before any
+  update. If foreign code has already run, nothing repairs itself: the owner's manual procedure
+  restores a checked copy and checks the data separately.
+- **When a withdrawn key stops working.** An app refuses a package under a withdrawn key from the
+  moment it holds the trust change. Before that it cannot tell that the change happened: the old
+  trust it is shown is genuine. So the delay has a limit of its own. The current trust is a statement
+  signed with the reserve key, with its own term (proposed 30 days; the delivery document names the
+  maximum). An app whose newest trust statement is past its term installs nothing until it gets a
+  current one («could not confirm the keys are current»). The stolen release key cannot sign such a
+  statement. A package under the withdrawn key is therefore refused at the latest when the trust
+  statement the app holds runs out; the owner re-signs the statement before its term ends, and the
+  job reminds them a week before. The owner is told this window plainly. The manual way has no such
+  window: the person installing compares against the current trust received by the owner's own way,
+  before the downloaded package runs.
 - **Refused before anything is unpacked**: an unsigned, foreign or withdrawn key, a wrong channel or
   architecture, a pointer and package that do not match, a lower release number, the same number
-  with other contents, a pointer past its term («could not confirm this is the latest»). The same
+  with other contents, a pointer past its term («could not confirm this is the latest»), a trust
+  statement past its term. The same
   rule for the automatic way, the button, the schedule, the command and the manual procedure. 0009
   is off in client builds, every entrance of it, until it does this.
 - **Dependencies**: a signed server package does not prove what `npm install` later resolves; the
@@ -471,7 +484,11 @@ for the reserve key, before any client build is given out: a higher number signe
 key, on an app that saw it and on one that missed the change of trust; an attempt to withdraw the
 reserve with the stolen key; skipped releases; a replayed old pointer; an installation over the same
 system and a clean one from an old download, with their different expected results; a foreign package
-obtained before the change; the same number with other contents; a legitimate manual roll-back. The Linux and
+obtained before the change; the same number with other contents; a legitimate manual roll-back. Also
+a clean installation from an old download after the change, three ways: no connection, refused; only
+the old, still valid trust statement, accepted only until that statement's term ends and refused
+after it, on a controlled clock; the change received, refused. A package under the withdrawn key on
+the first manual Mac is refused before it runs. The Linux and
 automatic Mac lines are accepted in their own stages.
 
 ### Done when
@@ -609,19 +626,19 @@ weeks». Google, the company, Apple and mail add their own waiting.
 Recommendation first; asked one at a time in plain words. Decision 1 was taken on 25.11 («Owner's
 decisions»).
 
-| #   | Question                        | Recommended                                                                                                                                                 | Otherwise                                                                                                                                                                        | Needed before                                     |
-| --- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| 2   | First client before level 4     | Wait for the company: papers and data move once, but the date is not fixed                                                                                  | Free limited pilot by hand; or paid by hand after level 3. Either way no real data before level 2. Also: is a free installation by hand allowed after level 4 (recommended: yes) | Approval 2                                        |
-| 3   | Earlier chats                   | Check first (approval 1), then the list of what passed                                                                                                      | First delivery without history                                                                                                                                                   | Approval 2                                        |
-| 4   | Claude                          | Own plan after the checks, with the key's price agreed; the team's paid extra usage only if the client turned it on                                         | A key from the start; or ask Anthropic first, voluntarily                                                                                                                        | The promised mode: approval 2; its check: level 2 |
-| 5   | Email                           | Code typed into the app, a proposed change                                                                                                                  | Link, as decided on 24.11                                                                                                                                                        | Screens of approval 2                             |
-| 6   | Mail provider                   | One that stores in the EU, named with price after a check                                                                                                   | Resend (USA), stated in the policy                                                                                                                                               | Production mail                                   |
-| 7   | Block                           | Noticed at the next check, as in the table                                                                                                                  | Strict hour: the app closes its screen an hour after the last successful check, so it does not work offline; extra work. Running agents continue in both                         | Approval 2                                        |
-| 8a  | Update addresses and signatures | Change patches 0001, 0009, 0017 as above; keep 0004 until Apple signing, then remove it; the reserve key's private part kept by the owner in a second place | Stay on today's address; then no client release                                                                                                                                  | Work on the transition                            |
-| 8b  | Region of accounts              | Frankfurt                                                                                                                                                   | Another named EU region                                                                                                                                                          | Production project                                |
-| 8c  | Page and domain                 | An existing one if suitable                                                                                                                                 | A new one, price named                                                                                                                                                           | Production Google                                 |
-| 9a  | Older documents                 | Short notes in those below                                                                                                                                  | Leave them                                                                                                                                                                       | Work that relies on them                          |
-| 9b  | Parts of the earlier project    | Use after its holders' written permission                                                                                                                   | Build from Supabase's documented patterns                                                                                                                                        | Copying                                           |
+| #   | Question                        | Recommended                                                                                                                                                                                                             | Otherwise                                                                                                                                                                        | Needed before                                     |
+| --- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| 2   | First client before level 4     | Wait for the company: papers and data move once, but the date is not fixed                                                                                                                                              | Free limited pilot by hand; or paid by hand after level 3. Either way no real data before level 2. Also: is a free installation by hand allowed after level 4 (recommended: yes) | Approval 2                                        |
+| 3   | Earlier chats                   | Check first (approval 1), then the list of what passed                                                                                                                                                                  | First delivery without history                                                                                                                                                   | Approval 2                                        |
+| 4   | Claude                          | Own plan after the checks, with the key's price agreed; the team's paid extra usage only if the client turned it on                                                                                                     | A key from the start; or ask Anthropic first, voluntarily                                                                                                                        | The promised mode: approval 2; its check: level 2 |
+| 5   | Email                           | Code typed into the app, a proposed change                                                                                                                                                                              | Link, as decided on 24.11                                                                                                                                                        | Screens of approval 2                             |
+| 6   | Mail provider                   | One that stores in the EU, named with price after a check                                                                                                                                                               | Resend (USA), stated in the policy                                                                                                                                               | Production mail                                   |
+| 7   | Block                           | Noticed at the next check, as in the table                                                                                                                                                                              | Strict hour: the app closes its screen an hour after the last successful check, so it does not work offline; extra work. Running agents continue in both                         | Approval 2                                        |
+| 8a  | Update addresses and signatures | Change patches 0001, 0009, 0017 as above; keep 0004 until Apple signing, then remove it; the reserve key's private part kept by the owner in a second place, and used about once a month to re-sign the trust statement | Stay on today's address; then no client release                                                                                                                                  | Work on the transition                            |
+| 8b  | Region of accounts              | Frankfurt                                                                                                                                                                                                               | Another named EU region                                                                                                                                                          | Production project                                |
+| 8c  | Page and domain                 | An existing one if suitable                                                                                                                                                                                             | A new one, price named                                                                                                                                                           | Production Google                                 |
+| 9a  | Older documents                 | Short notes in those below                                                                                                                                                                                              | Leave them                                                                                                                                                                       | Work that relies on them                          |
+| 9b  | Parts of the earlier project    | Use after its holders' written permission                                                                                                                                                                               | Build from Supabase's documented patterns                                                                                                                                        | Copying                                           |
 
 ## What this plan supersedes
 
