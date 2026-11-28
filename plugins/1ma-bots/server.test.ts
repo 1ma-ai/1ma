@@ -4539,8 +4539,7 @@ describe("a change made while a request reads bb", () => {
       await t.letter("thr_other", recipient.id, "thr_r");
       for (const letter of t.delivery.queued) t.deliverUnseen(letter);
       const input = [{ type: "text", text: "x".repeat(length), mentions: [] }];
-      for (let i = 0; i < count; i += 1)
-        t.recordTurn("thr_long", "user", null, "start", { input });
+      for (let i = 0; i < count; i += 1) t.recordTurn("thr_long", "user", null, "start", { input });
       t.advance(10_000);
       t.threads.set(
         "thr_next",
