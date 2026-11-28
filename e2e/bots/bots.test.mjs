@@ -21,6 +21,7 @@ import {
   stubCall,
   stubRecords,
   thread,
+  waitNotice,
   waitStatus,
   waitTurns,
 } from "./harness.mjs";
@@ -116,6 +117,30 @@ describe("1ma-bots on a real server", () => {
     await waitStatus(threadId, "idle");
     await rpc("bots.v1.setCompleted", { threadId, completed: true });
     assert.equal(await completedOf(bot.id, threadId), true);
+  });
+
+  it("keeps a conversation done when bb tells it about its new sub-thread", async () => {
+    const bot = await createBot("Parent Bot");
+    const ids = [];
+    for (const name of ["parent", "child"]) {
+      const id = await startConversation(bot, `[stub:reply ${name}]`);
+      ids.push(id);
+      await waitTurns(id, 1);
+      await waitStatus(id, "idle");
+    }
+    const [parent, child] = ids;
+    await rpc("bots.v1.setCompleted", { threadId: parent, completed: true });
+    await server.api("PATCH", `/threads/${child}`, { parentThreadId: parent });
+    await waitNotice(parent, "ownership-assigned", child);
+    await waitStatus(parent, "idle");
+    assert.equal(await completedOf(bot.id, parent), true);
+
+    await say(parent, "[stub:reply again]");
+    await waitFor(
+      "the owner's message brings it back",
+      60 * SECOND,
+      async () => (await completedOf(bot.id, parent)) === false,
+    );
   });
 
   it("reopens a done conversation when the owner presses Send now on a queued message", async () => {
@@ -436,6 +461,235 @@ describe("1ma-sidebar with the bots block", () => {
       assert.deepEqual(problems, []);
     } finally {
       await context.close();
+    }
+  });
+
+  it("orders, completes and nests conversations in the bot tree", async () => {
+    const { context, page } = await openApp(browser, "light");
+    try {
+      await expandBot(page, "Visual Bot");
+      const group = page.locator(`[data-bot-id="${fixture.visible.id}"]`);
+      const row = threadLink(group, fixture.v2);
+      await row.click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Move to top", exact: true }).click();
+      const order = () =>
+        group
+          .locator("a[data-sidebar-thread-id]")
+          .evaluateAll((rows) => rows.map((link) => link.dataset.sidebarThreadId));
+      await waitFor(
+        "the menu moves the second conversation to the top",
+        30 * SECOND,
+        async () => (await order())[0] === fixture.v2,
+      );
+      await row.click({ button: "right" });
+      const markDone = page.getByRole("menuitem", { name: "Mark as done", exact: true });
+      await markDone.waitFor();
+      await screenshot(page, "bot-conversation-menu");
+      await markDone.click();
+      await row.waitFor({ state: "detached" });
+      await group.getByRole("button", { name: "Done: 1", exact: true }).click();
+      await row.waitFor();
+      assert.equal(await completedOf(fixture.visible.id, fixture.v2), true);
+      await screenshot(page, "bot-conversation-done");
+      await row.click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Mark as not done", exact: true }).click();
+      await group
+        .getByRole("button", { name: "Done: 1", exact: true })
+        .waitFor({ state: "detached" });
+      await row.waitFor();
+      assert.equal(await completedOf(fixture.visible.id, fixture.v2), false);
+      const overParent = (selector) =>
+        group.locator(selector).filter({ has: threadLink(page, fixture.v1) });
+      const drag = async (placement, hint, shot) => {
+        const from = await row.boundingBox();
+        const parent = threadLink(group, fixture.v1);
+        const to = await parent.boundingBox();
+        assert.ok(from && to);
+        const x = to.x + 36;
+        const y = placement === "inside" ? to.y + to.height / 2 : to.y + to.height - 2;
+        await page.mouse.move(from.x + 36, from.y + from.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(from.x + 46, from.y + from.height / 2 + 3, { steps: 4 });
+        await page.mouse.move(x, y, { steps: 18 });
+        await hint.waitFor({ timeout: 10 * SECOND });
+        await screenshot(page, shot);
+        await page.mouse.up();
+      };
+      await drag(
+        "after",
+        overParent('[data-sidebar-reorder-placement="after"]'),
+        "bot-conversation-reorder",
+      );
+      await waitFor(
+        "the drag changes the saved bot order",
+        30 * SECOND,
+        async () =>
+          (await rpc("bots.v1.get", { botId: fixture.visible.id })).threads[0].threadId ===
+            fixture.v1 && (await order())[0] === fixture.v1,
+      );
+      await drag(
+        "inside",
+        overParent('[data-sidebar-nest-target="valid"]'),
+        "bot-conversation-nest",
+      );
+      await waitFor(
+        "the dragged conversation has a real parent",
+        30 * SECOND,
+        async () => (await thread(fixture.v2)).parentThreadId === fixture.v1,
+      );
+      // bb tells the new parent about its child two seconds later; until that
+      // turn ends, its branch does not go to Done.
+      await waitNotice(fixture.v1, "ownership-assigned", fixture.v2);
+      await waitStatus(fixture.v1, "idle");
+      await page.reload();
+      await expandBot(page, "Visual Bot");
+      await group
+        .getByRole("button", { name: "Collapse Bot conversation one threads", exact: true })
+        .waitFor();
+      assert.deepEqual(await order(), [fixture.v1, fixture.v2]);
+      await screenshot(page, "bot-conversation-subchat");
+
+      await threadLink(group, fixture.v1).click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Mark as done", exact: true }).click();
+      await row.waitFor({ state: "detached" });
+      assert.deepEqual(await order(), [], "the sub-chat leaves with its parent");
+      await group.getByRole("button", { name: "Done: 1", exact: true }).click();
+      await row.waitFor();
+      assert.deepEqual(await order(), [fixture.v1, fixture.v2]);
+      await screenshot(page, "bot-conversation-branch-done");
+      await row.click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Mark as not done", exact: true }).click();
+      await group
+        .getByRole("button", { name: "Done: 1", exact: true })
+        .waitFor({ state: "detached" });
+      await row.waitFor();
+      assert.deepEqual(await order(), [fixture.v1, fixture.v2]);
+      assert.equal(await completedOf(fixture.visible.id, fixture.v1), false);
+
+      // Below an open branch the line is drawn under all of it, not under its first row.
+      await drag(
+        "after",
+        overParent(".after\\:bg-sidebar-ring").filter({ has: threadLink(page, fixture.v2) }),
+        "bot-conversation-below-branch",
+      );
+      await waitFor(
+        "the edge of a top-level conversation takes the sub-chat out",
+        30 * SECOND,
+        async () => (await thread(fixture.v2)).parentThreadId === null,
+      );
+      await group
+        .getByRole("button", { name: "Collapse Bot conversation one threads", exact: true })
+        .waitFor({ state: "detached" });
+      assert.deepEqual(await order(), [fixture.v1, fixture.v2]);
+      await screenshot(page, "bot-conversation-out-of-parent");
+    } finally {
+      await context.close();
+      await rpc("bots.v1.setCompleted", { threadId: fixture.v1, completed: false });
+      await server.api("PATCH", `/threads/${fixture.v2}`, { parentThreadId: null });
+    }
+  });
+
+  it("leaves conversations where they are when dragged between the open list and Done, and their parents when dragged inside Done", async () => {
+    const bot = await createBot("Order Bot");
+    const ids = [];
+    for (const name of ["one", "two", "three", "four"]) {
+      const id = await startConversation(bot, `[stub:reply order-${name}]`);
+      ids.push(id);
+      await rename(id, `Order ${name}`);
+      await waitTurns(id, 1);
+      await waitStatus(id, "idle");
+    }
+    const members = async () => (await rpc("bots.v1.get", { botId: bot.id })).threads;
+    const [open1, open2, done1, done2] = (await members()).map((member) => member.threadId);
+    const parents = () =>
+      Promise.all(
+        [open1, open2, done1, done2].map(async (id) => (await thread(id)).parentThreadId ?? null),
+      );
+    for (const threadId of [done1, done2]) {
+      await rpc("bots.v1.setCompleted", { threadId, completed: true });
+    }
+    // Its parent is open, so Done draws it at the top level.
+    await server.api("PATCH", `/threads/${done1}`, { parentThreadId: open1 });
+    const before = await members();
+    const { context, page } = await openApp(browser, "light");
+    try {
+      await expandBot(page, "Order Bot");
+      const group = page.locator(`[data-bot-id="${bot.id}"]`);
+      await group.getByRole("button", { name: "Done: 2", exact: true }).click();
+      await threadLink(group, done2).waitFor();
+      const chip = page.locator(
+        "[data-sidebar-section-drag-overlay]:not([data-sidebar-touch-armed-chip])",
+      );
+      const drag = async (fromId, toId, offset, held) => {
+        const from = await threadLink(group, fromId).boundingBox();
+        const to = await threadLink(group, toId).boundingBox();
+        assert.ok(from && to);
+        await page.mouse.move(from.x + 36, from.y + from.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(from.x + 46, from.y + from.height / 2 + 3, { steps: 4 });
+        await page.mouse.move(to.x + 36, to.y + offset(to.height), { steps: 18 });
+        await chip.waitFor({ timeout: 10 * SECOND });
+        await held();
+        await page.mouse.up();
+        await chip.waitFor({ state: "detached" });
+      };
+      const hints = group.locator(
+        '[data-sidebar-reorder-placement], [data-sidebar-nest-target="valid"]',
+      );
+      const places = {
+        top: () => 2,
+        middle: (height) => height / 2,
+        bottom: (height) => height - 2,
+      };
+      for (const [from, to, shot] of [
+        [open2, done1, "bot-conversation-open-over-done"],
+        [done1, open2, "bot-conversation-done-over-open"],
+      ]) {
+        for (const [place, offset] of Object.entries(places)) {
+          await drag(from, to, offset, async () => {
+            // Longer than a row needs under the pointer to become the parent.
+            await page.waitForTimeout(SECOND);
+            if (place === "middle") await screenshot(page, shot);
+            assert.equal(await hints.count(), 0, `${shot} offers nothing at the ${place}`);
+          });
+        }
+      }
+      // The same gesture inside the open list does move, so the ones above were drags.
+      await drag(open1, open2, places.bottom, () =>
+        group.locator('[data-sidebar-reorder-placement="after"]').waitFor(),
+      );
+      await waitFor(
+        "the drag inside the open list is saved",
+        30 * SECOND,
+        async () => (await members())[0].threadId === open2,
+      );
+      const [first, second, ...rest] = before;
+      assert.deepEqual(await members(), [second, first, ...rest]);
+      assert.deepEqual(await parents(), [null, null, open1, null]);
+      await drag(done2, done1, places.top, async () => {
+        await group.locator('[data-sidebar-reorder-placement="before"]').waitFor();
+        await screenshot(page, "bot-conversation-order-in-done");
+      });
+      await waitFor(
+        "the drag inside Done is saved",
+        30 * SECOND,
+        async () => (await members())[2].threadId === done2,
+      );
+      assert.deepEqual(await members(), [second, first, rest[1], rest[0]]);
+      assert.deepEqual(await parents(), [null, null, open1, null]);
+      assert.equal(
+        await group.getByRole("button", { name: "Done: 2", exact: true }).count(),
+        1,
+        "both done conversations are still there",
+      );
+      await rpc("bots.v1.setCompleted", { threadId: done2, completed: false });
+      await group.getByRole("button", { name: "Done: 1", exact: true }).waitFor();
+      assert.deepEqual(await parents(), [null, null, open1, null]);
+    } finally {
+      await context.close();
+      await server.api("PATCH", `/threads/${done1}`, { parentThreadId: null });
+      await rpc("bots.v1.remove", { botId: bot.id });
+      for (const id of ids) server.bb(["thread", "archive", id]);
     }
   });
 

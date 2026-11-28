@@ -17,18 +17,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { strings } from "../../strings.js";
-import { botsRpc, type BotSummary, type BotThread } from "../contract.js";
-
-export function findBot(
-  bots: readonly BotSummary[],
-  threadId: string,
-): { bot: BotSummary; thread: BotThread } | null {
-  for (const bot of bots) {
-    const thread = bot.threads.find((item) => item.threadId === threadId);
-    if (thread) return { bot, thread };
-  }
-  return null;
-}
+import { botsRpc, type BotSummary } from "../contract.js";
+import { assignmentOf, findBot } from "./seen.js";
 
 function InstructionPreview({ bot, bots }: { bot: BotSummary; bots: readonly BotSummary[] }) {
   const [open, setOpen] = useState(false);
@@ -62,11 +52,12 @@ function InstructionPreview({ bot, bots }: { bot: BotSummary; bots: readonly Bot
 export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
   const navigate = useBbNavigate();
   const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
-  const assign = useRpcMutation({ contract: botsRpc, method: "bots.v1.assign" });
-  const continueInBot = useRpcMutation({ contract: botsRpc, method: "bots.v1.continueInBot" });
+  const assign = useRpcMutation({ contract: botsRpc, method: "bots.v2.assign" });
+  const continueInBot = useRpcMutation({ contract: botsRpc, method: "bots.v2.continueInBot" });
   const bots = list.data?.bots ?? [];
   if (bots.length === 0) return null;
   const current = findBot(bots, threadId);
+  const seen = assignmentOf(bots, threadId);
   return (
     <DetailRow label={strings.threadBot.title} icon="Bot" align="start">
       <div className="flex min-w-0 flex-col items-start gap-1">
@@ -88,7 +79,7 @@ export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
               <DropdownMenuItem
                 key={bot.id}
                 disabled={bot.id === current?.bot.id}
-                onSelect={() => void assign.mutate({ threadId, botId: bot.id })}
+                onSelect={() => void assign.mutate({ threadId, botId: bot.id, seen })}
               >
                 <img src={bot.avatar} width={16} height={16} alt="" />
                 {bot.name}
@@ -97,7 +88,9 @@ export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
             {current ? (
               <>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => void assign.mutate({ threadId, botId: null })}>
+                <DropdownMenuItem
+                  onSelect={() => void assign.mutate({ threadId, botId: null, seen })}
+                >
                   {strings.threadBot.none}
                 </DropdownMenuItem>
               </>
@@ -105,7 +98,7 @@ export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
           </DropdownMenuContent>
         </DropdownMenu>
         {current && <InstructionPreview key={current.bot.id} bot={current.bot} bots={bots} />}
-        {current && !current.thread.startedFromBot ? (
+        {current && seen && !current.thread.startedFromBot ? (
           <>
             <p className="text-xs text-muted-foreground">{strings.threadBot.notStartedFromBot}</p>
             <Button
@@ -115,7 +108,7 @@ export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
               disabled={continueInBot.isPending}
               onClick={() =>
                 void continueInBot
-                  .mutate({ threadId })
+                  .mutate({ threadId, seen })
                   .then(({ threadId: next }) => navigate.toThread(next))
               }
             >

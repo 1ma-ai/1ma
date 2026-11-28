@@ -44,15 +44,16 @@ import {
 import { cn } from "@/lib/utils";
 import { usePluginThreadRowStatusForThreads } from "../app/list/groupRollups.js";
 import { useThreadsHaveDraft } from "../app/list/sidebarDraftPresence.js";
-import { ProjectThreadTree, ThreadTreeGroupLine } from "../app/list/ProjectRow.js";
+import { BotThreadTree } from "./BotThreadTree.js";
+import { ThreadTreeGroupLine } from "../app/list/ProjectRow.js";
 import { TopLevelSidebarSection } from "../app/list/TopLevelSidebarSection.js";
 import type { ThreadComparator } from "../app/model/project-thread-groups.js";
 import { sidebarThreadLifecyclesAtom } from "../app/preferences/atoms.js";
 import { createSyncedPreferenceAtom } from "../app/preferences/synced-preference-atom.js";
 import { SidebarChildToggleChevron } from "../app/rows/SidebarChildToggleChevron.js";
 import { SidebarControlButton, SidebarRowControls } from "../app/rows/SidebarRowControls.js";
-import { BOTS_PLUGIN_ID, botsRpc, type SidebarBot } from "./bots-rpc.js";
-import { threadsShownUnderBots } from "./bot-threads.js";
+import { BOTS_PLUGIN_ID, botsRpc, type SeenRow, type SidebarBot } from "./bots-rpc.js";
+import { botBranches } from "./bot-threads.js";
 import { strings } from "./strings.js";
 import { useSidebarBots } from "./use-bots.js";
 import {
@@ -84,7 +85,7 @@ interface BotsBlockProps extends TreeState {
   onProjectSelect?: () => void;
 }
 
-// bots.v1.assign gives these answers before it writes anything: the host's
+// bots.v2.assign gives these answers before it writes anything: the host's
 // own checks of the call and the plugin's refusals (BotsError).
 const REFUSALS: ReadonlySet<PluginRpcCallError["code"]> = new Set([
   "forbidden",
@@ -120,7 +121,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
   const assign = useRpcMutation({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.assign",
+    method: "bots.v2.assign",
   });
   // A fresh read of the bots, to learn where conversations ended up when an
   // assignment's answer was lost.
@@ -145,12 +146,22 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
         // Assigning in reverse keeps a dragged selection in its order at the top.
         const ordered = target.place === "first" ? [...threadIds].reverse() : threadIds;
         const had = new Set(bot.threads.map((item) => item.threadId));
+        const seen = new Map(
+          state.bots.flatMap(({ id: botId, threads }) =>
+            threads.map(({ threadId, assignment }) => [threadId, { botId, assignment }] as const),
+          ),
+        );
         void (async () => {
           const confirmed: string[] = [];
           let failure: unknown = null;
           for (const threadId of ordered) {
             try {
-              await assign.mutate({ threadId, botId: bot.id, place: target.place });
+              await assign.mutate({
+                threadId,
+                botId: bot.id,
+                place: target.place,
+                seen: seen.get(threadId) ?? null,
+              });
               confirmed.push(threadId);
             } catch (error) {
               failure = error;
@@ -159,7 +170,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
           }
           // The call that failed is the only one in doubt: the ones before it
           // were confirmed and the ones after it were never sent. A refusal
-          // is a definite answer, since bots.v1.assign refuses only before it
+          // is a definite answer, since bots.v2.assign refuses only before it
           // writes. Any other failure may have been saved or may still be
           // saved, so the bot is read again and only what the read shows is
           // counted: a conversation from elsewhere that the bot now has, or
@@ -332,70 +343,90 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
   );
 }
 
-const RUNNING: ReadonlySet<string> = new Set(["starting", "active", "stopping"]);
+// 1ma-bots clears the done mark of a conversation that works again or waits
+// for the owner; until then it already shows with the open ones.
+function keepsOpen(thread: PluginSidebarThread): boolean {
+  return (
+    ["starting", "active", "stopping", "error"].includes(thread.status) ||
+    thread.hasPendingInteraction ||
+    thread.queuedWork === "failed"
+  );
+}
 
 interface BotConversations {
-  // The conversation the bot row opens: its first open one.
-  first: PluginSidebarThread | null;
-  // Open and done conversations with their sub-threads.
+  // Every conversation with its sub-threads. Done covers the whole branch,
+  // unless something in the branch keeps it open.
   open: PluginSidebarThread[];
   done: PluginSidebarThread[];
   doneCount: number;
   compare: ThreadComparator;
+  // The conversation above this one in its bot's tree.
+  parentOf: (threadId: string) => string | null;
+  seenOf: ReadonlyMap<string, SeenRow>;
 }
 
-function useBotConversations(bots: readonly SidebarBot[]) {
+export function useBotConversations(bots: readonly SidebarBot[]) {
   const lifecycles = useAtomValue(sidebarThreadLifecyclesAtom);
   const { threads } = useSidebarThreads({ experimental_lifecycles: lifecycles });
   return useMemo(() => {
     const byId = new Map(threads.map((thread) => [thread.id, thread]));
-    const subtree = (bot: SidebarBot, roots: readonly string[]) => {
-      const shown = threadsShownUnderBots(
-        [
-          {
-            ...bot,
-            hidden: false,
-            threads: roots.map((threadId) => ({
-              threadId,
-              startedFromBot: true,
-              completed: false,
-            })),
-          },
-        ],
-        threads,
-      );
-      return threads.filter((thread) => shown.has(thread.id));
-    };
+    const branches = botBranches(bots, threads);
+    const branchOf = (threadId: string) => branches.get(threadId)?.threadIds ?? [];
+    const parentOf = (threadId: string) => branchOf(threadId)[1] ?? null;
     const byBot = new Map<string, BotConversations>();
     for (const bot of bots) {
       const order = new Map(bot.threads.map((thread, index) => [thread.threadId, index]));
-      // A done conversation that is working again shows with the open ones;
-      // 1ma-bots clears the done mark once the turn has really run.
-      const isOpen = (item: SidebarBot["threads"][number]) =>
-        !item.completed || RUNNING.has(byId.get(item.threadId)?.status ?? "idle");
-      const open = bot.threads.filter(isOpen).map((thread) => thread.threadId);
-      const done = bot.threads.filter((thread) => !isOpen(thread)).map((thread) => thread.threadId);
-      const present = (ids: readonly string[]) =>
-        ids.flatMap((id) => {
-          const thread = byId.get(id);
-          return thread === undefined ? [] : [thread];
+      const places = new Map(bot.threads.map((thread) => [thread.threadId, thread]));
+      const shown = threads.filter(
+        (thread) => !thread.isHidden && branches.get(thread.id)?.botId === bot.id,
+      );
+      const kept = new Set(
+        shown
+          .filter((thread) => !thread.isArchived && keepsOpen(thread))
+          .flatMap((thread) => branchOf(thread.id)),
+      );
+      const marked = new Set(
+        bot.threads
+          .filter((item) => item.completed && !kept.has(item.threadId))
+          .map((item) => item.threadId),
+      );
+      const done = shown.filter((thread) =>
+        branchOf(thread.id).some((threadId) => marked.has(threadId)),
+      );
+      const doneIds = new Set(done.map((thread) => thread.id));
+      const open = shown.filter((thread) => !doneIds.has(thread.id));
+      const compare: ThreadComparator = (left, right) =>
+        (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+          (order.get(right.id) ?? Number.MAX_SAFE_INTEGER) || right.createdAt - left.createdAt;
+      const seenOf = new Map<string, SeenRow>();
+      for (const { id, parentThreadId } of shown) {
+        seenOf.set(id, {
+          threadId: id,
+          parentThreadId,
+          branch: branchOf(id).map((threadId) => ({
+            threadId,
+            assignment: places.get(threadId)?.assignment ?? null,
+            completed: places.get(threadId)?.completed ?? false,
+          })),
+          shownDone: doneIds.has(id),
         });
+      }
       byBot.set(bot.id, {
-        first: present(open)[0] ?? null,
-        open: subtree(bot, open),
-        done: subtree(bot, done),
-        doneCount: present(done).length,
-        compare: (left, right) =>
-          (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
-            (order.get(right.id) ?? Number.MAX_SAFE_INTEGER) || right.createdAt - left.createdAt,
+        open,
+        done,
+        doneCount: done.filter(({ id }) => !doneIds.has(parentOf(id) ?? "")).length,
+        compare,
+        parentOf,
+        seenOf,
       });
     }
     const empty: BotConversations = {
-      first: null,
       open: [],
       done: [],
       doneCount: 0,
       compare: () => 0,
+      parentOf,
+      seenOf: new Map(),
     };
     return {
       of: (bot: SidebarBot) => byBot.get(bot.id) ?? empty,
@@ -404,17 +435,45 @@ function useBotConversations(bots: readonly SidebarBot[]) {
   }, [bots, threads]);
 }
 
+// 1ma-bots alone knows which conversation is main. A status in the tree can
+// change it, so it is read again when the bot's rows do.
+export function useMainThread(
+  bot: SidebarBot,
+  { open, done }: Pick<BotConversations, "open" | "done">,
+): PluginSidebarThread | null {
+  const { data, isLoading, refetch } = useRpcQuery({
+    contract: botsRpc,
+    pluginId: BOTS_PLUGIN_ID,
+    method: "bots.v2.main",
+    input: { botId: bot.id },
+  });
+  const rows = [...open, ...done];
+  const state = rows.map((thread) =>
+    [thread.id, thread.parentThreadId, thread.isArchived, keepsOpen(thread)].join(":"),
+  );
+  const seen = state.sort().join();
+  // Asking again during the first reading would only join it.
+  const asked = useRef(seen);
+  useEffect(() => {
+    if (isLoading || asked.current === seen) return;
+    asked.current = seen;
+    void refetch();
+  }, [isLoading, refetch, seen]);
+  return rows.find((thread) => thread.id === data?.threadId) ?? null;
+}
+
 // The bot's state at a glance, drawn on its image: the glyph bb draws for its
 // main conversation (the one a click opens) on the corner, a dot for each
 // other conversation that is working (two and a plus past three, the count in
 // the tooltip), and a red mark for an unread error elsewhere.
 function BotAvatar({ bot, conversations }: { bot: SidebarBot; conversations: BotConversations }) {
-  const { first, open } = conversations;
-  const main = useMemo(() => (first === null ? NO_THREADS : [first]), [first]);
-  const hasDraft = useThreadsHaveDraft(main);
-  const rowStatus = usePluginThreadRowStatusForThreads(main);
+  const { open } = conversations;
+  const main = useMainThread(bot, conversations);
+  const mainThreads = useMemo(() => (main === null ? NO_THREADS : [main]), [main]);
+  const hasDraft = useThreadsHaveDraft(mainThreads);
+  const rowStatus = usePluginThreadRowStatusForThreads(mainThreads);
   const status = resolveThreadStatus({
-    thread: first,
+    thread: main,
     hiddenThreads: NO_THREADS,
     hasUnsubmittedDraft: hasDraft,
     rowStatus,
@@ -431,13 +490,13 @@ function BotAvatar({ bot, conversations }: { bot: SidebarBot; conversations: Bot
     });
   const others = quiet
     ? 0
-    : open.filter((thread) => thread.id !== first?.id && own(thread).isWorking).length;
+    : open.filter((thread) => thread.id !== main?.id && own(thread).isWorking).length;
   const unreadError =
     !quiet &&
     status.indicator !== "unread-error" &&
     open.some((thread) => own(thread).indicator === "unread-error");
   const label = [
-    first === null ? null : strings.mainConversationStatus(status.label),
+    main === null ? null : strings.mainConversationStatus(status.label),
     others > 0 ? strings.othersWorking(others) : null,
     unreadError ? strings.unreadError : null,
   ]
@@ -524,7 +583,12 @@ function BotRow({
   const [showDone, setShowDone] = useState(false);
   const [composing, setComposing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const { first, open, done, doneCount, compare } = conversations;
+  const { open, done, doneCount, compare, parentOf, seenOf } = conversations;
+  const main = useRpcMutation({
+    contract: botsRpc,
+    pluginId: BOTS_PLUGIN_ID,
+    method: "bots.v2.main",
+  });
   // A hidden bot's conversations stay in their projects; shown here, it is
   // only a row to bring it back.
   const hasChildren = !bot.hidden && (open.length > 0 || doneCount > 0);
@@ -541,16 +605,26 @@ function BotRow({
     if (collapsed && inside.some((thread) => thread.id === selectedThreadId)) onToggle();
   }, [collapsed, done, onToggle, open, selectedThreadId, showDone]);
 
-  const openBot = () => {
-    if (first === null) {
-      setComposing(true);
-      return;
+  // Asked at the click, so it opens what a letter sent now would reach.
+  const openBot = async () => {
+    try {
+      const { threadId } = await main.mutate({ botId: bot.id });
+      if (threadId === null) {
+        setComposing(true);
+        return;
+      }
+      navigate.toThread(threadId);
+      onProjectSelect?.();
+    } catch (error) {
+      toast.error(
+        getMutationErrorMessage({ error, fallbackMessage: strings.openFailed(bot.name) }),
+      );
     }
-    navigate.toThread(first.id);
-    onProjectSelect?.();
   };
   const treeProps = {
     compareThreads: compare,
+    parentOf,
+    seenOf,
     selectedThreadId,
     onProjectSelect,
     depthOffset: 1,
@@ -582,7 +656,7 @@ function BotRow({
           type="button"
           aria-label={strings.openBot(bot.name)}
           className="absolute inset-0 rounded-md outline-none"
-          onClick={openBot}
+          onClick={() => void openBot()}
         />
         <span
           className={cn(
@@ -673,12 +747,7 @@ function BotRow({
       {hasChildren && !isCollapsed ? (
         <div className="relative space-y-px">
           <ThreadTreeGroupLine parentRowDepth={0} />
-          {open.length > 0 ? (
-            <ProjectThreadTree
-              threadListState={{ status: "ready", threads: open }}
-              {...treeProps}
-            />
-          ) : null}
+          {open.length > 0 ? <BotThreadTree bot={bot} threads={open} {...treeProps} /> : null}
           {doneCount > 0 ? (
             <button
               type="button"
@@ -701,10 +770,7 @@ function BotRow({
             </button>
           ) : null}
           {showDone && doneCount > 0 ? (
-            <ProjectThreadTree
-              threadListState={{ status: "ready", threads: done }}
-              {...treeProps}
-            />
+            <BotThreadTree bot={bot} threads={done} {...treeProps} />
           ) : null}
         </div>
       ) : null}

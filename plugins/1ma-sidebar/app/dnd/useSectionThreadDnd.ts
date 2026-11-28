@@ -112,6 +112,17 @@ interface UseSectionThreadDndArgs {
   onTopLevelSectionOrderChange: (order: SidebarSectionId[]) => void;
   onExpandThread?: (threadId: string) => void;
   groups?: boolean;
+  botReorder?: {
+    accepts: (threadIds: readonly string[], targetId: string) => boolean;
+    drop: (
+      threadIds: readonly string[],
+      target: SectionThreadReorderTarget,
+    ) => void;
+    nest: (
+      threadIds: readonly string[],
+      parentThreadId: string,
+    ) => Promise<void>;
+  };
   pinnedReorderPending: boolean;
   pinnedThreads: readonly SidebarThread[];
   pinnedRootItems?: readonly ProjectThreadItem[];
@@ -959,6 +970,7 @@ export function useSectionThreadDnd({
   onTopLevelSectionOrderChange,
   onExpandThread,
   groups = false,
+  botReorder,
   pinnedReorderPending,
   pinnedThreads,
   pinnedRootItems,
@@ -1011,8 +1023,10 @@ export function useSectionThreadDnd({
   const nestCandidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  const [readyNestCandidate, setReadyNestCandidate] =
-    useState<NestHoverCandidate | null>(null);
+  // 1ma: the render that the timer asks for already reads the ref, while the
+  // collision handler it calls is still the one of the render before.
+  const readyNestCandidateRef = useRef<NestHoverCandidate | null>(null);
+  const [, setReadyNestCandidate] = useState<NestHoverCandidate | null>(null);
   const clearNestCandidate = useCallback(() => {
     if (nestCandidateTimerRef.current !== null) {
       clearTimeout(nestCandidateTimerRef.current);
@@ -1024,7 +1038,7 @@ export function useSectionThreadDnd({
     (threadId: string | null): boolean => {
       const current = nestCandidateRef.current;
       if (current !== null && current.threadId === threadId) {
-        return current === readyNestCandidate;
+        return current === readyNestCandidateRef.current;
       }
       clearNestCandidate();
       if (threadId === null) return false;
@@ -1032,11 +1046,12 @@ export function useSectionThreadDnd({
       nestCandidateRef.current = candidate;
       nestCandidateTimerRef.current = setTimeout(() => {
         nestCandidateTimerRef.current = null;
+        readyNestCandidateRef.current = candidate;
         setReadyNestCandidate(candidate);
       }, NEST_HOVER_DELAY_MS);
       return false;
     },
-    [clearNestCandidate, readyNestCandidate],
+    [clearNestCandidate],
   );
   const isPinnedItem = useCallback(
     (itemId: string) =>
@@ -1054,9 +1069,21 @@ export function useSectionThreadDnd({
       if (activeId === null || threadId === activeId) return null;
       if (lookup.itemKindById.get(threadId) !== "thread") return null;
       const armed = armedNestThreadIdRef.current === threadId;
+      if (botReorder) return NEST_BAND_FRACTION;
       if (coarsePointerRef.current) return 1;
       return armed ? NEST_BAND_ARMED_FRACTION : NEST_BAND_FRACTION;
     },
+    [botReorder, lookup],
+  );
+  const draggedRootIds = useCallback(
+    (activeId: string) =>
+      (
+        resolveDraggedRootThreads(
+          lookup,
+          activeId,
+          draggedSelectionRef.current ?? undefined,
+        ) ?? []
+      ).map((thread) => thread.id),
     [lookup],
   );
   const handleRowPointer = useCallback(
@@ -1065,8 +1092,12 @@ export function useSectionThreadDnd({
       if (
         activeId === null ||
         nesting ||
-        isPinnedRoot(activeId) ||
-        !isPinnedRoot(threadId)
+        (botReorder
+          ? !botReorder.accepts(draggedRootIds(activeId), threadId) ||
+            draggedRootIds(activeId).some((id) =>
+              isThreadWithinSubtree(lookup, id, threadId),
+            )
+          : isPinnedRoot(activeId) || !isPinnedRoot(threadId))
       ) {
         return;
       }
@@ -1075,7 +1106,7 @@ export function useSectionThreadDnd({
         placement: relativeY < 0.5 ? "before" : "after",
       };
     },
-    [isPinnedRoot],
+    [botReorder, draggedRootIds, isPinnedRoot, lookup],
   );
   const handleResolvedRow = useCallback(
     ({ threadId, rect, retaining }: ResolvedThreadRowInfo) => {
@@ -1327,7 +1358,8 @@ export function useSectionThreadDnd({
       setDragOverParentKey(targetParentKey);
       setUnchangedParentKey(nextUnchangedParentKey);
       setRowDrop(nextRowDrop);
-      if (isPinnedRoot(activeId)) setReorderTarget(nextReorderTarget);
+      if (isPinnedRoot(activeId) || nextRowDrop !== null)
+        setReorderTarget(nextReorderTarget);
       const expand = resolveDwellExpansion({
         containerId,
         onExpandThread,
@@ -1365,8 +1397,8 @@ export function useSectionThreadDnd({
       if (!enabled || !draggingThreadRef.current) return;
       const activeId =
         typeof event.active.id === "string" ? event.active.id : null;
-      if (activeId === null || isPinnedRoot(activeId)) return;
-      const next = pinnedInsertRef.current;
+      if (activeId === null || (!botReorder && isPinnedRoot(activeId))) return;
+      const next = event.collisions?.length ? pinnedInsertRef.current : null;
       setReorderTarget((current) =>
         current?.threadId === next?.threadId &&
         current?.placement === next?.placement
@@ -1374,7 +1406,7 @@ export function useSectionThreadDnd({
           : next,
       );
     },
-    [enabled, isPinnedRoot],
+    [botReorder, enabled, isPinnedRoot],
   );
 
   const commitDropChanges = useCallback(
@@ -1455,6 +1487,14 @@ export function useSectionThreadDnd({
         projectedNestParentId,
         decisionOptions,
       );
+      if (botReorder && (overId === null || decision?.kind !== "nest")) {
+        const target = pinnedInsertRef.current;
+        if (target && overId !== null && rowDrop === null) {
+          botReorder.drop(draggedRootIds(activeId), target);
+        }
+        clearProjectedDrag();
+        return;
+      }
       if (!decision) {
         clearProjectedDrag();
         return;
@@ -1472,10 +1512,12 @@ export function useSectionThreadDnd({
         case "move":
         case "nest":
           settle(
-            commitDropChanges(
-              decision,
-              `Failed to move ${describeThreadCount(decision.threadIds)}.`,
-            ),
+            botReorder && decision.kind === "nest"
+              ? botReorder.nest(decision.threadIds, decision.parentThreadId)
+              : commitDropChanges(
+                  decision,
+                  `Failed to move ${describeThreadCount(decision.threadIds)}.`,
+                ),
           );
           break;
         case "pin": {
@@ -1505,11 +1547,13 @@ export function useSectionThreadDnd({
       setPendingDropDecision(decision);
     },
     [
+      botReorder,
       clearDropDwell,
       clearNestCandidate,
       clearProjectedDrag,
       commitDropChanges,
       decisionOptions,
+      draggedRootIds,
       dragOverParentKey,
       enabled,
       handlePinnedDragEnd,

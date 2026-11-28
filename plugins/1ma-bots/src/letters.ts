@@ -34,7 +34,7 @@ export function routeLetter(
   args: {
     fromThreadId: string;
     to: string;
-    toThreadId?: string | null;
+    toThreadId: string | null;
     now: number;
     /** The owner's request that started the sender's current turn, if it was the owner's. */
     ownerTurn: number | null;
@@ -55,18 +55,12 @@ export function routeLetter(
         "This bot may not write to that bot. The owner chooses whom a bot may write to on its page.",
       );
     }
-    let toThreadId: string;
-    if (args.toThreadId) {
-      if (store.botOfThread(args.toThreadId) !== toBotId) {
-        throw new BotsError("invalid", "That conversation does not belong to the recipient bot");
-      }
-      toThreadId = args.toThreadId;
-    } else {
-      const first = store.firstThread(toBotId);
-      if (first === null) {
-        throw new BotsError("not_found", "The recipient bot has no conversation yet");
-      }
-      toThreadId = first;
+    const { toThreadId } = args;
+    if (toThreadId === null) {
+      throw new BotsError("not_found", "The recipient bot has no conversation yet");
+    }
+    if (store.botOfThread(toThreadId) !== toBotId) {
+      throw new BotsError("invalid", "That conversation does not belong to the recipient bot");
     }
 
     const sentLastHour = db

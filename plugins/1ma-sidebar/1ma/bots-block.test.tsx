@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { useMemo, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
@@ -16,6 +17,7 @@ import { botDrop } from "./thread-drop.js";
 import { strings } from "./strings.js";
 
 const app = await loadPluginApp(() => import("../app"));
+const { useBotConversations, useMainThread } = await import("./BotsBlock.js");
 const registration = app.threadLists[0]!;
 
 const PROJECTS = [makePluginProject({ id: "proj_app", name: "App" })];
@@ -42,6 +44,17 @@ const BOTS_PANEL = {
   shortcut: null,
 } as unknown as ExperimentalSidebarNavigationItem;
 
+const chat = (
+  threadId: string,
+  completed = false,
+  startedFromBot = true,
+): SidebarBot["threads"][number] => ({
+  threadId,
+  startedFromBot,
+  completed,
+  assignment: `joined_${threadId}`,
+});
+
 function marketer(hidden = false): SidebarBot {
   return {
     id: "bot_m",
@@ -49,7 +62,7 @@ function marketer(hidden = false): SidebarBot {
     role: "Landing pages",
     avatar: "data:image/svg+xml;utf8,<svg/>",
     hidden,
-    threads: [{ threadId: "thr_bot", startedFromBot: true, completed: false }],
+    threads: [chat("thr_bot")],
   };
 }
 
@@ -60,6 +73,7 @@ function render(options: {
   setPreference?: (input: unknown) => unknown;
   setHidden?: (input: unknown) => unknown;
   assign?: (input: unknown) => unknown;
+  main?: () => { threadId: string | null };
   threads?: typeof THREADS;
   preferences?: Partial<ReturnType<typeof defaultPreferences>>;
 }) {
@@ -82,8 +96,9 @@ function render(options: {
         }),
         setPreference: options.setPreference ?? ((input: unknown) => input),
         "bots.v1.list": options.bots ?? (() => ({ bots: [] })),
+        "bots.v2.main": options.main ?? (() => ({ threadId: null })),
         "bots.v1.setHidden": options.setHidden ?? (() => ({ ok: true })),
-        "bots.v1.assign": options.assign ?? (() => ({ botId: "bot_m", startedFromBot: false })),
+        "bots.v2.assign": options.assign ?? (() => ({ botId: "bot_m", startedFromBot: false })),
       },
     },
   );
@@ -218,7 +233,7 @@ describe("Codex review of stage 2: a bot with only done conversations", () => {
         bots: [
           {
             ...marketer(),
-            threads: [{ threadId: "thr_bot", startedFromBot: true, completed: true }],
+            threads: [chat("thr_bot", true)],
           },
         ],
       }),
@@ -250,11 +265,12 @@ describe("a done conversation that is working again", () => {
         rpc: {
           listPreferences: () => ({ preferences: defaultPreferences() }),
           setPreference: (input: unknown) => input,
+          "bots.v2.main": () => ({ threadId: "thr_bot" }),
           "bots.v1.list": () => ({
             bots: [
               {
                 ...marketer(),
-                threads: [{ threadId: "thr_bot", startedFromBot: true, completed: true }],
+                threads: [chat("thr_bot", true)],
               },
             ],
           }),
@@ -264,6 +280,285 @@ describe("a done conversation that is working again", () => {
     await screen.findByText("Marketer");
     expect(threadIdsIn(botElement("bot_m"))).toEqual(["thr_bot", "thr_bot_child"]);
     expect(screen.queryByText(strings.done(1))).toBeNull();
+  });
+});
+
+describe("a click on a bot", () => {
+  const open = () =>
+    fireEvent.click(screen.getByRole("button", { name: strings.openBot("Marketer") }));
+
+  it("opens the conversation 1ma Bots names at that moment", async () => {
+    let main = "thr_bot";
+    const view = render({
+      bots: () => ({ bots: [marketer()] }),
+      main: () => ({ threadId: main }),
+    });
+    await screen.findByText("Marketer");
+    main = "thr_plain";
+    open();
+    await waitFor(() =>
+      expect(view.inspection.navigateCalls).toContainEqual(
+        expect.objectContaining({ threadId: "thr_plain" }),
+      ),
+    );
+    expect(view.inspection.navigateCalls).toHaveLength(1);
+  });
+
+  it("offers a new conversation when the bot has no open one", async () => {
+    const view = render({ bots: () => ({ bots: [marketer()] }) });
+    await screen.findByText("Marketer");
+    open();
+    await screen.findByRole("dialog", { name: strings.newConversation("Marketer") });
+    expect(view.inspection.navigateCalls).toEqual([]);
+  });
+
+  it("says why it could not open", async () => {
+    const view = render({
+      bots: () => ({ bots: [marketer()] }),
+      main: () => {
+        throw new Error("1ma-bots is reloading");
+      },
+    });
+    await screen.findByText("Marketer");
+    open();
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith("1ma-bots is reloading"));
+    expect(view.inspection.navigateCalls).toEqual([]);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("the avatar's main conversation is read again when a conversation starts working", async () => {
+    let main = "thr_bot";
+    function Probe() {
+      const [status, setStatus] = useState<"idle" | "active">("idle");
+      const open = [THREADS[0]!, { ...THREADS[2]!, status }];
+      const thread = useMainThread(marketer(), { open, done: [] });
+      return <button onClick={() => setStatus("active")}>{thread?.id ?? "none"}</button>;
+    }
+    renderSlot({ component: Probe as never }, {} as never, {
+      rpc: { "bots.v2.main": () => ({ threadId: main }) },
+    });
+    const button = await screen.findByText("thr_bot");
+    main = "thr_plain";
+    fireEvent.click(button);
+    await screen.findByText("thr_plain");
+  });
+
+  it("the avatar's main conversation is read again when a conversation changes during the first reading", async () => {
+    let answerFirst = () => {};
+    let reads = 0;
+    function Probe() {
+      const [status, setStatus] = useState<"idle" | "active">("idle");
+      const open = [THREADS[0]!, { ...THREADS[2]!, status }];
+      const thread = useMainThread(marketer(), { open, done: [] });
+      return (
+        <button onClick={() => setStatus("active")}>
+          {status}: {thread?.id ?? "none"}
+        </button>
+      );
+    }
+    renderSlot({ component: Probe as never }, {} as never, {
+      rpc: {
+        "bots.v2.main": async () => {
+          reads += 1;
+          if (reads > 1) return { threadId: "thr_plain" };
+          await new Promise<void>((resolve) => (answerFirst = resolve));
+          return { threadId: "thr_bot" };
+        },
+      },
+    });
+    const button = screen.getByRole("button");
+    await waitFor(() => expect(reads).toBe(1));
+    fireEvent.click(button);
+    await waitFor(() => expect(button.textContent).toBe("active: none"));
+    answerFirst();
+    await waitFor(() => expect(button.textContent).toBe("active: thr_plain"));
+    expect(reads).toBe(2);
+  });
+});
+
+describe("nested conversations of a bot", () => {
+  const nested = (
+    id: string,
+    parentThreadId: string | null = null,
+    extra: Parameters<typeof makeSidebarThread>[0] = {},
+  ) => makeSidebarThread({ id, projectId: "proj_app", title: id, parentThreadId, ...extra });
+  // thr_spawned has no place of its own in the bot; it is newer than its siblings.
+  const TREE = [
+    nested("thr_second", "thr_parent", { createdAt: 1 }),
+    nested("thr_spawned", "thr_parent", { createdAt: 9 }),
+    nested("thr_first", "thr_parent", { createdAt: 2 }),
+    nested("thr_parent"),
+    nested("thr_main"),
+  ];
+  const memberOrder = ["thr_second", "thr_main", "thr_parent", "thr_first"];
+  const withDone = (done: string[], order = memberOrder): SidebarBot => ({
+    ...marketer(),
+    threads: order.map((threadId) => chat(threadId, done.includes(threadId))),
+  });
+  const changed = (id: string, extra: Parameters<typeof makeSidebarThread>[0]) =>
+    TREE.map((thread) => (thread.id === id ? { ...thread, ...extra } : thread) as typeof thread);
+  async function rows(done: string[], threads = TREE) {
+    const view = render({ bots: () => ({ bots: [withDone(done)] }), threads });
+    await screen.findByText("Marketer");
+    const open = threadIdsIn(botElement("bot_m"));
+    const count = screen.queryByText(/^Done: /u)?.textContent ?? null;
+    return { view, open, count };
+  }
+
+  it("stand in the bot's order inside their parent, sub-threads without a place after them", async () => {
+    expect((await rows([])).open).toEqual([
+      "thr_main",
+      "thr_parent",
+      "thr_second",
+      "thr_first",
+      "thr_spawned",
+    ]);
+  });
+
+  it("a parent goes to Done with its whole branch, counted once", async () => {
+    const { open, count } = await rows(["thr_parent", "thr_first"]);
+    expect(open).toEqual(["thr_main"]);
+    expect(count).toBe(strings.done(1));
+    fireEvent.click(screen.getByText(strings.done(1)));
+    expect(threadIdsIn(botElement("bot_m"))).toEqual([
+      "thr_main",
+      "thr_parent",
+      "thr_second",
+      "thr_first",
+      "thr_spawned",
+    ]);
+  });
+
+  it("a done sub-chat leaves its open parent and is counted on its own", async () => {
+    const { open, count } = await rows(["thr_first"]);
+    expect(open).toEqual(["thr_main", "thr_parent", "thr_second", "thr_spawned"]);
+    expect(count).toBe(strings.done(1));
+  });
+
+  it.each([
+    ["runs", { status: "active" as const }],
+    ["has a question", { hasPendingInteraction: true }],
+    ["failed", { status: "error" as const }],
+    ["has a failed queue", { queuedWork: "failed" as const }],
+  ])("a branch whose sub-thread %s stays in sight whole", async (_state, extra) => {
+    const { open, count } = await rows(["thr_parent"], changed("thr_spawned", extra));
+    expect(open).toEqual(["thr_main", "thr_parent", "thr_second", "thr_first", "thr_spawned"]);
+    expect(count).toBeNull();
+  });
+
+  it("a sub-chat marked done on its own stays done while its sibling runs", async () => {
+    const { open, count } = await rows(
+      ["thr_parent", "thr_first"],
+      changed("thr_spawned", { status: "active" }),
+    );
+    expect(open).toEqual(["thr_main", "thr_parent", "thr_second", "thr_spawned"]);
+    expect(count).toBe(strings.done(1));
+  });
+
+  it("a restored sub-thread stands at the top beside its archived parent", async () => {
+    const threads = [
+      ...changed("thr_parent", { isArchived: true }),
+      nested("thr_low", "thr_first"),
+    ];
+    render({
+      bots: () => ({ bots: [withDone(["thr_parent", "thr_first"])] }),
+      threads,
+    });
+    await screen.findByText("Marketer");
+    // The tree ends at the archived parent: its mark is not thr_second's, and
+    // thr_first counts beside it.
+    expect(threadIdsIn(botElement("bot_m"))).toContain("thr_second");
+    expect(screen.getByText(/^Done: /u).textContent).toBe(strings.done(2));
+  });
+
+  it("an archived sub-thread does not keep its branch open", async () => {
+    const { open, count } = await rows(
+      ["thr_parent"],
+      changed("thr_spawned", { isArchived: true, status: "error" }),
+    );
+    expect(open).toEqual(["thr_main"]);
+    expect(count).toBe(strings.done(1));
+  });
+
+  it("name what a gesture on them depends on, as the block shows it", async () => {
+    const threads = [
+      ...TREE,
+      nested("thr_low", "thr_spawned"),
+      nested("thr_alone", "thr_foreign"),
+      nested("thr_foreign"),
+    ];
+    const bot = withDone(["thr_parent"], [...memberOrder, "thr_alone"]);
+    function Probe() {
+      const bots = useMemo(() => [bot], []);
+      const { seenOf } = useBotConversations(bots).of(bot);
+      return <p data-testid="seen">{JSON.stringify(Object.fromEntries(seenOf))}</p>;
+    }
+    renderSlot({ component: Probe as never }, {} as never, {
+      sidebarThreads: { projects: PROJECTS, sections: [], threads },
+    });
+    const shown: unknown = JSON.parse((await screen.findByTestId("seen")).textContent);
+    const place = (threadId: string, completed = false) => ({
+      threadId,
+      assignment: `joined_${threadId}`,
+      completed,
+    });
+    const top = (threadId: string, parentThreadId: string | null, done: boolean) => ({
+      threadId,
+      parentThreadId,
+      branch: [place(threadId, done)],
+      shownDone: done,
+    });
+    const noPlace = (threadId: string) => ({ threadId, assignment: null, completed: false });
+    const under = (...[own, ...above]: Array<ReturnType<typeof noPlace | typeof place>>) => ({
+      threadId: own!.threadId,
+      parentThreadId: above[0]?.threadId ?? "thr_parent",
+      branch: [own, ...above, place("thr_parent", true)],
+      shownDone: true,
+    });
+    expect(shown).toEqual({
+      thr_main: top("thr_main", null, false),
+      thr_parent: top("thr_parent", null, true),
+      thr_alone: top("thr_alone", "thr_foreign", false),
+      thr_second: under(place("thr_second")),
+      thr_first: under(place("thr_first")),
+      thr_spawned: under(noPlace("thr_spawned")),
+      thr_low: under(noPlace("thr_low"), noPlace("thr_spawned")),
+    });
+  });
+
+  it("a hidden helper thread neither counts nor keeps its branch open", async () => {
+    const { open, count } = await rows(
+      ["thr_parent"],
+      changed("thr_spawned", { isHidden: true, status: "error" }),
+    );
+    expect(open).toEqual(["thr_main"]);
+    expect(count).toBe(strings.done(1));
+  });
+
+  it("a conversation of another bot inside the branch keeps its own place", async () => {
+    render({
+      bots: () => ({
+        bots: [
+          withDone(["thr_parent"], ["thr_main", "thr_parent"]),
+          {
+            ...withDone([], ["thr_first"]),
+            id: "bot_e",
+            name: "Editor",
+          },
+        ],
+      }),
+      threads: changed("thr_first", { status: "error" }),
+    });
+    await screen.findByText("Editor");
+    expect(threadIdsIn(botElement("bot_m"))).toEqual(["thr_main"]);
+    expect(threadIdsIn(botElement("bot_e"))).toEqual(["thr_first"]);
+    fireEvent.click(screen.getByText(strings.done(1)));
+    expect(threadIdsIn(botElement("bot_m"))).toEqual([
+      "thr_main",
+      "thr_parent",
+      "thr_spawned",
+      "thr_second",
+    ]);
   });
 });
 
@@ -373,23 +668,20 @@ describe("the owner's review of 17.11: hiding a bot and its state at a glance", 
     });
     const items = [main, ...extra, failed];
     render({
+      main: () => ({ threadId: "thr_main" }),
       threads: [...THREADS, ...items],
       bots: () => ({
         bots: [
           {
             ...marketer(),
-            threads: items.map((thread) => ({
-              threadId: thread.id,
-              startedFromBot: true,
-              completed: false,
-            })),
+            threads: items.map((thread) => chat(thread.id)),
           },
         ],
       }),
     });
     await screen.findByText("Marketer");
     const avatar = botElement("bot_m").querySelector("[data-1ma-bot-avatar]")!;
-    expect(avatar.querySelector("[data-1ma-bot-main-status]")).not.toBeNull();
+    await waitFor(() => expect(avatar.querySelector("[data-1ma-bot-main-status]")).not.toBeNull());
     expect(avatar.querySelectorAll("[data-1ma-bot-other-working]")).toHaveLength(2);
     expect(avatar.querySelector("[data-1ma-bot-other-working-more]")).not.toBeNull();
     expect(avatar.querySelector("[data-1ma-bot-unread-error]")).not.toBeNull();
@@ -423,9 +715,45 @@ describe("dragging conversations onto a bot", () => {
     botDrop.end();
     await waitFor(() => expect(calls).toHaveLength(3));
     expect(calls).toEqual([
-      { threadId: "thr_other", botId: "bot_m", place: "first" },
-      { threadId: "thr_plain", botId: "bot_m", place: "first" },
-      { threadId: "thr_last", botId: "bot_m", place: "last" },
+      { threadId: "thr_other", botId: "bot_m", place: "first", seen: null },
+      { threadId: "thr_plain", botId: "bot_m", place: "first", seen: null },
+      { threadId: "thr_last", botId: "bot_m", place: "last", seen: null },
+    ]);
+  });
+
+  it("names the bot and the assignment each dropped conversation showed", async () => {
+    const calls: unknown[] = [];
+    render({
+      bots: () => ({
+        bots: [
+          marketer(),
+          { ...marketer(), id: "bot_e", name: "Editor", threads: [chat("thr_plain")] },
+        ],
+      }),
+      assign: (input) => {
+        calls.push(input);
+        return { botId: "bot_e", startedFromBot: false };
+      },
+    });
+    await screen.findByText("Editor");
+    document.elementsFromPoint = () => [botElement("bot_e").querySelector("button")!];
+    botDrop.start(["thr_bot", "thr_plain"]);
+    botDrop.over({ x: 100, y: 10 });
+    botDrop.end();
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls).toEqual([
+      {
+        threadId: "thr_bot",
+        botId: "bot_e",
+        place: "last",
+        seen: { botId: "bot_m", assignment: "joined_thr_bot" },
+      },
+      {
+        threadId: "thr_plain",
+        botId: "bot_e",
+        place: "last",
+        seen: { botId: "bot_e", assignment: "joined_thr_plain" },
+      },
     ]);
   });
 
@@ -462,8 +790,8 @@ describe("dragging a selection that holds a sub-thread onto a bot", () => {
     botDrop.end();
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls).toEqual([
-      { threadId: "thr_bot", botId: "bot_m", place: "last" },
-      { threadId: "thr_plain", botId: "bot_m", place: "last" },
+      { threadId: "thr_bot", botId: "bot_m", place: "last", seen: null },
+      { threadId: "thr_plain", botId: "bot_m", place: "last", seen: null },
     ]);
   });
 });
@@ -506,11 +834,7 @@ function dropServer(options: {
         bots: [
           {
             ...marketer(),
-            threads: owned.map((threadId) => ({
-              threadId,
-              startedFromBot: false,
-              completed: false,
-            })),
+            threads: owned.map((threadId) => chat(threadId, false, false)),
           },
         ],
       };

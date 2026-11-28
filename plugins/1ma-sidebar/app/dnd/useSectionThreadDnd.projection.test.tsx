@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
 
-import { act, cleanup } from "@testing-library/react";
-import type {
-  CollisionDetection,
-  DragCancelEvent,
-  DragEndEvent,
-  DragOverEvent,
-  DragStartEvent,
+import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import {
+  DndContext,
+  useDraggable,
+  useDroppable,
+  type CollisionDetection,
+  type DragCancelEvent,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
 } from "@dnd-kit/core";
 import {
   makeSidebarEnvironment,
@@ -119,7 +122,10 @@ interface HarnessProps {
 function renderSectionThreadDnd(
   initialRootItems = ROOT_ITEMS,
   pinnedThreads: readonly SidebarThread[] = [],
-  grouping: { groups?: boolean; containerProjectId?: string } = {},
+  grouping: Pick<
+    Parameters<typeof useSectionThreadDnd>[0],
+    "groups" | "containerProjectId" | "botReorder"
+  > = {},
 ) {
   const result: { current: SectionThreadDndState | null } = { current: null };
   const pinnedState = buildPinnedSidebarState({
@@ -358,6 +364,117 @@ function notePointerMove() {
 afterEach(() => {
   cleanup();
   updateThreadDeferred = null;
+});
+
+describe("bot conversation drops", () => {
+  const pinned = createThread({ id: "dragged", pinnedAt: 42, sectionId: "a" });
+  const target = createThread({ id: "peer", sectionId: "b" });
+  const roots = buildSectionThreadList([pinned, target]);
+  const rowId = getSidebarThreadRowDroppableId(target.id);
+
+  it.each([
+    ["edge", "the bot's order has no place for it", false, "peer", false],
+    ["edge", "inside the dragged conversation itself", true, "child", false],
+    ["edge", "accepted", true, "peer", true],
+  ])("the %s, %s", async (_place, _reason, accepts, targetId, accepted) => {
+    const drop = vi.fn();
+    const child = createThread({ id: "child", parentThreadId: pinned.id });
+    const { result, inspection } = renderSectionThreadDnd(
+      buildSectionThreadList([pinned, child, target]),
+      [],
+      { groups: true, botReorder: { accepts: () => accepts, drop, nest: async () => {} } },
+    );
+    const props = () => result.current!.dndContextProps;
+    const rect = { top: 100, left: 0, right: 200, width: 200, height: 28, bottom: 128 };
+    const id = getSidebarThreadRowDroppableId(targetId);
+    // dnd-kit reports the row of the previous move in `over`.
+    const move = (from: string | null, to: string | null) =>
+      act(() =>
+        props().onDragMove?.({
+          active: { id: pinned.id },
+          collisions: to === null ? [] : [{ id: to }],
+          over: from === null ? null : { id: from },
+        } as never),
+      );
+    act(() => props().onDragStart?.(dragStart(pinned.id)));
+    act(() => {
+      props().collisionDetection!({
+        active: { id: pinned.id },
+        collisionRect: rect,
+        droppableRects: new Map([[id, rect], [targetId, rect]]),
+        droppableContainers: [{ id }, { id: targetId }],
+        pointerCoordinates: { x: 20, y: 102 },
+      } as unknown as Parameters<CollisionDetection>[0]);
+    });
+    const place = { threadId: targetId, placement: "before" };
+    move(null, targetId);
+    expect(result.current!.reorderTarget).toEqual(accepted ? place : null);
+    // Away from the rows, over a bot for example, nothing is promised.
+    move(targetId, null);
+    expect(result.current!.reorderTarget).toBeNull();
+    act(() => props().onDragEnd?.(dragEnd(pinned.id, targetId)));
+    await flushTasks();
+    expect(drop.mock.calls).toEqual(accepted ? [[[pinned.id], place]] : []);
+    expect(inspection.sdkCalls).toEqual([]);
+  });
+
+  it("keeps the lower edge available for touch reordering while the finger rests", async () => {
+    const drop = vi.fn();
+    const { result, inspection } = renderSectionThreadDnd(roots, [], {
+      groups: true,
+      botReorder: { accepts: () => true, drop, nest: async () => {} },
+    });
+    const props = () => result.current!.dndContextProps;
+    const rect = { top: 100, left: 0, right: 200, width: 200, height: 28, bottom: 128 };
+    const collision = () =>
+      props().collisionDetection!({
+        active: { id: pinned.id },
+        collisionRect: rect,
+        droppableRects: new Map([[rowId, rect], [target.id, rect]]),
+        droppableContainers: [{ id: rowId }, { id: target.id }],
+        pointerCoordinates: { x: 20, y: 126 },
+      } as unknown as Parameters<CollisionDetection>[0])[0]?.id;
+    act(() => props().onDragStart?.({
+      ...dragStart(pinned.id),
+      activatorEvent: new TouchEvent("touchstart"),
+    }));
+    vi.useFakeTimers();
+    try {
+      collision();
+      act(() => vi.advanceTimersByTime(NEST_HOVER_DELAY_MS));
+      expect(collision()).toBe(target.id);
+    } finally {
+      vi.useRealTimers();
+    }
+    act(() => props().onDragEnd?.(dragEnd(pinned.id, target.id)));
+    await flushTasks();
+    expect(drop).toHaveBeenCalledExactlyOnceWith([pinned.id], {
+      threadId: target.id,
+      placement: "after",
+    });
+    expect(inspection.sdkCalls).toEqual([]);
+  });
+
+  it("leaves the middle drop to the bot, and shows the row there until it answers", async () => {
+    let answer = () => {};
+    const nest = vi.fn(() => new Promise<void>((resolve) => (answer = resolve)));
+    const drop = vi.fn();
+    const { result, inspection } = renderSectionThreadDnd(roots, [], {
+      groups: true,
+      botReorder: { accepts: () => true, drop, nest },
+    });
+    const props = () => result.current!.dndContextProps;
+    act(() => props().onDragStart?.(dragStart(pinned.id)));
+    act(() => props().onDragOver?.(dragOver(pinned.id, rowId)));
+    act(() => props().onDragEnd?.(dragEnd(pinned.id, rowId)));
+    await flushTasks();
+    expect(nest).toHaveBeenCalledExactlyOnceWith([pinned.id], target.id);
+    expect(result.current!.activeItemId).toBe(pinned.id);
+    await act(async () => answer());
+    expect(result.current!.activeItemId).toBeNull();
+    expect(drop).not.toHaveBeenCalled();
+    expect(inspection.sdkCalls).toEqual([]);
+  });
 });
 
 describe("useSectionThreadDnd project drop targets", () => {
@@ -815,5 +932,72 @@ describe("useSectionThreadDnd nest hover delay", () => {
     );
     act(() => props().onDragStart?.(dragStart("dragged")));
     expect(collide(114)).toEqual([]);
+  });
+
+  it("marks the row while the pointer rests on it without moving", async () => {
+    const result: { current: SectionThreadDndState | null } = { current: null };
+    const at = (top: number) => (element: HTMLElement | null) => {
+      if (element)
+        element.getBoundingClientRect = () => new DOMRect(0, top, 200, 28);
+    };
+    function Rows() {
+      const dragged = useDraggable({ id: "dragged" });
+      const target = useDroppable({ id: rowDroppableId });
+      const item = useDroppable({ id: "in-b" });
+      return (
+        <>
+          <div
+            ref={(element) => {
+              at(200)(element);
+              dragged.setNodeRef(element);
+            }}
+            data-testid="dragged"
+            {...dragged.listeners}
+          />
+          <div
+            ref={(element) => {
+              at(100)(element);
+              target.setNodeRef(element);
+              item.setNodeRef(element);
+            }}
+          />
+        </>
+      );
+    }
+    function Harness() {
+      result.current = useSectionThreadDnd({
+        containerId: CHRONOLOGICAL_CONTAINER_ID,
+        enabled: true,
+        rootItems: ROOT_ITEMS,
+        topLevelSectionOrder: ["pinned", "section:a", "section:b", "threads"],
+        onTopLevelSectionOrderChange: vi.fn(),
+        pinnedReorderPending: false,
+        pinnedThreads: [],
+        pinnedRootItems: [],
+        pinnedRootNodes: [],
+        onReorderPinnedThread: vi.fn(),
+        groups: true,
+        botReorder: { accepts: () => true, drop: vi.fn(), nest: async () => {} },
+      });
+      return (
+        <DndContext {...result.current!.dndContextProps}>
+          <Rows />
+        </DndContext>
+      );
+    }
+    const { getByTestId } = renderSlot({ component: Harness }, {});
+
+    fireEvent.mouseDown(getByTestId("dragged"), { button: 0, clientX: 20, clientY: 214 });
+    fireEvent.mouseMove(document, { clientX: 30, clientY: 214 });
+    await waitFor(() => expect(result.current!.activeThread?.id).toBe("dragged"));
+    fireEvent.mouseMove(document, { clientX: 20, clientY: 114 });
+    await act(() => new Promise((resolve) => setTimeout(resolve, NEST_HOVER_DELAY_MS / 2)));
+    expect(result.current!.nestTarget).toBeNull();
+    expect(result.current!.reorderTarget).toEqual({ threadId: "in-b", placement: "after" });
+    await waitFor(() =>
+      expect(result.current!.nestTarget).toMatchObject({ threadId: "in-b", state: "valid" }),
+    );
+    expect(result.current!.reorderTarget).toBeNull();
+    fireEvent.mouseUp(document);
   });
 });

@@ -7,6 +7,7 @@ export const strings = {
   newConversation: (name: string) => `New conversation with ${name}`,
   composerPlaceholder: (name: string) => `Message ${name}…`,
   openBot: (name: string) => `Open ${name}`,
+  openFailed: (name: string) => `Could not open ${name}`,
   expand: (name: string) => `Expand ${name} conversations`,
   collapse: (name: string) => `Collapse ${name} conversations`,
   botActions: (name: string) => `${name} actions`,
@@ -27,6 +28,7 @@ export const strings = {
     `Moved ${moved} of ${total} conversations to ${name}`,
   unconfirmedAssigned: (name: string, moved: number, total: number) =>
     `Moved ${moved} of ${total} conversations to ${name}; could not check the rest. Reload the list to see where they are.`,
+  reorderFailed: "Could not reorder the conversations",
   open: "Open",
   done: (count: number) => `Done: ${count}`,
   settings: {

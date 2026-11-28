@@ -63,6 +63,9 @@ export const strings = {
     preview: "View bot instructions",
     instructionsFrom: (name: string) => `Instructions from ${name}`,
     choose: "Assign to bot",
+    moveToTop: "Move to top",
+    markDone: "Mark as done",
+    markNotDone: "Mark as not done",
     notStartedFromBot:
       "This conversation was not started from the bot. Tools other plugins give this bot (for example the main bot's actions) are not available here.",
     continueInBot: "Continue in a bot conversation",
@@ -131,4 +134,14 @@ export const agentText = {
     "Only a top-level conversation that is not archived can be assigned to a bot; its child conversations follow it.",
   needsOwner:
     "This conversation is waiting for the owner (a question or an error), so it cannot be marked done.",
+  keepsChanging: "Something keeps happening in the bots' conversations. Try again in a moment.",
+  broughtBack: "This conversation was brought back meanwhile, so it was not marked done.",
+  reassigned: "This conversation was assigned anew meanwhile, so nothing was changed.",
+  outsideParent: (title: string) =>
+    `${title} is a sub-thread of a conversation outside this bot's list. Here only its place in the order can change, so nothing was moved.`,
+  moveElsewhere: "These conversations are not in this bot any more, so nothing was moved.",
+  treeChanged: "The tree changed since it was shown, so nothing was done.",
+  botsReordered: "The order of the bots changed since it was shown, so nothing was moved.",
+  moveNotUndone: (reason: string, titles: readonly string[]) =>
+    `${reason}. These may not be where they were: ${titles.join(", ")}`,
 } as const;
