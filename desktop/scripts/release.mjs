@@ -1,9 +1,14 @@
 // Publishes one Desktop build as the pre-release desktop/v<version> and then
-// points the feeds in the desktop-latest release at it. Everything that can be
-// checked without writing is checked before the first write, and a dry run
-// stops right before it: a publication of the same inputs after a passing dry
-// run fails only on what changed in the releases meanwhile or on a write
-// GitHub refuses.
+// points the feeds in the desktop-latest release at it. A dry run goes the
+// same way and leaves the writes out, so a publication of the same inputs
+// after a passing dry run fails only on what changed in the releases
+// meanwhile, on what the dry run could not read because it follows an upload
+// into the release of the tag, or on a write GitHub refuses. GitHub has no
+// transaction over several calls, so each group of writes acts on a picture
+// read right before it, a file is removed only as the object that was judged,
+// no upload goes over a name, and what the feeds announce is checked as a
+// whole right before the first write to them and in the last read, which
+// alone says success.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -85,7 +90,24 @@ const said = (done) => (done.stderr ?? "").trim();
 // quoted earlier in the text is GitHub's wording, not the answer.
 const notFound = (done) => said(done).endsWith("(HTTP 404)");
 
+// gh's own refusal of an upload without --clobber onto a name the release
+// holds, and GitHub's when the name was taken after gh read the release.
+const nameTaken = (done) => {
+  const [first, ...rest] = said(done).split("\n");
+  return (
+    (rest.length === 0 && first.startsWith("asset under the same name already exists: [")) ||
+    (first.startsWith("HTTP 422: ") && rest.includes("ReleaseAsset.name already exists"))
+  );
+};
+
 const UPLOADED = "uploaded";
+// GitHub's REST description names the state "open"; its upload endpoint says
+// a failed upload may leave an empty file in the state "starter".
+const UNFINISHED = new Set(["starter", "open"]);
+
+const what = ({ name, state }) => (state === UPLOADED ? name : `the unfinished ${name}`);
+
+const sha256Of = (bytes) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 
 // The commit refs/tags/<tag> points at, through annotated tags, or null when
 // there is no such tag. Read as a tag, so a branch of the same name cannot
@@ -120,7 +142,7 @@ function readRelease(gh, repository, tag) {
     "view",
     tag,
     "--json",
-    "isDraft,isPrerelease,assets",
+    "databaseId,isDraft,isPrerelease,assets",
     "--repo",
     repository,
   ]);
@@ -128,9 +150,18 @@ function readRelease(gh, repository, tag) {
     if (said(view).includes("release not found")) return null;
     fail(`cannot read release ${tag}: ${said(view)}`);
   }
+  let read;
   try {
-    const { isDraft, isPrerelease, assets } = JSON.parse(view.stdout);
+    read = JSON.parse(view.stdout);
+  } catch (error) {
+    fail(`cannot read the files of ${tag}: ${error.message}`);
+  }
+  if (!Number.isInteger(read?.databaseId))
+    fail(`cannot read release ${tag}: GitHub names no id of it`);
+  try {
+    const { databaseId, isDraft, isPrerelease, assets } = read;
     return {
+      id: databaseId,
       draft: isDraft === true,
       prerelease: isPrerelease === true,
       assets: new Map(
@@ -235,7 +266,9 @@ export function release({
   if (readdirSync(work).length > 0) fail(`the work folder ${work} is not empty`);
   const upload = path.join(work, "upload");
   const feeds = path.join(work, "feeds");
-  for (const folder of [upload, feeds]) mkdirSync(folder);
+  // Holds no feed, for the floor of the published releases alone.
+  const noFeeds = path.join(work, "no-feeds");
+  for (const folder of [upload, feeds, noFeeds]) mkdirSync(folder);
   const appFiles = readdirSync(app).filter((name) => isFile(path.join(app, name)));
   for (const extension of [".dmg", ".zip"]) {
     const found = appFiles.filter((name) => name.endsWith(extension));
@@ -272,9 +305,6 @@ export function release({
   const digests = new Map(
     files.map((name) => [name, `sha256:${sha256File(path.join(upload, name))}`]),
   );
-  const tagged = readTag(gh, repository, tag);
-  if (tagged !== null && tagged !== commit)
-    fail(`${tag} points at ${tagged}, not at the build commit ${commit}`);
   const prerelease = `'gh release edit ${tag} --prerelease --repo ${repository}'`;
   const readOwn = () => {
     const found = readRelease(gh, repository, tag);
@@ -288,19 +318,27 @@ export function release({
       );
     return found;
   };
-  const published = readOwn();
-  if (published !== null && tagged === null) fail(`release ${tag} has no tag refs/tags/${tag}`);
-  // An unfinished file is removed later by the address it was read at, which
-  // names that file and not a later one of the same name.
-  const unfinishedOf = (from, name, { state, address }) => {
-    const prefix = `https://api.github.com/repos/${repository}/releases/assets/`;
-    if (
-      typeof address !== "string" ||
-      !address.startsWith(prefix) ||
-      !/^[0-9]+$/u.test(address.slice(prefix.length))
-    )
-      fail(`${from} has an unfinished ${name} without the address of it`);
-    return { name, state, address };
+  const readBuild = () => {
+    const tagged = readTag(gh, repository, tag);
+    if (tagged !== null && tagged !== commit)
+      fail(`${tag} points at ${tagged}, not at the build commit ${commit}`);
+    const found = readOwn();
+    if (found !== null && tagged === null) fail(`release ${tag} has no tag refs/tags/${tag}`);
+    return { tagged, found };
+  };
+  // A file that may be removed is judged with the address it was read at,
+  // which names that file and not a later one of the same name. A file in a
+  // state GitHub does not name is left to a maintainer.
+  const assetAddress = `https://api.github.com/repos/${repository}/releases/assets/`;
+  const judge = (from, name, { state, digest, address }) => {
+    if (state !== UPLOADED && !UNFINISHED.has(state))
+      fail(
+        `${from} has ${name} in the state ${state}, which is neither uploaded nor unfinished; a maintainer looks at it, then runs again`,
+      );
+    const id = typeof address === "string" ? address.slice(assetAddress.length) : "";
+    if (typeof address !== "string" || !address.startsWith(assetAddress) || !/^[0-9]+$/u.test(id))
+      fail(`${from} has ${name} without the address of it`);
+    return { name, state, digest, address, id };
   };
   // A published file is never replaced: one that is already there must be the
   // same file, and the missing ones are uploaded only when none differs. A
@@ -313,7 +351,7 @@ export function release({
       const file = found.assets.get(name);
       if (file === undefined) pending.push(name);
       else if (file.state !== UPLOADED) {
-        unfinished.push(unfinishedOf(tag, name, file));
+        unfinished.push(judge(tag, name, file));
         pending.push(name);
       } else if (typeof file.digest !== "string")
         fail(
@@ -322,16 +360,20 @@ export function release({
       else if (file.digest !== digests.get(name))
         fail(`${tag} already has a different ${name}; refusing to replace a published file`);
     }
-    return { pending, unfinished };
+    return { id: found.id, pending, unfinished };
   };
-  let own = published === null ? null : planRelease(published);
+  const readOwnPlan = () => {
+    const { found } = readBuild();
+    if (found === null) fail(`release ${tag} was deleted meanwhile; a rerun creates it`);
+    return planRelease(found);
+  };
 
   // The feeds only move forward: an older run never replaces a newer one.
   // Every feed this run replaces is checked, since a release that failed
   // halfway can leave one feed ahead of another.
-  // A feed can be lost by a failed upload (--clobber removes the old file
-  // first, and an upload may stop unfinished); a published release cannot, so
-  // the newest release tag is the floor as well.
+  // A feed can be lost by a failed upload (an upload may stop unfinished, and
+  // a feed is removed before it is uploaded again); a published release
+  // cannot, so the newest release tag is the floor as well.
   const readFeeds = () => {
     const found = readRelease(gh, repository, FEEDS);
     if (found === null)
@@ -342,54 +384,289 @@ export function release({
       );
     return found;
   };
-  const latest = readFeeds();
-  const publishedTags = readPublishedTags(gh, repository);
   const feedFiles = readdirSync(feeds).toSorted();
+  const feedDigests = new Map(
+    feedFiles.map((name) => [name, `sha256:${sha256File(path.join(feeds, name))}`]),
+  );
+  // A feed holds what this build announces only when GitHub's checksum of it
+  // is the one of the file to write; a feed without a checksum is written
+  // again.
+  const holds = (name, file) => file.state === UPLOADED && file.digest === feedDigests.get(name);
+  // The bytes of an uploaded file, read at its address.
+  const readBytes = (from, { name, digest, address }) => {
+    const done = gh(["api", "-H", "Accept: application/octet-stream", address]);
+    if (done.status !== 0) fail(`cannot read ${name} in ${from}: ${said(done)}`);
+    const bytes = Buffer.from(done.stdout, "utf8");
+    if (typeof digest === "string" && sha256Of(bytes) !== digest)
+      fail(`GitHub gave other bytes for ${name} in ${from} than its checksum ${digest}`);
+    return bytes;
+  };
   let reads = 0;
   // A feed that already holds the bytes to write is left alone, so a rerun
   // of a finished publication does not risk a working feed.
-  const planFeeds = (found) => {
+  const planFeeds = () => {
+    const found = readFeeds();
     const announced = path.join(work, `announced-${(reads += 1)}`);
     mkdirSync(announced);
-    const unfinished = [];
-    const current = [];
+    const replaced = [];
+    const stale = [];
     for (const name of feedFiles) {
       const file = found.assets.get(name);
-      if (file === undefined) continue;
-      if (file.state === UPLOADED) current.push(name);
-      else unfinished.push(unfinishedOf(FEEDS, name, file));
+      if (file === undefined) {
+        stale.push(name);
+        continue;
+      }
+      const judged = judge(FEEDS, name, file);
+      if (judged.state === UPLOADED)
+        writeFileSync(path.join(announced, name), readBytes(FEEDS, judged));
+      if (!holds(name, file)) {
+        replaced.push(judged);
+        stale.push(name);
+      }
     }
-    if (current.length > 0) {
-      const download = gh([
-        "release",
-        "download",
-        FEEDS,
-        ...current.flatMap((name) => ["--pattern", name]),
-        "--dir",
-        announced,
-        "--repo",
-        repository,
-      ]);
-      if (download.status !== 0) fail(`cannot read ${FEEDS}: ${said(download)}`);
-    }
+    // Listed after the bytes, so a release published while they were read
+    // counts.
+    const publishedTags = readPublishedTags(gh, repository);
     try {
       checkFeedsMoveForward(version, announced, publishedTags);
     } catch (error) {
       fail(`the feeds in ${FEEDS} only move forward:\n${error.message}`);
     }
-    const stale = feedFiles.filter(
-      (name) =>
-        !current.includes(name) ||
-        !readFileSync(path.join(announced, name)).equals(readFileSync(path.join(feeds, name))),
-    );
-    return { unfinished, stale };
+    return { replaced, stale };
   };
-  let announcing = planFeeds(latest);
+
+  // Removes the judged file only while its address still answers with it;
+  // false when it changed or went meanwhile. A dry run reads it the same way
+  // and removes nothing. write() runs right before the removal is sent.
+  const removed = (from, judged, write) => {
+    const { name, state, address } = judged;
+    const now = gh(["api", address]);
+    if (now.status !== 0) {
+      if (notFound(now)) return false;
+      fail(`cannot read ${what(judged)} in ${from} again: ${said(now)}`);
+    }
+    let file;
+    try {
+      file = JSON.parse(now.stdout);
+    } catch (error) {
+      fail(`cannot read ${what(judged)} in ${from} again: ${error.message}`);
+    }
+    if (typeof file !== "object" || file === null || typeof file.state !== "string")
+      fail(`cannot read ${what(judged)} in ${from} again: GitHub answered no file at ${address}`);
+    if (
+      String(file.id) !== judged.id ||
+      file.name !== name ||
+      file.state !== state ||
+      (state === UPLOADED && file.digest !== judged.digest)
+    )
+      return false;
+    write?.();
+    if (dryRun) return true;
+    const done = gh(["api", "-X", "DELETE", address]);
+    if (done.status !== 0) {
+      if (notFound(done)) return false;
+      fail(`cannot remove ${what(judged)} (state ${state}) from ${from}: ${said(done)}`);
+    }
+    log(
+      state === UPLOADED
+        ? `removed ${name} from ${from} to replace it`
+        : `removed the unfinished ${name} (state ${state}) from ${from}`,
+    );
+    return true;
+  };
+  // An upload never goes over a name: a file that took one meanwhile stays.
+  const uploadInto = (from, names, folder, failure) => {
+    const done = gh([
+      "release",
+      "upload",
+      from,
+      ...names.map((name) => path.join(folder, name)),
+      "--repo",
+      repository,
+    ]);
+    if (done.status === 0) return undefined;
+    if (nameTaken(done))
+      return `a file named as one of ${names.join(", ")} was attached to ${from} meanwhile`;
+    return fail(`${failure}: ${said(done)}`);
+  };
+  // A change met while acting makes the picture be read anew and the plan be
+  // made by the same rules; a second change stops the run.
+  const settle = (from, plan, picture, act) => {
+    for (let again = false; ; again = true) {
+      const change = act(plan);
+      if (change === undefined) return plan;
+      if (again) fail(`${change}, also after ${from} was read again; a rerun reads it again`);
+      log(`${change}; reading ${from} again`);
+      plan = picture();
+    }
+  };
+  const changed = (from, judgedFiles, write) => {
+    const file = judgedFiles.find((judged) => !removed(from, judged, write));
+    return file === undefined ? undefined : `${what(file)} in ${from} changed meanwhile`;
+  };
+  const actOwn = ({ pending, unfinished }) =>
+    changed(tag, unfinished) ??
+    (dryRun || pending.length === 0
+      ? undefined
+      : uploadInto(tag, pending, upload, `cannot upload ${pending.join(", ")} to ${tag}`));
+
+  // What the feeds announce is checked as a whole, as late as it can be:
+  // the release of the tag is the one this run planned against, public,
+  // a pre-release and holding every file, the tag is at the build commit,
+  // no published release is newer, and, in the last read, each feed holds
+  // what this build announces. A problem with a file of this build is put
+  // right by a rerun; any other only by the run of a newer build.
+  let releaseId;
+  const readAnnouncement = (last) => {
+    const problems = [];
+    const ofBuild = (text, rerun = false) =>
+      problems.push({ text, kind: rerun ? "file" : "release" });
+    const found = readRelease(gh, repository, tag);
+    if (found === null) ofBuild(`there is no release ${tag}`);
+    else {
+      releaseId ??= found.id;
+      if (found.id !== releaseId)
+        ofBuild(
+          `${tag} is release ${found.id}, not release ${releaseId} this run checked: it was deleted and created again`,
+        );
+      if (found.draft) ofBuild(`${tag} is a draft`);
+      else if (!found.prerelease)
+        ofBuild(`${tag} is not a pre-release; ${prerelease} makes it one`);
+      for (const name of files) {
+        const file = found.assets.get(name);
+        if (file === undefined) ofBuild(`${name} is missing`, true);
+        else if (file.state !== UPLOADED)
+          ofBuild(`${name} is not fully uploaded (state ${file.state})`, true);
+        else if (file.digest !== digests.get(name))
+          ofBuild(`${name} has the digest ${file.digest}, not ${digests.get(name)}`);
+      }
+    }
+    const tagged = readTag(gh, repository, tag);
+    if (tagged !== commit)
+      ofBuild(tagged === null ? `there is no tag ${tag}` : `${tag} points at ${tagged}`);
+    try {
+      checkFeedsMoveForward(version, noFeeds, readPublishedTags(gh, repository));
+    } catch (error) {
+      problems.push({ text: error.message, kind: "newer" });
+    }
+    if (!last) return problems;
+    const latest = readFeeds();
+    for (const name of feedFiles) {
+      const file = latest.assets.get(name);
+      const text =
+        file === undefined
+          ? `${name} is missing`
+          : file.state !== UPLOADED
+            ? `${name} is not fully uploaded (state ${file.state})`
+            : holds(name, file)
+              ? undefined
+              : `${name} has the digest ${file.digest}, not ${feedDigests.get(name)}`;
+      if (text !== undefined) problems.push({ text, kind: "feed" });
+    }
+    return problems;
+  };
+  let feedWrites = 0;
+  const failOn = (problems, last) => {
+    if (problems.length === 0) return;
+    const texts = (kinds) =>
+      problems.filter(({ kind }) => kinds.includes(kind)).map(({ text }) => text);
+    if (!last && feedWrites === 0) {
+      const build = texts(["release", "file"]);
+      const newer = texts(["newer"]);
+      fail(
+        [
+          ...(build.length === 0
+            ? []
+            : [
+                `${tag} does not read back as a published pre-release of the build with every file:`,
+                ...build,
+              ]),
+          ...(newer.length === 0 ? [] : [`the feeds in ${FEEDS} only move forward:`, ...newer]),
+          `The feeds in ${FEEDS} were not touched; a rerun checks the release again`,
+        ].join("\n"),
+      );
+    }
+    const announced = problems
+      .filter(({ kind }) => kind !== "feed")
+      .map(({ text, kind }) =>
+        kind === "file"
+          ? `${text}; a rerun of this build uploads it and puts the feeds right`
+          : `${text}; only the run of a newer build puts the feeds right`,
+      );
+    const lost = texts(["feed"]);
+    fail(
+      [
+        ...(announced.length === 0
+          ? []
+          : [`the feeds in ${FEEDS} may now announce ${version} although:`, ...announced]),
+        ...(lost.length === 0
+          ? []
+          : [
+              `the feeds in ${FEEDS} do not read back as announcing ${version}:`,
+              ...lost,
+              "A rerun reads the feeds again and completes them",
+            ]),
+      ].join("\n"),
+    );
+  };
+
+  const start = readBuild();
+  const first = start.found === null ? null : planRelease(start.found);
+  planFeeds();
+
+  // A dry run goes the way a publication goes and leaves the writes out; it
+  // cannot read the release of the tag as an upload into it would leave it.
+  let own = null;
+  if (first !== null) own = settle(tag, readOwnPlan(), readOwnPlan, actOwn);
+  else if (!dryRun) {
+    // GITHUB_TOKEN may not create a release on a commit that changes workflow
+    // files (HTTP 403). A maintainer then pushes the tag at the build commit
+    // and either creates the pre-release on it or runs this again, which
+    // creates it there.
+    const done = gh([
+      "release",
+      "create",
+      tag,
+      "--prerelease",
+      "--target",
+      commit,
+      "--title",
+      `1ma ${version}`,
+      "--notes-file",
+      notesFile,
+      ...files.map((name) => path.join(upload, name)),
+      "--repo",
+      repository,
+    ]);
+    if (done.status !== 0) fail(`cannot create the pre-release ${tag}: ${said(done)}`);
+  }
+  releaseId = own?.id;
+  const blind = dryRun && (own === null || own.pending.length > 0);
+  if (!blind) {
+    failOn(readAnnouncement(false), false);
+    if (!dryRun) log(`published ${tag}`);
+  }
+
+  const actFeeds = ({ replaced, stale }) => {
+    let checked = false;
+    const write = () => {
+      if (!checked && !blind) failOn(readAnnouncement(false), false);
+      checked = true;
+      if (!dryRun) feedWrites += 1;
+    };
+    const change = changed(FEEDS, replaced, write);
+    if (change !== undefined || stale.length === 0) return change;
+    write();
+    return dryRun
+      ? undefined
+      : uploadInto(FEEDS, stale, feeds, `cannot upload the feeds to ${FEEDS}`);
+  };
+  const { replaced, stale } = settle(FEEDS, planFeeds(), planFeeds, actFeeds);
 
   if (dryRun) {
     log(`dry run: would publish ${tag} at ${commit} from attempt ${attempt} of run ${runId} with:`);
     log(sums.trimEnd());
-    if (published === null && tagged !== null)
+    if (own === null && start.tagged !== null)
       log(`${tag} exists at the build commit; would create the pre-release on it`);
     if (own !== null) {
       for (const { name, state } of own.unfinished)
@@ -402,9 +679,14 @@ export function release({
           : `${tag} already exists; would upload ${own.pending.join(", ")}`,
       );
     }
-    for (const { name, state } of announcing.unfinished)
-      log(`${FEEDS} has an unfinished ${name} (state ${state}), counted as lost; would remove it`);
-    if (announcing.stale.length === 0) log(`the feeds in ${FEEDS} already point at it`);
+    if (blind) log(`would read ${tag} back after the upload and check it before the feeds`);
+    for (const { name, state } of replaced)
+      log(
+        state === UPLOADED
+          ? `${FEEDS} has a different ${name}; would replace it`
+          : `${FEEDS} has an unfinished ${name} (state ${state}), counted as lost; would remove it and upload it again`,
+      );
+    if (stale.length === 0) log(`the feeds in ${FEEDS} already point at it`);
     else {
       log(`and point ${FEEDS} at it:`);
       log(serverFeed.trimEnd());
@@ -412,123 +694,12 @@ export function release({
     return { tag, published: false };
   }
 
-  const write = (args, what) => {
-    const done = gh([...args, "--repo", repository]);
-    if (done.status !== 0) fail(`${what}: ${said(done)}`);
-  };
-  // Removes the file only while its address still answers with an unfinished
-  // upload; false when it was finished or removed meanwhile.
-  const removed = (from, { name, address }) => {
-    const now = gh(["api", address]);
-    if (now.status !== 0) {
-      if (notFound(now)) return false;
-      fail(`cannot read the unfinished ${name} in ${from} again: ${said(now)}`);
-    }
-    let state;
-    try {
-      ({ state } = JSON.parse(now.stdout));
-    } catch (error) {
-      fail(`cannot read the unfinished ${name} in ${from} again: ${error.message}`);
-    }
-    if (state === UPLOADED) return false;
-    const done = gh(["api", "-X", "DELETE", address]);
-    if (done.status !== 0) {
-      if (notFound(done)) return false;
-      fail(`cannot remove the unfinished ${name} (state ${state}) from ${from}: ${said(done)}`);
-    }
-    log(`removed the unfinished ${name} (state ${state}) from ${from}`);
-    return true;
-  };
-  // A file that changed meanwhile makes the plan be made anew from a fresh
-  // read, by the same rules; a second change stops the run.
-  const clear = (from, plan, replan) => {
-    for (let again = false; ; again = true) {
-      const changed = plan.unfinished.find((file) => !removed(from, file));
-      if (changed === undefined) return plan;
-      if (again)
-        fail(
-          `the unfinished ${changed.name} in ${from} changed meanwhile, also after ${from} was read again; a rerun reads it again`,
-        );
-      log(`the unfinished ${changed.name} in ${from} changed meanwhile; reading ${from} again`);
-      plan = replan();
-    }
-  };
-  const paths = (names) => names.map((name) => path.join(upload, name));
-  if (published === null) {
-    // GITHUB_TOKEN may not create a release on a commit that changes workflow
-    // files (HTTP 403). A maintainer then pushes the tag at the build commit
-    // and either creates the pre-release on it or runs this again, which
-    // creates it there.
-    write(
-      [
-        "release",
-        "create",
-        tag,
-        "--prerelease",
-        "--target",
-        commit,
-        "--title",
-        `1ma ${version}`,
-        "--notes-file",
-        notesFile,
-        ...paths(files),
-      ],
-      `cannot create the pre-release ${tag}`,
-    );
-  } else {
-    own = clear(tag, own, () => {
-      const found = readOwn();
-      if (found === null) fail(`release ${tag} was deleted meanwhile; a rerun creates it`);
-      return planRelease(found);
-    });
-    if (own.pending.length > 0)
-      write(
-        ["release", "upload", tag, ...paths(own.pending)],
-        `cannot upload ${own.pending.join(", ")} to ${tag}`,
-      );
-  }
-
-  // The feeds announce only a public pre-release that holds every file.
-  const problems = [];
-  const after = readRelease(gh, repository, tag);
-  const afterTag = readTag(gh, repository, tag);
-  if (afterTag !== commit)
-    problems.push(afterTag === null ? `there is no tag ${tag}` : `${tag} points at ${afterTag}`);
-  if (after === null) problems.push(`there is no release ${tag}`);
-  else {
-    if (after.draft) problems.push(`${tag} is a draft`);
-    else if (!after.prerelease)
-      problems.push(`${tag} is not a pre-release; ${prerelease} makes it one`);
-    for (const name of files) {
-      const found = after.assets.get(name);
-      if (found === undefined) problems.push(`${name} is missing`);
-      else if (found.state !== UPLOADED)
-        problems.push(`${name} is not fully uploaded (state ${found.state})`);
-      else if (found.digest !== digests.get(name))
-        problems.push(`${name} has the digest ${found.digest}, not ${digests.get(name)}`);
-    }
-  }
-  if (problems.length > 0)
-    fail(
-      `${tag} does not read back as a published pre-release of the build with every file:\n${problems.join("\n")}\nThe feeds in ${FEEDS} were not touched; a rerun checks the release again`,
-    );
-  log(`published ${tag}`);
-  announcing = clear(FEEDS, announcing, () => planFeeds(readFeeds()));
-  if (announcing.stale.length === 0) {
-    log(`the feeds in ${FEEDS} already point at ${tag}; nothing uploaded`);
-    return { tag, published: true };
-  }
-  write(
-    [
-      "release",
-      "upload",
-      FEEDS,
-      ...announcing.stale.map((name) => path.join(feeds, name)),
-      "--clobber",
-    ],
-    `cannot upload the feeds to ${FEEDS}`,
+  failOn(readAnnouncement(true), true);
+  log(
+    feedWrites === 0
+      ? `the feeds in ${FEEDS} already point at ${tag}; nothing uploaded`
+      : `${FEEDS} now announces ${version}`,
   );
-  log(`${FEEDS} now announces ${version}`);
   return { tag, published: true };
 }
 
