@@ -17,17 +17,17 @@ function tree(registry) {
 }
 
 describe("embedding the 1ma plugins", () => {
-  test("reads the names patch 0014 registers from the bb tree", () => {
+  test("reads the names the built-in 1ma plugins patch registers from the bb tree", () => {
     const dir = tree(
       `export const ONE_MA_PLUGINS: readonly BundledPluginDefinition[] = [\n  "1ma-brand",\n  "1ma-theme",\n].map((name) => ({ name }));\n`,
     );
     assert.deepEqual(registeredNames(dir), ["1ma-brand", "1ma-theme"]);
   });
 
-  test("refuses a tree without patch 0014", () => {
+  test("refuses a tree without the built-in 1ma plugins patch", () => {
     assert.throws(
       () => registeredNames(tree("export const BUILTIN_PLUGINS = [];\n")),
-      /patch 0014/u,
+      /no ONE_MA_PLUGINS/u,
     );
   });
 

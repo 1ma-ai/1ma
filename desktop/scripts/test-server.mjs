@@ -1,5 +1,5 @@
-// Starts packed 1ma servers for the checks that run in CI only
-// (smoke-builtin-plugins.mjs, check-rollback.mjs).
+// Starts a packed 1ma server for the check that runs in CI only
+// (smoke-builtin-plugins.mjs).
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import path from "node:path";

@@ -291,7 +291,7 @@
     },
     {
       "text": "A star on GitHub helps bb grow.",
-      "reason": "bb's GitHub star prompt links to github.com/get-bb/bb; it is off by default in 1ma (patch 0007) and, when turned on, must name the product whose repository it asks to star"
+      "reason": "bb's GitHub star prompt links to github.com/get-bb/bb; it is off by default in 1ma (the star prompt patch) and, when turned on, must name the product whose repository it asks to star"
     }
   ],
   "replace": [

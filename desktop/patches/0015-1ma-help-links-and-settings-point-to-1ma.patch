@@ -1250,7 +1250,7 @@ index bdddc73..500cd4a 100644
        kind: "plugin",
        key: footerPreferenceKey(slot),
 diff --git a/apps/desktop/src/menu.ts b/apps/desktop/src/menu.ts
-index 7e6924a..358c65b 100644
+index 43cc7db..8c12f37 100644
 --- a/apps/desktop/src/menu.ts
 +++ b/apps/desktop/src/menu.ts
 @@ -20,7 +20,8 @@ const OPEN_SETTINGS_MENU_LABEL = "Settings…";
@@ -1264,7 +1264,7 @@ index 7e6924a..358c65b 100644
  const TOGGLE_DEVELOPER_TOOLS_ACCELERATOR = "Command+Option+I";
  const RELOAD_ACCELERATOR = "CommandOrControl+R";
 diff --git a/apps/desktop/test/menu.test.ts b/apps/desktop/test/menu.test.ts
-index 25f1a1a..4f3edb7 100644
+index b05ef42..4321a85 100644
 --- a/apps/desktop/test/menu.test.ts
 +++ b/apps/desktop/test/menu.test.ts
 @@ -4,9 +4,10 @@ import type { BaseWindow, MenuItemConstructorOptions } from "electron";
@@ -1279,7 +1279,7 @@ index 25f1a1a..4f3edb7 100644
  
  import {
    buildApplicationMenuTemplate,
-@@ -403,6 +404,22 @@ describe("application menu", () => {
+@@ -405,6 +406,22 @@ describe("application menu", () => {
      },
    );
  
