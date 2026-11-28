@@ -1009,7 +1009,7 @@ index 2a7e6cc..324a142 100644
 +  });
 +});
 diff --git a/apps/server/src/services/plugins/builtin-registry.ts b/apps/server/src/services/plugins/builtin-registry.ts
-index 21c84af..1bf4f46 100644
+index e35c18d..b57d6c2 100644
 --- a/apps/server/src/services/plugins/builtin-registry.ts
 +++ b/apps/server/src/services/plugins/builtin-registry.ts
 @@ -1,7 +1,7 @@
@@ -1036,7 +1036,7 @@ index 21c84af..1bf4f46 100644
  /**
   * The 1ma plugins. They live in the 1ma repository, not in this workspace:
   * the 1ma build prepares each one with this tree's prepare-bundled and puts
-@@ -310,9 +318,9 @@ export const ONE_MA_PLUGINS: readonly BundledPluginDefinition[] = [
+@@ -312,9 +320,9 @@ export const ONE_MA_PLUGINS: readonly BundledPluginDefinition[] = [
    autoInstall: true,
  }));
  
@@ -1048,7 +1048,7 @@ index 21c84af..1bf4f46 100644
    ...ONE_MA_PLUGINS,
  ];
  
-@@ -384,7 +392,7 @@ export function resolveBuiltinPluginRootPath(name: string): string {
+@@ -386,7 +394,7 @@ export function resolveBuiltinPluginRootPath(name: string): string {
  }
  
  export function listBundledPluginRegistrations(): BundledPluginRegistration[] {
@@ -1379,7 +1379,7 @@ index 6071b6a..a5bc2dc 100644
      const dataDir = join(workDir, "data");
      const secretsDir = join(dataDir, "plugins", "builtin-fixture", "secrets");
 diff --git a/apps/server/test/services/plugins/builtin-registry.test.ts b/apps/server/test/services/plugins/builtin-registry.test.ts
-index 0599b3e..110b8c9 100644
+index 28c8078..9f45def 100644
 --- a/apps/server/test/services/plugins/builtin-registry.test.ts
 +++ b/apps/server/test/services/plugins/builtin-registry.test.ts
 @@ -1,11 +1,13 @@
@@ -1396,7 +1396,7 @@ index 0599b3e..110b8c9 100644
    listBundledPluginRegistrations,
    listShippedPluginRegistrations,
    resolveBuiltinPluginRootPathForModuleDir,
-@@ -77,14 +79,46 @@ describe("1ma plugins", () => {
+@@ -79,14 +81,46 @@ describe("1ma plugins", () => {
      }
      expect(
        listShippedPluginRegistrations().map((plugin) => plugin.pluginId),

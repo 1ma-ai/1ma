@@ -3,29 +3,30 @@ From: 1ma <hello@1ma.ai>
 Date: Sat, 14 Nov 2026 22:24:59 +0100
 Subject: [PATCH] 1ma: the 1ma plugins are built in
 
-1ma Brand, Theme, Server Switcher and Auto Updates ship inside the app and
-update with it. They are a separate list, ONE_MA_PLUGINS: they live in the
-1ma repository, not in this workspace, and the 1ma build stages each
-prepared runtime at .1ma-plugins/<name>/.bundled-runtime, outside plugins/.
-SHIPPED_PLUGINS and listShippedPluginRegistrations join them to bb's bundled
-plugins only where plugins are packaged, installed, shadow-checked and
-ordered; bb's catalog, telemetry and checks of its own bundled plugins keep
-using bb's list.
+1ma Brand, Theme, Server Switcher, Auto Updates, Bots and Sidebar ship
+inside the app and update with it. They are a separate list,
+ONE_MA_PLUGINS: they live in the 1ma repository, not in this workspace,
+and the 1ma build stages each prepared runtime at
+.1ma-plugins/<name>/.bundled-runtime, outside plugins/. SHIPPED_PLUGINS
+and listShippedPluginRegistrations join them to bb's bundled plugins
+only where plugins are packaged, installed, shadow-checked and ordered;
+bb's catalog, telemetry and checks of its own bundled plugins keep using
+bb's list.
 ---
- .../src/services/plugins/builtin-registry.ts  | 33 +++++++++++++++++++
+ .../src/services/plugins/builtin-registry.ts  | 35 +++++++++++++++++++
  .../services/plugins/plugin-registration.ts   |  4 +--
  .../src/services/plugins/plugin-runtime.ts    |  4 +--
  .../src/services/plugins/plugin-service.ts    |  4 +--
- .../services/plugins/builtin-registry.test.ts | 24 ++++++++++++++
+ .../services/plugins/builtin-registry.test.ts | 26 ++++++++++++++
  packages/bundled-plugins/build.ts             | 12 +++++--
  turbo.json                                    |  3 +-
- 7 files changed, 74 insertions(+), 10 deletions(-)
+ 7 files changed, 78 insertions(+), 10 deletions(-)
 
 diff --git a/apps/server/src/services/plugins/builtin-registry.ts b/apps/server/src/services/plugins/builtin-registry.ts
-index 5f831c6..21c84af 100644
+index 5f831c6..e35c18d 100644
 --- a/apps/server/src/services/plugins/builtin-registry.ts
 +++ b/apps/server/src/services/plugins/builtin-registry.ts
-@@ -291,6 +291,31 @@ export const BUNDLED_PLUGINS: readonly BundledPluginDefinition[] = [
+@@ -291,6 +291,33 @@ export const BUNDLED_PLUGINS: readonly BundledPluginDefinition[] = [
    ...OFFICIAL_PLUGINS,
  ];
  
@@ -41,6 +42,8 @@ index 5f831c6..21c84af 100644
 +  "1ma-theme",
 +  "1ma-server-switcher",
 +  "1ma-auto-updates",
++  "1ma-bots",
++  "1ma-sidebar",
 +].map((name) => ({
 +  name,
 +  pluginId: name,
@@ -57,7 +60,7 @@ index 5f831c6..21c84af 100644
  export interface RetiredBundledPlugin {
    pluginId: string;
    successorPluginId: string;
-@@ -364,3 +389,11 @@ export function listBundledPluginRegistrations(): BundledPluginRegistration[] {
+@@ -364,3 +391,11 @@ export function listBundledPluginRegistrations(): BundledPluginRegistration[] {
      rootDir: resolveBuiltinPluginRootPath(plugin.name),
    }));
  }
@@ -136,7 +139,7 @@ index d5da1d6..ec9f3b2 100644
      deps.retiredBundledPlugins ?? RETIRED_BUNDLED_PLUGINS;
    function isOrphanedBuiltinRow(row: InstalledPluginRow): boolean {
 diff --git a/apps/server/test/services/plugins/builtin-registry.test.ts b/apps/server/test/services/plugins/builtin-registry.test.ts
-index 8fed705..0599b3e 100644
+index 8fed705..28c8078 100644
 --- a/apps/server/test/services/plugins/builtin-registry.test.ts
 +++ b/apps/server/test/services/plugins/builtin-registry.test.ts
 @@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -149,7 +152,7 @@ index 8fed705..0599b3e 100644
    resolveBuiltinPluginRootPathForModuleDir,
  } from "../../../src/services/plugins/builtin-registry.js";
  import { resolveBundledMarketplaceDirectory } from "../../../src/services/plugin-catalog/bundled-marketplace.js";
-@@ -61,6 +64,27 @@ describe("bundled plugin ids", () => {
+@@ -61,6 +64,29 @@ describe("bundled plugin ids", () => {
    });
  });
  
@@ -160,6 +163,8 @@ index 8fed705..0599b3e 100644
 +      "1ma-theme",
 +      "1ma-server-switcher",
 +      "1ma-auto-updates",
++      "1ma-bots",
++      "1ma-sidebar",
 +    ]);
 +    for (const plugin of ONE_MA_PLUGINS) {
 +      expect(plugin).toMatchObject({ name: plugin.pluginId, autoInstall: true, defaultEnabled: true });
