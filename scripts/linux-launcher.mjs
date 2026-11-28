@@ -44,14 +44,17 @@ the user the server runs as, not as root; each command takes only its own option
   node scripts/linux-launcher.mjs gone --record <file> [--not-ours <pid>@<start>]...
       after the stop: exit 0 when nothing may be left; --not-ours sets aside a
       program that runs from the server's builds or lost its parent, once looked
-      at, named by the <pid>@<start> its line prints. Only reads.
+      at, named by the <pid>@<start> its line prints, or a bb command with all
+      it started, named by the <pid>@<start> its lines give. Only reads.
   node scripts/linux-launcher.mjs end --record <file> [--also <pid>@<start>]...
       ends what is still running or was started by it, and the programs given
       with --also, by the <pid>@<start> of their line, that run from the
-      server's builds or lost their parent; then answers as gone. A program
-      whose number now has another start time is refused. Run it from outside
-      the stopped server: it refuses to end itself. Exit 2 also when a number
-      changed hands between the check and a signal
+      server's builds or lost their parent; then answers as gone, counting
+      again what gone set aside. A program whose number now has another start
+      time, a bb command and, while another launcher holds the data folder,
+      every --also are refused. Run it from outside the stopped server: it
+      refuses to end itself. Exit 2 also when a number changed hands between
+      the check and a signal
   node scripts/linux-launcher.mjs unlock --record <file>
       removes bb-app-update-shim.json left by the launcher that ended, whose
       number another program now has
@@ -103,6 +106,8 @@ function readRecord(values) {
   return checkRecord(record, values.record);
 }
 
+const shimOf = (record) => readOr(path.join(record.dataDir, "bb-app-update-shim.json"), null);
+
 function answer(record, notOurs) {
   const { code, lines } = gone({
     record,
@@ -110,7 +115,7 @@ function answer(record, notOurs) {
     notOurs,
     table: readTable(),
     bootId: linuxBootId(),
-    shim: readOr(path.join(record.dataDir, "bb-app-update-shim.json"), null),
+    shim: shimOf(record),
     exists: pidExists,
     identity,
   });
@@ -158,6 +163,8 @@ async function main([command, ...rest]) {
       also: tokens(values, "also"),
       readTable,
       identity,
+      shim: shimOf(record),
+      exists: pidExists,
       signal,
       sleep,
       log: (line) => console.log(line),

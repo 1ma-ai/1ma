@@ -136,6 +136,13 @@ const behindALink = (folder) => folder.replace("/home/dev/.local/opt", "/mnt/dis
 
 const outside = (state) => state.table.filter((one) => one.pid === 1 || one.pid === 900);
 
+/** `bb thread list` run by the agent on the host: bb's CLI hands the work to the one beside the daemon. */
+const bbCommand = () => [
+  p(950, 900, 9950, NODE, `${INSTALLED}/node_modules/bb-app/dist/bb.js`, "thread", "list"),
+  p(951, 950, 9951, NODE, `${INSTALLED}/node_modules/bb-app/host-daemon/dist/bb`, "thread", "list"),
+  p(952, 951, 9952, "/usr/bin/git", "status"),
+];
+
 describe("the pause of automatic installation", () => {
   const paused = {
     activity: { phase: "idle" },
@@ -455,30 +462,48 @@ describe("what is left after the stop", () => {
     assert.deepEqual(kinds(left), [["from-build", 555]]);
     assert.equal(
       left[0].text,
-      `runs a program from the server's builds in ${INSTALLED}, ${shown(worker, "555@9000")}: it is a piece of the stopped server, or a command run from the same build after the stop (the bb command runs from it)`,
+      `runs a program from the server's builds in ${INSTALLED}, ${shown(worker, "555@9000")}: it is a piece of the stopped server, unless a launcher was started from this build after the stop`,
     );
     const binary = p(556, 1, 9001, `${INSTALLED}/node_modules/@bb/tools/bin/rg`, "--files");
     assert.deepEqual(kinds(after(state, [...outside(state), binary])), [["from-build", 556]]);
   });
 
-  it("does not call a bb command run from the runtime build the stopped server's", () => {
+  it("is a bb command, with all it started, when the stopped server did not start it", () => {
     const state = updated();
-    const cli = p(
-      950,
-      900,
-      9950,
-      NODE,
-      `${INSTALLED}/node_modules/bb-app/dist/bb.js`,
-      "thread",
-      "list",
-    );
-    const left = after(state, [...outside(state), cli]);
-    assert.deepEqual(kinds(left), [["from-build", 950]]);
-    assert.doesNotMatch(left[0].text, /it is the stopped server's/);
-    assert.match(
+    const table = [...outside(state), ...bbCommand()];
+    const left = after(state, table);
+    assert.deepEqual(kinds(left), [
+      ["command", 950],
+      ["command", 951],
+      ["command", 952],
+    ]);
+    assert.equal(
       left[0].text,
-      /process 950@9950: \S+node \S+\/dist\/bb\.js: it is a piece of the stopped server, or a command run from the same build after the stop \(the bb command runs from it\)$/,
+      `is a bb command run from ${INSTALLED}, process 950@9950: ${NODE} ${INSTALLED}/node_modules/bb-app/dist/bb.js: the stopped server did not start it, so it is not the server's: wait for it to end, or set it aside with gone --not-ours 950@9950`,
     );
+    assert.match(
+      left[1].text,
+      /^is part of the bb command 950@9950, process 951@9951: \S+node \S+\/host-daemon\/dist\/bb: .*gone --not-ours 950@9950$/,
+    );
+    const answer = (notOurs) =>
+      gone({
+        record: recorded(state),
+        uid: UID,
+        notOurs,
+        bootId: BOOT,
+        shim: null,
+        ...machine(table),
+      });
+    assert.equal(answer([]).code, 1);
+    const aside = answer([token(950, 9950)]);
+    assert.equal(aside.code, 0);
+    assert.match(aside.lines[0], /other than the 3 looked at/);
+    assert.deepEqual(answer([token(951, 9951)]).lines, [
+      left[0].text,
+      ...left.slice(1).map((line) => `looked at, not the server's: ${line.text}`),
+    ]);
+    const direct = p(953, 900, 9953, NODE, `${INSTALLED}/node_modules/bb-app/host-daemon/dist/bb`);
+    assert.deepEqual(kinds(after(state, [...outside(state), direct])), [["command", 953]]);
   });
 
   it("counts a program of an older installed version that lost its parent before the record", () => {
@@ -920,6 +945,126 @@ describe("ending what is left", () => {
     const third = stage([...outside(state), worker, outsider]);
     await end({ record: recorded(state), bootId: BOOT, uid: UID, self: 802, ...third });
     assert.deepEqual(third.state.sent, [[300, "SIGTERM"]]);
+  });
+
+  it("refuses --also for a bb command, sending nothing", async () => {
+    const state = updated();
+    for (const pid of [950, 951]) {
+      const run = stage([...outside(state), ...bbCommand()]);
+      await assert.rejects(
+        end({
+          record: recorded(state),
+          bootId: BOOT,
+          uid: UID,
+          also: [token(pid, pid === 950 ? 9950 : 9951)],
+          ...run,
+        }),
+        new RegExp(
+          `^Error: --also ${pid}@\\d+: this process is a bb command or part of one, not the server's`,
+        ),
+      );
+      assert.deepEqual(run.state.sent, []);
+    }
+  });
+
+  it("ends a bb command the stopped server started, without --also", async () => {
+    const state = updated();
+    const worker = { ...state.table.find((one) => one.pid === 300), ppid: 1 };
+    const cli = p(960, 300, 9600, NODE, `${INSTALLED}/node_modules/bb-app/dist/bb.js`, "thread");
+    assert.deepEqual(kinds(after(state, [...outside(state), worker, cli])), [
+      ["recorded", 300],
+      ["child", 960],
+    ]);
+    const run = stage([...outside(state), worker, cli]);
+    await end({ record: recorded(state), bootId: BOOT, uid: UID, ...run });
+    assert.deepEqual(run.state.sent, [
+      [300, "SIGTERM"],
+      [960, "SIGTERM"],
+    ]);
+  });
+
+  it("ends with --also a worker of an installed version that lost its parent", async () => {
+    const state = updated();
+    const worker = p(
+      555,
+      1,
+      9000,
+      NODE,
+      `${INSTALLED}/node_modules/bb-app/host-daemon/dist/bb-plugin-host-worker.mjs`,
+    );
+    const daemon = p(
+      556,
+      1,
+      9001,
+      NODE,
+      `${VERSIONS}/0.49.1-1ma.123.1/node_modules/bb-app/host-daemon/dist/daemon-bundle.mjs`,
+    );
+    const left = after(state, [...outside(state), worker, daemon]);
+    assert.deepEqual(kinds(left), [
+      ["from-build", 555],
+      ["from-build", 556],
+    ]);
+    for (const line of left) assert.doesNotMatch(line.text, /bb command/);
+    const run = stage([...outside(state), worker, daemon]);
+    await end({
+      record: recorded(state),
+      bootId: BOOT,
+      uid: UID,
+      also: [token(555, 9000), token(556, 9001)],
+      ...run,
+    });
+    assert.deepEqual(run.state.sent, [
+      [555, "SIGTERM"],
+      [556, "SIGTERM"],
+    ]);
+  });
+
+  it("refuses every --also while another launcher holds the data folder", async () => {
+    const state = updated();
+    const launcher = p(4101, 900, 9900, "node", `${VERSIONED}/node_modules/.bin/bb-app`);
+    const inner = p(4200, 4101, 9901, NODE, `${INSTALLED}/node_modules/bb-app/dist/bb-app.js`);
+    const table = [...outside(state), launcher, inner];
+    const shim = shimText(4101, `${VERSIONED}/node_modules/.bin/bb-app`);
+    assert.deepEqual(kinds(after(state, table, shim)), [
+      ["from-build", 4200],
+      ["lock-other", 4101],
+    ]);
+    const run = stage(table);
+    await assert.rejects(
+      end({
+        record: recorded(state),
+        bootId: BOOT,
+        uid: UID,
+        also: [token(4200, 9901)],
+        shim,
+        exists: machine(table).exists,
+        ...run,
+      }),
+      /^Error: --also is refused while another launcher holds the data folder: bb-app-update-shim\.json was written after the record/,
+    );
+    assert.deepEqual(run.state.sent, []);
+  });
+
+  it("stops, sending nothing more, when a later read finds the command below what it ends", async () => {
+    const state = updated();
+    const worker = { ...state.table.find((one) => one.pid === 300), ppid: 1, ignoresTerm: true };
+    for (const [self, below] of [
+      [802, []],
+      [803, [p(803, 802, 9803, NODE, "/home/dev/1ma/scripts/linux-launcher.mjs")]],
+    ]) {
+      const command = p(802, 900, 9802, self === 802 ? NODE : "/bin/bash");
+      const run = stage([...outside(state), worker, command, ...below]);
+      run.state.onSleep.push(() => {
+        run.state.table = run.state.table.map((one) =>
+          one.pid === 802 ? { ...one, ppid: 300 } : one,
+        );
+      });
+      await assert.rejects(
+        end({ record: recorded(state), bootId: BOOT, uid: UID, self, ...run }),
+        new RegExp(`this command was started by the server it would end \\(process ${self}\\)`),
+      );
+      assert.deepEqual(run.state.sent, [[300, "SIGTERM"]]);
+    }
   });
 
   it("ends real processes that were written down and leaves one that was not", async (t) => {
