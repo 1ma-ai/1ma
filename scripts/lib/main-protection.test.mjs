@@ -115,7 +115,9 @@ function github(change = () => {}) {
         data: {
           repository: {
             mergeQueue: state.queue,
-            ref: state.branch ? { branchProtectionRule: ruleOf(state.classic) } : null,
+            ref: state.branch
+              ? { branchProtectionRule: state.protection === null ? null : ruleOf(state.classic) }
+              : null,
           },
         },
       });
@@ -280,11 +282,7 @@ describe("comparing GitHub with the file", () => {
     ]);
   });
 
-  test("agrees when no classic rule applies to the branch, and refuses a branch GitHub does not have", () => {
-    const bare = github((state) => {
-      state.classic = null;
-    });
-    assert.equal(bare.call(), 0);
+  test("refuses a branch GraphQL says GitHub does not have", () => {
     const gone = github((state) => {
       state.branch = false;
     });
@@ -440,6 +438,32 @@ describe("comparing GitHub with the file", () => {
     ]);
   });
 
+  for (const [field, malformed] of [
+    ["required_pull_request_reviews", false],
+    ["restrictions", "off"],
+  ]) {
+    test(`refuses to apply from a protection with ${field} of the wrong type`, () => {
+      const hub = github((state) => {
+        state.protection[field] = malformed;
+      });
+      assert.throws(() => hub.call(true), {
+        message: `GET ${PROTECTION}: the answer could not be read (HTTP 200)`,
+      });
+      assert.deepEqual(hub.written(), []);
+    });
+  }
+
+  test("takes null and absent review rules and push restrictions for off", () => {
+    const withNulls = github((state) => {
+      state.protection.required_pull_request_reviews = null;
+      state.protection.restrictions = null;
+    });
+    for (const hub of [github(), withNulls]) {
+      assert.equal(hub.call(true), 0);
+      assert.deepEqual(hub.written(), []);
+    }
+  });
+
   test("does not read Actions settings of the wrong type, and takes one GitHub leaves out for a difference", () => {
     for (const actions of [
       { enabled: "true", allowed_actions: "all", sha_pinning_required: true },
@@ -556,6 +580,38 @@ describe("comparing GitHub with the file", () => {
 });
 
 describe("applying the file", () => {
+  test("sends no write when REST says the branch is unprotected and GraphQL shows a rule", () => {
+    const hub = github((state) => {
+      state.protection = null;
+      state.answers["POST graphql"] = partly((repository) => {
+        repository.ref.branchProtectionRule = ruleOf(state.classic);
+      });
+    });
+    assert.throws(
+      () => hub.call(true),
+      /could not be read: REST returned HTTP 404 \(Branch not protected\), but GraphQL returned branchProtectionRule: an object/u,
+    );
+    assert.deepEqual(hub.written(), []);
+  });
+
+  test("stops after the Actions write when REST shows protection and GraphQL shows no rule", () => {
+    const hub = github((state) => {
+      state.actions.sha_pinning_required = false;
+      state.answers[`PUT ${ACTIONS}`] = (now, write) => {
+        now.answers["POST graphql"] = partly((repository) => {
+          repository.ref.branchProtectionRule = null;
+        });
+        return write();
+      };
+    });
+    assert.throws(
+      () => hub.call(true),
+      /could not be read: REST returned a protection object, but GraphQL returned branchProtectionRule: null/u,
+    );
+    assert.deepEqual(hub.written(), [{ method: "PUT", address: ACTIONS, body: wanted.actions }]);
+    assert.match(hub.output.at(-1), /^Sent actions: GitHub could not be read after it/u);
+  });
+
   test("writes nothing without --apply", () => {
     const hub = github((state) => {
       state.protection = null;

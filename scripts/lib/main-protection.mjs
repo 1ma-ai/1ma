@@ -173,14 +173,14 @@ const actorName = (actor) =>
 
 // What the REST answer for the branch leaves out, in the shape of the file.
 // GitHub applies one classic rule to a branch, the one its ref names.
-function outsideRest(get, { repository, branch }) {
+function outsideRest(get, { repository, branch }, protectedByRest) {
   const [owner, name] = repository.split("/");
   const answer = get("graphql", isObject, {
     method: "POST",
     body: { query: OUTSIDE_REST, variables: { owner, name, branch, ref: `refs/heads/${branch}` } },
   });
-  const unreadable = () =>
-    new Error(`GraphQL: the branch protection rule of ${branch} could not be read`);
+  const unreadable = (detail = "") =>
+    new Error(`GraphQL: the branch protection rule of ${branch} could not be read${detail}`);
   const found = answer?.data?.repository;
   if (
     answer?.errors !== undefined ||
@@ -192,6 +192,13 @@ function outsideRest(get, { repository, branch }) {
   if (found.ref === null) throw new Error(`GraphQL: ${repository} has no branch ${branch}`);
   const rule = found.ref.branchProtectionRule;
   if (!(rule === null || isObject(rule))) throw unreadable();
+  if (protectedByRest !== (rule !== null)) {
+    const rest = protectedByRest ? "a protection object" : `HTTP 404 (${UNPROTECTED})`;
+    throw unreadable(
+      `: REST returned ${rest}, ` +
+        `but GraphQL returned branchProtectionRule: ${rule === null ? "null" : "an object"}`,
+    );
+  }
   const environments = [];
   const actors = [];
   if (rule !== null) {
@@ -259,12 +266,18 @@ const isProtectionOf = (address, wanted) => (value) => {
     ),
     "required_signatures",
   ];
-  const checks = value.required_status_checks;
+  const {
+    required_status_checks: checks,
+    required_pull_request_reviews: reviews,
+    restrictions,
+  } = value;
   return (
     Object.values(value).every(
       (field) => !isObject(field) || !Object.hasOwn(field, "enabled") || isSwitch(field),
     ) &&
     named.every((name) => !Object.hasOwn(value, name) || isSwitch(value[name])) &&
+    (reviews == null || isObject(reviews)) &&
+    (restrictions == null || isObject(restrictions)) &&
     (checks == null ||
       (isObject(checks) && typeof checks.strict === "boolean" && listOf(isCheck)(checks.checks)))
   );
@@ -334,7 +347,7 @@ export function read(gh, wanted) {
       type,
       ruleset,
     })),
-    ...outsideRest(get, wanted),
+    ...outsideRest(get, wanted, live !== null),
   };
 }
 

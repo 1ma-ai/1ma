@@ -237,20 +237,19 @@ const WORK_STEPS = {
   ],
 };
 
-// What desktop-release.yml needs in each artifact it downloads from a Desktop
-// run, by the job of desktop.yml that uploads it: the app, the ZIP and the feed
-// the app updates from, the version feed and the provenance for macOS; the
-// folder the package step fills for the server. The names of the artifacts are
-// read from the `gh run download` lines of the release workflow.
+// What desktop-release.yml needs from the jobs of a Desktop run.
 const RELEASE_INPUTS = {
-  macos: [
-    "bb-src/apps/desktop/release/*.dmg",
-    "bb-src/apps/desktop/release/*.zip",
-    "bb-src/apps/desktop/release/latest-mac.yml",
-    "bb-src/apps/desktop/release/desktop-version.json",
-    "bb-src/1ma-provenance.json",
-  ],
-  "linux-server": ["${{ runner.temp }}/server/*"],
+  macos: {
+    name: "1ma-desktop-macos-arm64",
+    paths: [
+      "bb-src/apps/desktop/release/*.dmg",
+      "bb-src/apps/desktop/release/*.zip",
+      "bb-src/apps/desktop/release/latest-mac.yml",
+      "bb-src/apps/desktop/release/desktop-version.json",
+      "bb-src/1ma-provenance.json",
+    ],
+  },
+  "linux-server": { name: "1ma-server-linux", paths: ["${{ runner.temp }}/server/*"] },
 };
 
 // The events a workflow with a required check starts on, no more and no
@@ -365,16 +364,26 @@ const workStepOf = (key) => {
   return { file, job, name: words.join(" "), runs: WORK_STEPS[key][0] };
 };
 
-// A line's text up to a `#` that starts a comment: at the start of the line or
-// after whitespace, outside single and double quotes.
 function uncommented(line) {
   let quote = null;
+  let startsWord = true;
   for (let at = 0; at < line.length; at += 1) {
     const character = line[at];
-    if (quote !== null) {
+    if (
+      character === "\\" &&
+      (quote === null || (quote === '"' && /["\\]/u.test(line[at + 1] ?? "")))
+    ) {
+      at += 1;
+      startsWord = false;
+    } else if (quote !== null) {
       if (character === quote) quote = null;
-    } else if (character === "'" || character === '"') quote = character;
-    else if (character === "#" && (at === 0 || /\s/u.test(line[at - 1]))) return line.slice(0, at);
+    } else if (character === "'" || character === '"') {
+      quote = character;
+      startsWord = false;
+    } else {
+      if (character === "#" && startsWord) return line.slice(0, at);
+      startsWord = /[ \t;&|()<>]/u.test(character);
+    }
   }
   return line;
 }
@@ -540,7 +549,12 @@ const downloadedBy = (release) =>
 const isUpload = (step) => step.uses?.startsWith("actions/upload-artifact@") ?? false;
 function uploadsWhatTheReleaseTakes(build, release) {
   const names = downloadedBy(release);
-  assert.ok(names.length > 0, `${release.name} downloads no artifact of a build run`);
+  for (const { name } of Object.values(RELEASE_INPUTS))
+    assert.equal(
+      names.filter((downloaded) => downloaded === name).length,
+      1,
+      `${release.name} must download ${name} exactly once`,
+    );
   const waited = new Set(resultsOf(build).flatMap(([, job]) => needsOf(job)));
   const work = workOf(build).filter((id) => waited.has(id));
   for (const name of names) {
@@ -561,14 +575,16 @@ function uploadsWhatTheReleaseTakes(build, release) {
     assert.equal(step.with["if-no-files-found"], "error", `${where} passes without its files`);
     assert.equal(step.if, undefined, `${where} runs on a condition`);
     assert.ok(!Object.hasOwn(step, "continue-on-error"), `${where} may fail and pass`);
-    const needs = RELEASE_INPUTS[id];
-    assert.ok(needs !== undefined, `${where}: this test lists nothing the release needs of it`);
+    const input = RELEASE_INPUTS[id];
+    assert.ok(input?.name === name, `${where}: this test lists nothing the release needs of it`);
     const paths = new Set(
       String(step.with.path ?? "")
         .split("\n")
         .map((line) => line.trim()),
     );
-    for (const path of needs) assert.ok(paths.has(path), `${where} leaves out ${path}`);
+    for (const path of paths)
+      assert.ok(!path.startsWith("!"), `${where} has a negated path ${path}`);
+    for (const path of input.paths) assert.ok(paths.has(path), `${where} leaves out ${path}`);
   }
 }
 
@@ -813,6 +829,10 @@ function register({ workflows, required }) {
       for (const run of [
         'echo "# not a comment" && node --test e2e/bots/bots.test.mjs',
         "echo '# not a comment'; node --test e2e/bots/bots.test.mjs",
+        String.raw`echo "a\"b" && node --test e2e/bots/bots.test.mjs`,
+        String.raw`echo "a\" # still quoted" && node --test e2e/bots/bots.test.mjs`,
+        String.raw`echo \# && node --test e2e/bots/bots.test.mjs`,
+        String.raw`echo issue\ #1 && node --test e2e/bots/bots.test.mjs`,
         "issue#1=x node --test e2e/bots/bots.test.mjs",
       ])
         assert.doesNotThrow(
@@ -825,6 +845,45 @@ function register({ workflows, required }) {
             ),
           run,
         );
+    });
+
+    test("a work command that appears only in a comment after a Bash separator", () => {
+      breaks(
+        copyOf("bots-e2e.yml", (w) => {
+          stepOf(w, "e2e", "Run the end-to-end tests").run =
+            "true;# node --test e2e/bots/bots.test.mjs";
+        }),
+        /e2e "Run the end-to-end tests" does not run e2e\/bots\/bots\.test\.mjs/u,
+      );
+    });
+
+    test("an upload path that excludes the release version file", () => {
+      const path = "bb-src/apps/desktop/release/desktop-version.json";
+      const build = copyOf("desktop.yml", (w) => {
+        const upload = w.jobs.macos.steps.find(
+          (step) => isUpload(step) && step.with?.name === "1ma-desktop-macos-arm64",
+        );
+        assert.ok(upload !== undefined, "Desktop has no macOS artifact upload");
+        upload.with.path = `${upload.with.path}\n!${path}`;
+      });
+      assert.throws(
+        () => uploadsWhatTheReleaseTakes(build, copyOf("desktop-release.yml")),
+        (error) => error.message.includes(`has a negated path !${path}`),
+      );
+    });
+
+    test("a release that omits the Linux artifact download", () => {
+      const release = copyOf("desktop-release.yml", (w) => {
+        const download = stepOf(w, "release", "Download the build");
+        download.run = download.run
+          .split("\n")
+          .filter((line) => !/\s--name\s+1ma-server-linux\b/u.test(line))
+          .join("\n");
+      });
+      assert.throws(
+        () => uploadsWhatTheReleaseTakes(copyOf("desktop.yml"), release),
+        /must download 1ma-server-linux exactly once/u,
+      );
     });
 
     test("an artifact desktop-release.yml takes that Desktop does not upload whole", () => {
@@ -1220,6 +1279,14 @@ function renamed(repo, file, step) {
   return renamedAs(repo, file, step, renameIdOf(workflow), renameNameOf(repo, job.name ?? id));
 }
 
+function botsRenameSnapshots(repo) {
+  const file = "bots-e2e.yml";
+  const workflow = repo.workflows.find((entry) => entry.file === file);
+  const id = renameIdOf(workflow);
+  const name = unused("Bots smoke result", namesOf(repo), " ");
+  return RENAME_STEPS.map((_, step) => renamedAs(repo, file, step, id, name));
+}
+
 // The repository with a work job of Bots under the id the rename takes, and a
 // job in another workflow under the name it takes.
 function crowded(repo) {
@@ -1272,10 +1339,26 @@ function registerAll(repo) {
     });
 }
 
+test("keeps the required Bots job in every runbook snapshot when it already uses the preferred id and name", () => {
+  const file = "bots-e2e.yml";
+  const id = "renamed_result";
+  const name = "Bots smoke result";
+  const result = { name, steps: [{ run: `node ${VERDICT}` }] };
+  const repo = { workflows: [{ file, jobs: { [id]: result } }], required: [{ context: name }] };
+  for (const [step, snapshot] of botsRenameSnapshots(repo).entries()) {
+    const [workflow] = snapshot.workflows;
+    const label = RENAME_STEPS[step];
+    const required = requiredOf(workflow, snapshot.required);
+    assert.equal(required.length, 1, label);
+    const [[requiredId, job]] = required;
+    assert.deepEqual(job.steps, result.steps, label);
+    assert.equal(Object.hasOwn(workflow.jobs, id), step < 2, label);
+    assert.equal(requiredId === id, step === 0, label);
+  }
+});
+
 registerAll(repository);
-// The states the runbook's rename of Bots leaves behind, with the new result
-// job under the id the runbook may well choose.
-for (const [step, state] of RENAME_STEPS.entries())
-  describe(`After the runbook's rename of Bots end-to-end, ${state}`, () => {
-    registerAll(renamedAs(repository, "bots-e2e.yml", step, "renamed_result", "Bots smoke result"));
+for (const [step, snapshot] of botsRenameSnapshots(repository).entries())
+  describe(`After the runbook's rename of Bots end-to-end, ${RENAME_STEPS[step]}`, () => {
+    registerAll(snapshot);
   });
