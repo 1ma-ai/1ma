@@ -1377,6 +1377,42 @@ describe("Codex review of stage 2 at b02a4ce", () => {
   });
 });
 
+describe("a turn the provider started on its own", () => {
+  it.each([0, 60])(
+    "keeps the exchange the owner's turn before it spent (%i refusals between them)",
+    async (refusals) => {
+      const t = await threeBots();
+      await t.dispatch("thr_a", "user", null);
+      for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+      for (let i = 0; i < refusals; i++) t.recordTurn("thr_a", "agent", "thr_b", "rejected");
+      t.startTurn("thr_a", null);
+      await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+      await t.dispatch("thr_a", "user", null);
+      expect(await t.letter("thr_a", t.b.id)).toContain("Letter 1/4");
+    },
+  );
+
+  it("writes in the exchange of the owner's message it continues", async () => {
+    const t = await threeBots();
+    await t.dispatch("thr_a", "user", null);
+    for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+    await t.dispatch("thr_a", "user", null);
+    t.startTurn("thr_a", null);
+    expect(await t.letter("thr_a", t.b.id)).toContain("Letter 1/4");
+    for (let i = 0; i < 3; i++) await t.letter("thr_a", t.b.id);
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+  });
+
+  it("does not take the owner's message steered into the turn before it", async () => {
+    const t = await threeBots();
+    await t.dispatch("thr_a", "user", null);
+    for (let i = 0; i < 4; i++) await t.letter("thr_a", t.b.id);
+    t.recordTurn("thr_a", "user", null, "steer");
+    t.startTurn("thr_a", null);
+    await expect(t.letter("thr_a", t.b.id)).rejects.toThrow(/limit/);
+  });
+});
+
 describe("the owner's message steered into a running turn", () => {
   it("reopens a done conversation once the provider took it", async () => {
     const t = await threeBots();
@@ -1422,6 +1458,23 @@ describe("bb's own notice that a sub-thread was attached or detached", () => {
     t.recordTurn("thr_a", "system", null, "start", { retryOfRequestId });
     expect(await t.isDone()).toBe(true);
   });
+
+  it.each([true, false])(
+    "the owner's message sent together with a retried notice brings the conversation back (accepted: %s)",
+    async (accepted) => {
+      const t = await doneChat();
+      const retryOfRequestId = t.notice("rejected");
+      const text = (value: string) => ({ type: "text", text: value, mentions: [] });
+      const inputGroups = [[text("The notice again")], [text("Please recheck the draft")]];
+      t.recordTurn("thr_a", "system", null, "start", {
+        accepted,
+        retryOfRequestId,
+        inputGroups,
+        input: inputGroups.flat(),
+      });
+      expect(await t.isDone()).toBe(false);
+    },
+  );
 
   it("a retry of the owner's refused turn brings the conversation back", async () => {
     const t = await doneChat();
