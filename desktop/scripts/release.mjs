@@ -1,12 +1,14 @@
 // Publishes one Desktop build as the pre-release desktop/v<version> and then
-// points the feeds in the desktop-latest release at it. Everything that can be
-// checked without writing is checked before the first write, and a dry run
-// stops right before it: a publication of the same inputs after a passing dry
-// run fails only on what changed in the releases meanwhile or on a write
-// GitHub refuses. GitHub has no transaction over several calls, so each group
-// of writes acts on a picture read right before it, a file is removed only as
-// the object that was judged, no upload goes over a name, and success is said
-// only from a last read.
+// points the feeds in the desktop-latest release at it. A dry run goes the
+// same way and leaves the writes out, so a publication of the same inputs
+// after a passing dry run fails only on what changed in the releases
+// meanwhile, on what the dry run could not read because it follows an upload
+// into the release of the tag, or on a write GitHub refuses. GitHub has no
+// transaction over several calls, so each group of writes acts on a picture
+// read right before it, a file is removed only as the object that was judged,
+// no upload goes over a name, and what the feeds announce is checked as a
+// whole right before the first write to them and in the last read, which
+// alone says success.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -140,7 +142,7 @@ function readRelease(gh, repository, tag) {
     "view",
     tag,
     "--json",
-    "isDraft,isPrerelease,assets",
+    "databaseId,isDraft,isPrerelease,assets",
     "--repo",
     repository,
   ]);
@@ -148,9 +150,18 @@ function readRelease(gh, repository, tag) {
     if (said(view).includes("release not found")) return null;
     fail(`cannot read release ${tag}: ${said(view)}`);
   }
+  let read;
   try {
-    const { isDraft, isPrerelease, assets } = JSON.parse(view.stdout);
+    read = JSON.parse(view.stdout);
+  } catch (error) {
+    fail(`cannot read the files of ${tag}: ${error.message}`);
+  }
+  if (!Number.isInteger(read?.databaseId))
+    fail(`cannot read release ${tag}: GitHub names no id of it`);
+  try {
+    const { databaseId, isDraft, isPrerelease, assets } = read;
     return {
+      id: databaseId,
       draft: isDraft === true,
       prerelease: isPrerelease === true,
       assets: new Map(
@@ -255,7 +266,9 @@ export function release({
   if (readdirSync(work).length > 0) fail(`the work folder ${work} is not empty`);
   const upload = path.join(work, "upload");
   const feeds = path.join(work, "feeds");
-  for (const folder of [upload, feeds]) mkdirSync(folder);
+  // Holds no feed, for the floor of the published releases alone.
+  const noFeeds = path.join(work, "no-feeds");
+  for (const folder of [upload, feeds, noFeeds]) mkdirSync(folder);
   const appFiles = readdirSync(app).filter((name) => isFile(path.join(app, name)));
   for (const extension of [".dmg", ".zip"]) {
     const found = appFiles.filter((name) => name.endsWith(extension));
@@ -347,7 +360,7 @@ export function release({
       else if (file.digest !== digests.get(name))
         fail(`${tag} already has a different ${name}; refusing to replace a published file`);
     }
-    return { pending, unfinished };
+    return { id: found.id, pending, unfinished };
   };
   const readOwnPlan = () => {
     const { found } = readBuild();
@@ -393,7 +406,6 @@ export function release({
   // of a finished publication does not risk a working feed.
   const planFeeds = () => {
     const found = readFeeds();
-    const publishedTags = readPublishedTags(gh, repository);
     const announced = path.join(work, `announced-${(reads += 1)}`);
     mkdirSync(announced);
     const replaced = [];
@@ -412,6 +424,9 @@ export function release({
         stale.push(name);
       }
     }
+    // Listed after the bytes, so a release published while they were read
+    // counts.
+    const publishedTags = readPublishedTags(gh, repository);
     try {
       checkFeedsMoveForward(version, announced, publishedTags);
     } catch (error) {
@@ -422,8 +437,8 @@ export function release({
 
   // Removes the judged file only while its address still answers with it;
   // false when it changed or went meanwhile. A dry run reads it the same way
-  // and removes nothing.
-  const removed = (from, judged) => {
+  // and removes nothing. write() runs right before the removal is sent.
+  const removed = (from, judged, write) => {
     const { name, state, address } = judged;
     const now = gh(["api", address]);
     if (now.status !== 0) {
@@ -445,6 +460,7 @@ export function release({
       (state === UPLOADED && file.digest !== judged.digest)
     )
       return false;
+    write?.();
     if (dryRun) return true;
     const done = gh(["api", "-X", "DELETE", address]);
     if (done.status !== 0) {
@@ -484,8 +500,8 @@ export function release({
       plan = picture();
     }
   };
-  const changed = (from, judgedFiles) => {
-    const file = judgedFiles.find((judged) => !removed(from, judged));
+  const changed = (from, judgedFiles, write) => {
+    const file = judgedFiles.find((judged) => !removed(from, judged, write));
     return file === undefined ? undefined : `${what(file)} in ${from} changed meanwhile`;
   };
   const actOwn = ({ pending, unfinished }) =>
@@ -493,49 +509,116 @@ export function release({
     (dryRun || pending.length === 0
       ? undefined
       : uploadInto(tag, pending, upload, `cannot upload ${pending.join(", ")} to ${tag}`));
-  const actFeeds = ({ replaced, stale }) =>
-    changed(FEEDS, replaced) ??
-    (dryRun || stale.length === 0
-      ? undefined
-      : uploadInto(FEEDS, stale, feeds, `cannot upload the feeds to ${FEEDS}`));
+
+  // What the feeds announce is checked as a whole, as late as it can be:
+  // the release of the tag is the one this run planned against, public,
+  // a pre-release and holding every file, the tag is at the build commit,
+  // no published release is newer, and, in the last read, each feed holds
+  // what this build announces. A problem with a file of this build is put
+  // right by a rerun; any other only by the run of a newer build.
+  let releaseId;
+  const readAnnouncement = (last) => {
+    const problems = [];
+    const ofBuild = (text, rerun = false) =>
+      problems.push({ text, kind: rerun ? "file" : "release" });
+    const found = readRelease(gh, repository, tag);
+    if (found === null) ofBuild(`there is no release ${tag}`);
+    else {
+      releaseId ??= found.id;
+      if (found.id !== releaseId)
+        ofBuild(
+          `${tag} is release ${found.id}, not release ${releaseId} this run checked: it was deleted and created again`,
+        );
+      if (found.draft) ofBuild(`${tag} is a draft`);
+      else if (!found.prerelease)
+        ofBuild(`${tag} is not a pre-release; ${prerelease} makes it one`);
+      for (const name of files) {
+        const file = found.assets.get(name);
+        if (file === undefined) ofBuild(`${name} is missing`, true);
+        else if (file.state !== UPLOADED)
+          ofBuild(`${name} is not fully uploaded (state ${file.state})`, true);
+        else if (file.digest !== digests.get(name))
+          ofBuild(`${name} has the digest ${file.digest}, not ${digests.get(name)}`);
+      }
+    }
+    const tagged = readTag(gh, repository, tag);
+    if (tagged !== commit)
+      ofBuild(tagged === null ? `there is no tag ${tag}` : `${tag} points at ${tagged}`);
+    try {
+      checkFeedsMoveForward(version, noFeeds, readPublishedTags(gh, repository));
+    } catch (error) {
+      problems.push({ text: error.message, kind: "newer" });
+    }
+    if (!last) return problems;
+    const latest = readFeeds();
+    for (const name of feedFiles) {
+      const file = latest.assets.get(name);
+      const text =
+        file === undefined
+          ? `${name} is missing`
+          : file.state !== UPLOADED
+            ? `${name} is not fully uploaded (state ${file.state})`
+            : holds(name, file)
+              ? undefined
+              : `${name} has the digest ${file.digest}, not ${feedDigests.get(name)}`;
+      if (text !== undefined) problems.push({ text, kind: "feed" });
+    }
+    return problems;
+  };
+  let feedWrites = 0;
+  const failOn = (problems, last) => {
+    if (problems.length === 0) return;
+    const texts = (kinds) =>
+      problems.filter(({ kind }) => kinds.includes(kind)).map(({ text }) => text);
+    if (!last && feedWrites === 0) {
+      const build = texts(["release", "file"]);
+      const newer = texts(["newer"]);
+      fail(
+        [
+          ...(build.length === 0
+            ? []
+            : [
+                `${tag} does not read back as a published pre-release of the build with every file:`,
+                ...build,
+              ]),
+          ...(newer.length === 0 ? [] : [`the feeds in ${FEEDS} only move forward:`, ...newer]),
+          `The feeds in ${FEEDS} were not touched; a rerun checks the release again`,
+        ].join("\n"),
+      );
+    }
+    const announced = problems
+      .filter(({ kind }) => kind !== "feed")
+      .map(({ text, kind }) =>
+        kind === "file"
+          ? `${text}; a rerun of this build uploads it and puts the feeds right`
+          : `${text}; only the run of a newer build puts the feeds right`,
+      );
+    const lost = texts(["feed"]);
+    fail(
+      [
+        ...(announced.length === 0
+          ? []
+          : [`the feeds in ${FEEDS} may now announce ${version} although:`, ...announced]),
+        ...(lost.length === 0
+          ? []
+          : [
+              `the feeds in ${FEEDS} do not read back as announcing ${version}:`,
+              ...lost,
+              "A rerun reads the feeds again and completes them",
+            ]),
+      ].join("\n"),
+    );
+  };
 
   const start = readBuild();
   const first = start.found === null ? null : planRelease(start.found);
-  const announcing = planFeeds();
+  planFeeds();
 
-  if (dryRun) {
-    const own = first === null ? null : settle(tag, first, readOwnPlan, actOwn);
-    const { replaced, stale } = settle(FEEDS, announcing, planFeeds, actFeeds);
-    log(`dry run: would publish ${tag} at ${commit} from attempt ${attempt} of run ${runId} with:`);
-    log(sums.trimEnd());
-    if (own === null && start.tagged !== null)
-      log(`${tag} exists at the build commit; would create the pre-release on it`);
-    if (own !== null) {
-      for (const { name, state } of own.unfinished)
-        log(
-          `${tag} has an unfinished ${name} (state ${state}); would remove it and upload it again`,
-        );
-      log(
-        own.pending.length === 0
-          ? `${tag} already holds all of them`
-          : `${tag} already exists; would upload ${own.pending.join(", ")}`,
-      );
-    }
-    for (const { name, state } of replaced)
-      log(
-        state === UPLOADED
-          ? `${FEEDS} has a different ${name}; would replace it`
-          : `${FEEDS} has an unfinished ${name} (state ${state}), counted as lost; would remove it and upload it again`,
-      );
-    if (stale.length === 0) log(`the feeds in ${FEEDS} already point at it`);
-    else {
-      log(`and point ${FEEDS} at it:`);
-      log(serverFeed.trimEnd());
-    }
-    return { tag, published: false };
-  }
-
-  if (first === null) {
+  // A dry run goes the way a publication goes and leaves the writes out; it
+  // cannot read the release of the tag as an upload into it would leave it.
+  let own = null;
+  if (first !== null) own = settle(tag, readOwnPlan(), readOwnPlan, actOwn);
+  else if (!dryRun) {
     // GITHUB_TOKEN may not create a release on a commit that changes workflow
     // files (HTTP 403). A maintainer then pushes the tag at the build commit
     // and either creates the pre-release on it or runs this again, which
@@ -556,50 +639,64 @@ export function release({
       repository,
     ]);
     if (done.status !== 0) fail(`cannot create the pre-release ${tag}: ${said(done)}`);
-  } else settle(tag, readOwnPlan(), readOwnPlan, actOwn);
-
-  // The feeds announce only a public pre-release that holds every file.
-  const problems = [];
-  const after = readRelease(gh, repository, tag);
-  const afterTag = readTag(gh, repository, tag);
-  if (afterTag !== commit)
-    problems.push(afterTag === null ? `there is no tag ${tag}` : `${tag} points at ${afterTag}`);
-  if (after === null) problems.push(`there is no release ${tag}`);
-  else {
-    if (after.draft) problems.push(`${tag} is a draft`);
-    else if (!after.prerelease)
-      problems.push(`${tag} is not a pre-release; ${prerelease} makes it one`);
-    for (const name of files) {
-      const found = after.assets.get(name);
-      if (found === undefined) problems.push(`${name} is missing`);
-      else if (found.state !== UPLOADED)
-        problems.push(`${name} is not fully uploaded (state ${found.state})`);
-      else if (found.digest !== digests.get(name))
-        problems.push(`${name} has the digest ${found.digest}, not ${digests.get(name)}`);
-    }
   }
-  if (problems.length > 0)
-    fail(
-      `${tag} does not read back as a published pre-release of the build with every file:\n${problems.join("\n")}\nThe feeds in ${FEEDS} were not touched; a rerun checks the release again`,
-    );
-  log(`published ${tag}`);
-  const { stale } = settle(FEEDS, planFeeds(), planFeeds, actFeeds);
+  releaseId = own?.id;
+  const blind = dryRun && (own === null || own.pending.length > 0);
+  if (!blind) {
+    failOn(readAnnouncement(false), false);
+    if (!dryRun) log(`published ${tag}`);
+  }
 
-  const last = readFeeds();
-  const lost = feedFiles.flatMap((name) => {
-    const found = last.assets.get(name);
-    if (found === undefined) return [`${name} is missing`];
-    if (found.state !== UPLOADED) return [`${name} is not fully uploaded (state ${found.state})`];
-    if (!holds(name, found))
-      return [`${name} has the digest ${found.digest}, not ${feedDigests.get(name)}`];
-    return [];
-  });
-  if (lost.length > 0)
-    fail(
-      `the feeds in ${FEEDS} do not read back as announcing ${version}:\n${lost.join("\n")}\nA rerun reads the feeds again and completes them`,
-    );
+  const actFeeds = ({ replaced, stale }) => {
+    let checked = false;
+    const write = () => {
+      if (!checked && !blind) failOn(readAnnouncement(false), false);
+      checked = true;
+      if (!dryRun) feedWrites += 1;
+    };
+    const change = changed(FEEDS, replaced, write);
+    if (change !== undefined || stale.length === 0) return change;
+    write();
+    return dryRun
+      ? undefined
+      : uploadInto(FEEDS, stale, feeds, `cannot upload the feeds to ${FEEDS}`);
+  };
+  const { replaced, stale } = settle(FEEDS, planFeeds(), planFeeds, actFeeds);
+
+  if (dryRun) {
+    log(`dry run: would publish ${tag} at ${commit} from attempt ${attempt} of run ${runId} with:`);
+    log(sums.trimEnd());
+    if (own === null && start.tagged !== null)
+      log(`${tag} exists at the build commit; would create the pre-release on it`);
+    if (own !== null) {
+      for (const { name, state } of own.unfinished)
+        log(
+          `${tag} has an unfinished ${name} (state ${state}); would remove it and upload it again`,
+        );
+      log(
+        own.pending.length === 0
+          ? `${tag} already holds all of them`
+          : `${tag} already exists; would upload ${own.pending.join(", ")}`,
+      );
+    }
+    if (blind) log(`would read ${tag} back after the upload and check it before the feeds`);
+    for (const { name, state } of replaced)
+      log(
+        state === UPLOADED
+          ? `${FEEDS} has a different ${name}; would replace it`
+          : `${FEEDS} has an unfinished ${name} (state ${state}), counted as lost; would remove it and upload it again`,
+      );
+    if (stale.length === 0) log(`the feeds in ${FEEDS} already point at it`);
+    else {
+      log(`and point ${FEEDS} at it:`);
+      log(serverFeed.trimEnd());
+    }
+    return { tag, published: false };
+  }
+
+  failOn(readAnnouncement(true), true);
   log(
-    stale.length === 0
+    feedWrites === 0
       ? `the feeds in ${FEEDS} already point at ${tag}; nothing uploaded`
       : `${FEEDS} now announces ${version}`,
   );

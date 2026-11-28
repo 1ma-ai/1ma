@@ -61,6 +61,8 @@ function asset(file) {
   return { id: ids, state: "uploaded", digest: `sha256:${sha256(file)}`, content: file };
 }
 
+let releaseIds = 0;
+
 const VALUED = new Set([
   "--json",
   "--jq",
@@ -115,7 +117,7 @@ const store = (target, files, broken, clobber) => {
 
 // GitHub as gh sees it. Tags and releases are apart: a tag may have no
 // release, a draft has no tag, and publishing a release creates its tag at the
-// target only when the tag is missing. tags maps a name to a commit or to
+// target only when the tag is missing. Every release has its own id. tags maps a name to a commit or to
 // { commit, annotated }; a release that is not a draft gets a tag at its
 // commit unless tags names one. Every stored file has its own id, and its
 // address names that id: a file stored again under the same name is another
@@ -150,12 +152,13 @@ function github({
     Object.entries(releases).map(
       ([tag, { commit = COMMIT, draft = false, prerelease = true, assets = {} }]) => {
         if (!draft && !tagged.has(tag)) tagged.set(tag, { commit, annotated: false });
-        return [tag, { commit, draft, prerelease, assets: stored(assets) }];
+        return [tag, { id: (releaseIds += 1), commit, draft, prerelease, assets: stored(assets) }];
       },
     ),
   );
   if (latest)
     state.set("desktop-latest", {
+      id: (releaseIds += 1),
       commit: OTHER,
       draft: latestDraft,
       prerelease: true,
@@ -238,6 +241,7 @@ function github({
       // gh creates a draft, uploads the files into it, then publishes it; when
       // an upload fails it deletes the draft.
       const created = {
+        id: (releaseIds += 1),
         commit: flags["--target"][0],
         draft: true,
         prerelease: flags["--prerelease"]?.[0] === true,
@@ -259,6 +263,7 @@ function github({
     if (action === "view")
       return answer(
         JSON.stringify({
+          databaseId: target.id,
           isDraft: target.draft,
           isPrerelease: target.prerelease,
           assets: [...target.assets].map(([name, { id, digest, state: stage }]) => ({
@@ -1504,7 +1509,7 @@ describe("the bytes of a feed", () => {
 });
 
 describe("a rerun of a complete publication", () => {
-  test("writes nothing and reads both pictures, each again before acting, and the feeds last", () => {
+  test("writes nothing, reads both pictures, each again before acting, and the whole announcement last", () => {
     const artifacts = build();
     const fake = github({ feeds: OLD_FEEDS });
     publish(artifacts, fake, false);
@@ -1525,17 +1530,327 @@ describe("a rerun of a complete publication", () => {
       tag,
       own,
       latest,
-      list,
       ...bytes,
+      list,
       tag,
       own,
       own,
       tag,
+      list,
       latest,
-      list,
       ...bytes,
+      list,
+      own,
+      tag,
+      list,
       latest,
     ]);
+  });
+});
+
+// Runs change on the n-th read of the bytes of a feed.
+const onBytesRead = (n, change) => {
+  let count = 0;
+  return (args, state) => {
+    if (args[0] === "api" && args[1] === "-H" && (count += 1) === n) change(state);
+  };
+};
+const onFeedsView = (n, change) => {
+  let count = 0;
+  return (args, state) => {
+    if (args[1] === "view" && args[2] === "desktop-latest" && (count += 1) === n) change(state);
+  };
+};
+const publishNewer = (state) => (state.get(NEWER_TAG).draft = false);
+const ALREADY_PUBLISHED = new RegExp(
+  `only move forward:\\n(.+\\n)*1ma already published ${literal(NEWER_TAG)}, newer than 0\\.49\\.1-1ma\\.123\\.1`,
+  "u",
+);
+
+describe("what the feeds announce", () => {
+  for (const [what, read, releases] of [
+    ["the first read of the run", 1, {}],
+    [
+      "the read after the pre-release read back",
+      3,
+      { [TAG]: { assets: everyFile("0.49.1-1ma.123.1") } },
+    ],
+  ])
+    test(`with a newer build published during ${what} of the feeds' bytes stops before any write`, () => {
+      const fake = github({
+        feeds: OLD_FEEDS,
+        releases: { ...releases, [NEWER_TAG]: { draft: true, commit: OTHER } },
+        before: onBytesRead(read, publishNewer),
+      });
+      const feeds = filesOf(fake, "desktop-latest");
+      assert.throws(() => publish(build(), fake, false), ALREADY_PUBLISHED);
+      assert.deepEqual(fake.writes(), []);
+      assert.deepEqual(filesOf(fake, "desktop-latest"), feeds);
+    });
+
+  test("with a newer build published during the bytes read of a re-plan stops before any write", () => {
+    const artifacts = build();
+    let answered = false;
+    const fake = github({
+      feeds: OLD_FEEDS,
+      releases: {
+        [TAG]: { assets: everyFile(artifacts.version) },
+        [NEWER_TAG]: { draft: true, commit: OTHER },
+      },
+      reply: (args) => {
+        if (answered || !rereads(args)) return undefined;
+        answered = true;
+        const id = Number(args[1].slice(ASSETS.length));
+        return answer(
+          JSON.stringify({
+            id,
+            name: "desktop-version.json",
+            state: "uploaded",
+            digest: "sha256:0",
+          }),
+        );
+      },
+      before: onBytesRead(5, publishNewer),
+    });
+    const feeds = filesOf(fake, "desktop-latest");
+    assert.throws(() => publish(artifacts, fake, false), ALREADY_PUBLISHED);
+    assert.deepEqual(fake.writes(), []);
+    assert.deepEqual(filesOf(fake, "desktop-latest"), feeds);
+    assert.equal(announces(fake, "server-version.json"), "0.49.1-1ma.100.1");
+  });
+
+  test("with a newer build published after the feeds were written fails the run, naming it", () => {
+    const artifacts = build();
+    const fake = github({
+      feeds: OLD_FEEDS,
+      releases: {
+        [TAG]: { assets: everyFile(artifacts.version) },
+        [NEWER_TAG]: { draft: true, commit: OTHER },
+      },
+      meanwhile: (args, state) => {
+        if (uploadsTo("desktop-latest")(args)) publishNewer(state);
+      },
+    });
+    assert.throws(
+      () => publish(artifacts, fake, false),
+      new RegExp(
+        `the feeds in desktop-latest may now announce 0\\.49\\.1-1ma\\.123\\.1 although:\\n1ma already published ${literal(NEWER_TAG)}, newer than 0\\.49\\.1-1ma\\.123\\.1; only the run of a newer build puts the feeds right$`,
+        "u",
+      ),
+    );
+    for (const name of ["desktop-version.json", "server-version.json"])
+      assert.equal(announces(fake, name), artifacts.version);
+  });
+
+  test("of a build whose server package goes after the read back stops before the feeds, naming it", () => {
+    const artifacts = build();
+    const { server } = names(artifacts.version);
+    const fake = github({
+      feeds: OLD_FEEDS,
+      releases: { [TAG]: { assets: everyFile(artifacts.version) } },
+      before: onFeedsView(2, (state) => state.get(TAG).assets.delete(server)),
+    });
+    const feeds = filesOf(fake, "desktop-latest");
+    assert.throws(
+      () => publish(artifacts, fake, false),
+      new RegExp(
+        `does not read back as a published pre-release of the build with every file:\\n${literal(server)} is missing\\nThe feeds in desktop-latest were not touched`,
+        "u",
+      ),
+    );
+    assert.deepEqual(fake.writes(), []);
+    assert.deepEqual(filesOf(fake, "desktop-latest"), feeds);
+  });
+
+  for (const [what, tamper, found, remedy] of [
+    [
+      "loses its server package",
+      (fake) => fake.state.get(TAG).assets.delete(names("0.49.1-1ma.123.1").server),
+      "1ma-server-0\\.49\\.1-1ma\\.123\\.1\\.tgz is missing",
+      "a rerun of this build uploads it and puts the feeds right",
+    ],
+    [
+      "turns into a draft",
+      (fake) => (fake.state.get(TAG).draft = true),
+      "desktop/v0\\.49\\.1-1ma\\.123\\.1 is a draft",
+      "only the run of a newer build puts the feeds right",
+    ],
+    [
+      "turns into a release",
+      (fake) => (fake.state.get(TAG).prerelease = false),
+      "desktop/v0\\.49\\.1-1ma\\.123\\.1 is not a pre-release; 'gh release edit desktop/v0\\.49\\.1-1ma\\.123\\.1 --prerelease --repo 1ma-ai/1ma' makes it one",
+      "only the run of a newer build puts the feeds right",
+    ],
+    [
+      "has its tag moved",
+      (fake) => (fake.tags.get(TAG).commit = OTHER),
+      "desktop/v0\\.49\\.1-1ma\\.123\\.1 points at b{40}",
+      "only the run of a newer build puts the feeds right",
+    ],
+  ])
+    test(`of a build that ${what} after the feeds were written fails the run, naming it`, () => {
+      const artifacts = build();
+      let fake;
+      fake = github({
+        feeds: OLD_FEEDS,
+        releases: { [TAG]: { assets: everyFile(artifacts.version) } },
+        meanwhile: (args) => {
+          if (uploadsTo("desktop-latest")(args)) tamper(fake);
+        },
+      });
+      assert.throws(
+        () => publish(artifacts, fake, false),
+        new RegExp(
+          `the feeds in desktop-latest may now announce 0\\.49\\.1-1ma\\.123\\.1 although:\\n${found}; ${remedy}$`,
+          "u",
+        ),
+      );
+      assert.equal(announces(fake, "server-version.json"), artifacts.version);
+    });
+
+  test("of a release deleted and created again under the tag stops before the feeds, naming both ids", () => {
+    const artifacts = build();
+    let both;
+    const fake = github({
+      feeds: OLD_FEEDS,
+      releases: { [TAG]: { assets: everyFile(artifacts.version) } },
+      before: onFeedsView(2, (state) => {
+        const gone = state.get(TAG);
+        const again = {
+          ...gone,
+          id: (releaseIds += 1),
+          assets: stored(everyFile(artifacts.version)),
+        };
+        state.set(TAG, again);
+        both = [again.id, gone.id];
+      }),
+    });
+    const feeds = filesOf(fake, "desktop-latest");
+    assert.throws(
+      () => publish(artifacts, fake, false),
+      (thrown) => {
+        assert.match(
+          thrown.message,
+          new RegExp(
+            `^${literal(TAG)} does not read back as a published pre-release of the build with every file:\\n${literal(TAG)} is release ${both[0]}, not release ${both[1]} this run checked: it was deleted and created again\\nThe feeds in desktop-latest were not touched`,
+            "u",
+          ),
+        );
+        return true;
+      },
+    );
+    assert.deepEqual(fake.writes(), []);
+    assert.deepEqual(filesOf(fake, "desktop-latest"), feeds);
+  });
+
+  test("is said to be uploaded when this run uploaded the feeds before a conflict", () => {
+    const artifacts = build();
+    let conflicted = false;
+    const fake = github({
+      releases: { [TAG]: { assets: everyFile(artifacts.version) } },
+      // gh stored both feeds, then GitHub answered the name as taken.
+      reply: (args, state) => {
+        if (conflicted || !uploadsTo("desktop-latest")(args)) return undefined;
+        conflicted = true;
+        for (const file of parse(args).positional.slice(3))
+          state.get("desktop-latest").assets.set(path.basename(file), asset(readFileSync(file)));
+        return error(
+          "HTTP 422: Validation Failed (https://uploads.github.com/)\nReleaseAsset.name already exists",
+        );
+      },
+    });
+    const { published, output } = publish(artifacts, fake, false);
+    assert.equal(published, true);
+    assert.match(output, /reading desktop-latest again/u);
+    assert.doesNotMatch(output, /nothing uploaded/u);
+    assert.match(output, /desktop-latest now announces 0\.49\.1-1ma\.123\.1$/u);
+  });
+});
+
+describe("a dry run going the way of the publication", () => {
+  test("with a complete pre-release stops like the publication when the tag moved while the releases were listed", () => {
+    const stopped = [false, true].map((dryRun) => {
+      let fake;
+      fake = github({
+        feeds: OLD_FEEDS,
+        releases: { [TAG]: { assets: everyFile("0.49.1-1ma.123.1") } },
+        before: once(
+          (args) => args[1] === "list",
+          () => (fake.tags.get(TAG).commit = OTHER),
+        ),
+      });
+      let message;
+      assert.throws(
+        () => publish(build(), fake, dryRun),
+        (thrown) => {
+          message = thrown.message;
+          return true;
+        },
+      );
+      assert.deepEqual(fake.writes(), []);
+      return message;
+    });
+    assert.match(
+      stopped[0],
+      /desktop\/v0\.49\.1-1ma\.123\.1 points at b{40}, not at the build commit a{40}/u,
+    );
+    assert.equal(stopped[1], stopped[0]);
+  });
+
+  test("with a complete pre-release reads as the publication reads up to its first write", () => {
+    const artifacts = build();
+    const fake = github({
+      feeds: OLD_FEEDS,
+      releases: { [TAG]: { assets: everyFile(artifacts.version) } },
+    });
+    const feeds = filesOf(fake, "desktop-latest");
+    const [bytes, reread] = [
+      (id) => ["api", "-H", "Accept: application/octet-stream", `${ASSETS}${id}`],
+      (id) => ["api", `${ASSETS}${id}`],
+    ].map((call) =>
+      ["desktop-version.json", "server-version.json"].map((name) => call(feeds[name].id)),
+    );
+    const tag = ["api", `repos/${REPO}/git/ref/tags/${TAG}`];
+    const own = ["release", "view", TAG];
+    const latest = ["release", "view", "desktop-latest"];
+    const list = ["release", "list"];
+    const { output } = publish(artifacts, fake, true);
+    assert.deepEqual(fake.calls.map(shape), [
+      tag,
+      own,
+      latest,
+      ...bytes,
+      list,
+      tag,
+      own,
+      own,
+      tag,
+      list,
+      latest,
+      ...bytes,
+      list,
+      reread[0],
+      own,
+      tag,
+      list,
+      reread[1],
+    ]);
+    assert.doesNotMatch(output, /would read/u);
+    assert.deepEqual(fake.writes(), []);
+  });
+
+  test("that would upload into the pre-release says it cannot check it before the feeds", () => {
+    const artifacts = build();
+    const { dmg } = names(artifacts.version);
+    const fake = github({
+      feeds: OLD_FEEDS,
+      releases: { [TAG]: { assets: { [dmg]: `dmg ${artifacts.version}` } } },
+    });
+    assert.match(
+      publish(artifacts, fake, true).output,
+      /would read desktop\/v0\.49\.1-1ma\.123\.1 back after the upload and check it before the feeds/u,
+    );
+    assert.deepEqual(fake.writes(), []);
   });
 });
 

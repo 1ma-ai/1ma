@@ -7,10 +7,11 @@ name: Desktop release
 # GitHub's own records, not against files inside its artifact: it must be a
 # green Desktop build of main in this repository, and bb's tests must have
 # passed on the same commit in a push run on main. desktop/scripts/release.mjs
-# does the publishing; a dry run makes every read the publication makes before
-# its first write, with the same checks, including the comparison with the
-# files a release of the tag already holds and the read of each file it would
-# remove at its address, and none of the reads that follow an upload.
+# does the publishing; a dry run goes the same way with the writes left out,
+# with the same reads and checks up to its first write, including the
+# comparison with the files a release of the tag already holds and the read of
+# each file it would remove at its address. It cannot read the release of the
+# tag as an upload into it would leave it, and says so.
 # A publication is started from main; a dry run may be started from a branch,
 # to try its copy of this file and of the tool. Both accept only files of the
 # attempt whose result the first step checked; a dry run is a check, not an
@@ -33,8 +34,10 @@ permissions:
 
 # One release at a time: two runs could otherwise both pass the "only forward"
 # check on the feeds and the older one could upload last. An edit of the
-# releases by hand is not held back by this; the tool reads them again before
-# each group of writes and after the last one (desktop/README.md).
+# releases by hand is not held back by this; the tool acts on a fresh picture
+# for each group of writes and checks what the feeds announce as a whole
+# before the first write to them and in the last read; the windows that stay
+# open are in desktop/README.md.
 concurrency:
   group: desktop-release
   cancel-in-progress: false
