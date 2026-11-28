@@ -36,11 +36,12 @@ function ruleOf(classic) {
 // GitHub as the script sees it through gh: what it answers and what was asked.
 function github(change = () => {}) {
   const on = (enabled) => ({ url: "https://api.github.com/x", enabled });
+  const url = `https://api.github.com/${PROTECTION}`;
   const state = {
     name: wanted.repository,
     actions: { ...wanted.actions, selected_actions_url: "https://api.github.com/x" },
     protection: {
-      url: "https://api.github.com/x",
+      url,
       required_status_checks: {
         url: "https://api.github.com/x",
         strict: false,
@@ -68,6 +69,7 @@ function github(change = () => {}) {
   };
   change(state);
   const asked = [];
+  const calls = [];
   const refuse = (message, status) => ({
     status: 1,
     stdout: included(status, JSON.stringify({ message, status: String(status) })),
@@ -83,6 +85,7 @@ function github(change = () => {}) {
     const at = args.indexOf("-X");
     const [method, address] = args.slice(at + 1, at + 3);
     const body = args.includes("--input") ? JSON.parse(input) : undefined;
+    calls.push(args);
     asked.push({ method, address, body });
     const key = `${method} ${address}`;
     if (state.unreachable.has(key)) throw new Error("spawnSync gh ENOENT");
@@ -124,6 +127,7 @@ function github(change = () => {}) {
     if (method === "PUT" && address === PROTECTION) {
       const { required_status_checks: checks, ...rest } = body;
       state.protection = {
+        url,
         required_status_checks: checks,
         required_signatures: on(state.protection?.required_signatures.enabled ?? false),
         ...Object.fromEntries(
@@ -148,7 +152,7 @@ function github(change = () => {}) {
   const call = (apply = false) => run({ apply, gh, text, log: (line) => output.push(line) });
   const written = () =>
     asked.filter((entry) => entry.method !== "GET" && entry.address !== "graphql");
-  return { state, asked, output, call, written };
+  return { state, asked, calls, output, call, written };
 }
 
 // GitHub's answer to the GraphQL question with one part of it changed.
@@ -329,6 +333,24 @@ describe("comparing GitHub with the file", () => {
       partly((repository) => {
         delete repository.ref.branchProtectionRule.bypassForcePushAllowances;
       }),
+      partly((repository) => {
+        delete repository.ref.branchProtectionRule.requiresDeployments;
+      }),
+      partly((repository) => {
+        repository.ref.branchProtectionRule.requiresDeployments = "false";
+      }),
+      partly((repository) => {
+        delete repository.ref.branchProtectionRule.bypassForcePushAllowances.pageInfo.hasNextPage;
+      }),
+      partly((repository) => {
+        repository.mergeQueue = "MQ_1";
+      }),
+      partly((repository) => {
+        const rule = repository.ref.branchProtectionRule;
+        delete rule.requiresDeployments;
+        rule.requiredDeploymentEnvironments = ["production"];
+        rule.bypassForcePushAllowances.pageInfo = {};
+      }),
       () => ({ status: 0, stdout: included(200, '{"data":{"repository":null}}'), stderr: "" }),
       () => ({
         status: 0,
@@ -351,6 +373,123 @@ describe("comparing GitHub with the file", () => {
       });
     });
     assert.throws(() => failed.call(), /POST graphql: the answer could not be read \(HTTP 200\)/u);
+  });
+
+  test("does not read a protection whose fields are not of their documented types, and writes nothing", () => {
+    const wrong = {
+      "a switch whose enabled is a string": (protection) => {
+        protection.allow_force_pushes = { enabled: "true" };
+      },
+      "a switch nobody names whose enabled is a string": (protection) => {
+        protection.a_setting_github_adds_later = { enabled: "yes" };
+      },
+      "a switch the file names that is not an object": (protection) => {
+        protection.enforce_admins = true;
+      },
+      "signatures that are not a switch": (protection) => {
+        protection.required_signatures = {};
+      },
+      "an empty object": (protection) => {
+        for (const key of Object.keys(protection)) delete protection[key];
+      },
+      "no url": (protection) => {
+        delete protection.url;
+      },
+      "the url of another branch": (protection) => {
+        protection.url = `https://api.github.com/${REPOSITORY}/branches/develop/protection`;
+      },
+      "a strict that is not a boolean": (protection) => {
+        protection.required_status_checks.strict = "false";
+      },
+      "contexts without checks": (protection) => {
+        delete protection.required_status_checks.checks;
+      },
+      "a check without its context": (protection) => {
+        delete protection.required_status_checks.checks[0].context;
+      },
+      "an app id that is not an integer": (protection) => {
+        protection.required_status_checks.checks[0].app_id = "15368";
+      },
+    };
+    for (const [what, change] of Object.entries(wrong)) {
+      const hub = github((state) => {
+        change(state.protection);
+      });
+      assert.throws(
+        () => hub.call(true),
+        (error) => error.message === `GET ${PROTECTION}: the answer could not be read (HTTP 200)`,
+        what,
+      );
+      assert.deepEqual(hub.written(), [], what);
+      assert.deepEqual(hub.output, [], what);
+    }
+  });
+
+  test("takes a switch GitHub leaves out of the protection for off", () => {
+    const hub = github((state) => {
+      for (const name of ["required_signatures", "lock_branch", "block_creations"])
+        delete state.protection[name];
+    });
+    assert.equal(hub.call(), 0);
+    const on = github((state) => {
+      delete state.protection.enforce_admins;
+    });
+    assert.equal(on.call(), 1);
+    assert.deepEqual(on.output.slice(1), [
+      "- protection.enforce_admins: GitHub has false, the file says true",
+    ]);
+  });
+
+  test("does not read Actions settings of the wrong type, and takes one GitHub leaves out for a difference", () => {
+    for (const actions of [
+      { enabled: "true", allowed_actions: "all", sha_pinning_required: true },
+      { allowed_actions: "all", sha_pinning_required: true },
+      { enabled: true, allowed_actions: "all", sha_pinning_required: "yes" },
+      { enabled: true, allowed_actions: null, sha_pinning_required: true },
+    ]) {
+      const hub = github((state) => {
+        state.actions = actions;
+      });
+      assert.throws(
+        () => hub.call(true),
+        (error) => error.message === `GET ${ACTIONS}: the answer could not be read (HTTP 200)`,
+        JSON.stringify(actions),
+      );
+      assert.deepEqual(hub.written(), []);
+    }
+    const off = github((state) => {
+      state.actions = { enabled: false };
+    });
+    assert.equal(off.call(), 1);
+    assert.deepEqual(off.output.slice(1), [
+      "- actions.enabled: GitHub has false, the file says true",
+      '- actions.allowed_actions: GitHub reports no value, the file says "all"',
+      "- actions.sha_pinning_required: GitHub reports no value, the file says true",
+    ]);
+  });
+
+  test("takes only GitHub's own message Branch not protected for a branch without protection", () => {
+    for (const message of ["Branch not protected by this ruleset", "Not Found: not protected"]) {
+      const hub = github((state) => {
+        state.fails[`GET ${PROTECTION}`] = [message, 404];
+      });
+      assert.throws(() => hub.call(true), new RegExp(`${message} \\(HTTP 404\\)`, "u"), message);
+      assert.deepEqual(hub.written(), [], message);
+      assert.deepEqual(hub.output, [], message);
+    }
+  });
+
+  test("asks github.com whatever host gh would choose", () => {
+    const hub = github((state) => {
+      state.protection = null;
+      state.actions.sha_pinning_required = false;
+    });
+    assert.equal(hub.call(true), 0);
+    assert.ok(hub.calls.length > 10);
+    for (const args of hub.calls) {
+      const at = args.indexOf("--hostname");
+      assert.ok(at !== -1 && args[at + 1] === "github.com", args.join(" "));
+    }
   });
 
   test("stops before anything else is read when GitHub answers for another repository", () => {
@@ -382,7 +521,7 @@ describe("comparing GitHub with the file", () => {
     };
     const kinds = {
       [`GET ${REPOSITORY}`]: [[], { private: false }],
-      [`GET ${ACTIONS}`]: [[], { enabled: true }],
+      [`GET ${ACTIONS}`]: [[], { allowed_actions: "all", sha_pinning_required: true }],
       [`GET ${PROTECTION}`]: [[], { required_status_checks: { checks: [null] } }],
       [`GET ${RULES}`]: [{}, [null]],
       ["POST graphql"]: [[]],
@@ -436,7 +575,10 @@ describe("applying the file", () => {
       [`PUT ${REPOSITORY}/actions/permissions`, `PUT ${PROTECTION}`],
     );
     assert.deepEqual(hub.written()[1].body, wanted.protection);
-    assert.match(hub.output.join("\n"), /Written: actions, branch protection\./u);
+    assert.match(
+      hub.output.join("\n"),
+      /Sent, and GitHub showed each as the file says after its request: actions, branch protection\./u,
+    );
     assert.match(hub.output.at(-1), /is now protected as the file says/u);
   });
 
@@ -488,7 +630,7 @@ describe("applying the file", () => {
     }
   });
 
-  test("says what was written when a later write is refused, from the state read after each write", () => {
+  test("says what was sent and shown when a later write is refused, from the state read after each write", () => {
     const hub = github((state) => {
       state.protection = null;
       state.actions.sha_pinning_required = false;
@@ -498,9 +640,12 @@ describe("applying the file", () => {
     const output = hub.output.join("\n");
     assert.match(
       output,
-      /Not written: branch protection\. GitHub still differs from the file in protection; the answer was PUT .*: Validation Failed \(HTTP 422\)\./u,
+      /Not as the file says after it was sent: branch protection\. Differences gone since the read before it: none; left: protection\. The answer was PUT .*: Validation Failed \(HTTP 422\)\./u,
     );
-    assert.match(output, /Already written: actions\./u);
+    assert.match(
+      output,
+      /Sent before it, and GitHub showed each as the file says after its request: actions\./u,
+    );
     assert.match(output, /GitHub still differs from the file:\n- protection: GitHub has null/u);
     assert.doesNotMatch(output.split("GitHub still differs from the file:")[1], /actions\./u);
     const reads = [`GET ${ACTIONS}`, `GET ${PROTECTION}`, `GET ${RULES}`, "POST graphql"];
@@ -510,6 +655,7 @@ describe("applying the file", () => {
         `GET ${REPOSITORY}`,
         ...reads,
         `GET ${FILE}`,
+        ...reads,
         `PUT ${ACTIONS}`,
         ...reads,
         `PUT ${PROTECTION}`,
@@ -518,7 +664,7 @@ describe("applying the file", () => {
     );
   });
 
-  test("stops at a refused first write and says nothing was written", () => {
+  test("stops at a refused first write and says nothing was sent before it", () => {
     const hub = github((state) => {
       state.protection = null;
       state.actions.sha_pinning_required = false;
@@ -528,7 +674,7 @@ describe("applying the file", () => {
     assert.equal(hub.written().length, 1);
     assert.match(
       hub.output.join("\n"),
-      /Not written: actions\. .*the answer was PUT .*: Must have admin rights \(HTTP 403\)\.\nNothing was written\./u,
+      /Not as the file says after it was sent: actions\. Differences gone since the read before it: none; left: actions\.sha_pinning_required\. The answer was PUT .*: Must have admin rights \(HTTP 403\)\.\nNothing was sent before it\./u,
     );
   });
 
@@ -550,12 +696,12 @@ describe("applying the file", () => {
     const output = hub.output.join("\n");
     assert.match(
       output,
-      /Not written: actions\. GitHub answered success \(PUT .*: HTTP 200\), yet it still differs from the file in actions\.sha_pinning_required\.\nNothing was written\./u,
+      /Not as the file says after it was sent: actions\. Differences gone since the read before it: none; left: actions\.sha_pinning_required\. The answer was PUT .*: HTTP 200\.\nNothing was sent before it\./u,
     );
-    assert.doesNotMatch(output, /^Written:/mu);
+    assert.doesNotMatch(output, /^Sent,/mu);
   });
 
-  test("says a write GitHub answered with success is not written when GitHub still shows the old state", () => {
+  test("says a write GitHub answered with success is not as the file says when GitHub still shows the old state", () => {
     const hub = github((state) => {
       state.protection.required_signatures.enabled = true;
       state.answers[`DELETE ${PROTECTION}/required_signatures`] = empty;
@@ -563,12 +709,12 @@ describe("applying the file", () => {
     assert.equal(hub.call(true), 1);
     assert.match(
       hub.output.join("\n"),
-      /Not written: required signatures\. GitHub answered success \(DELETE .*: HTTP 204\), yet it still differs from the file in required_signatures\./u,
+      /Not as the file says after it was sent: required signatures\. Differences gone since the read before it: none; left: required_signatures\. The answer was DELETE .*: HTTP 204\./u,
     );
     assert.match(hub.output.at(-1), /- required_signatures: GitHub has true/u);
   });
 
-  test("takes a write that GitHub shows done for written whatever its answer, and goes on", () => {
+  test("takes a write that GitHub shows as the file says for done whatever its answer, and goes on", () => {
     const lost = {
       "a server error": () => ({
         status: 1,
@@ -601,19 +747,23 @@ describe("applying the file", () => {
         what,
       );
       const output = hub.output.join("\n");
-      assert.doesNotMatch(output, /Not written|Nothing was written/u, what);
+      assert.doesNotMatch(output, /Not as the file says|Nothing was sent/u, what);
       if (what !== "a body cut short")
         assert.match(
           output,
-          /actions: GitHub shows it written, although the answer was PUT /u,
+          /actions: GitHub shows it as the file says, although the answer was PUT /u,
           what,
         );
-      assert.match(output, /Written: actions, branch protection\./u, what);
+      assert.match(
+        output,
+        /Sent, and GitHub showed each as the file says after its request: actions, branch protection\./u,
+        what,
+      );
       assert.match(hub.output.at(-1), /is now protected as the file says/u, what);
     }
   });
 
-  test("says what was written and what is not known when GitHub cannot be read after a write", () => {
+  test("says what was sent and shown and what is not known when GitHub cannot be read after a write", () => {
     const hub = github((state) => {
       state.protection = null;
       state.actions.sha_pinning_required = false;
@@ -625,9 +775,9 @@ describe("applying the file", () => {
     };
     assert.throws(() => hub.call(true), /ENOENT/u);
     assert.deepEqual(hub.output.slice(-2), [
-      "Written: actions.",
-      "Writing branch protection: GitHub could not be read after it, so it is not known " +
-        `whether it was written (the answer was PUT ${PROTECTION}: no answer (spawnSync gh ETIMEDOUT)).`,
+      "Sent before it, and GitHub showed each as the file says after its request: actions.",
+      "Sent branch protection: GitHub could not be read after it, so it is not known whether " +
+        `GitHub shows it as the file says (the answer was PUT ${PROTECTION}: no answer (spawnSync gh ETIMEDOUT)).`,
     ]);
   });
 
@@ -645,9 +795,10 @@ describe("applying the file", () => {
       hub.written().map(({ method, address }) => `${method} ${address}`),
       [`PUT ${ACTIONS}`],
     );
-    assert.deepEqual(hub.output.slice(-1), [
-      "Writing actions: GitHub could not be read after it, so it is not known " +
-        `whether it was written (the answer was PUT ${ACTIONS}: HTTP 204).`,
+    assert.deepEqual(hub.output.slice(-2), [
+      "Nothing was sent before it.",
+      "Sent actions: GitHub could not be read after it, so it is not known whether " +
+        `GitHub shows it as the file says (the answer was PUT ${ACTIONS}: HTTP 204).`,
     ]);
   });
 
@@ -666,7 +817,7 @@ describe("applying the file", () => {
       const output = hub.output.join("\n");
       assert.match(
         output,
-        /; the answer was PUT .*: upstream failed \(HTTP 422\) \(HTTP 502\)\.\nNothing was written\./u,
+        /\. The answer was PUT .*: upstream failed \(HTTP 422\) \(HTTP 502\)\.\nNothing was sent before it\./u,
         address,
       );
       assert.doesNotMatch(output, new RegExp(HEADER, "u"), address);
@@ -689,7 +840,7 @@ describe("applying the file", () => {
       const output = hub.output.join("\n");
       assert.match(
         output,
-        /Not written: actions\. .*the answer was PUT .*\(HTTP 429\)\.\nNothing was written\./u,
+        /Not as the file says after it was sent: actions\. .*The answer was PUT .*\(HTTP 429\)\.\nNothing was sent before it\./u,
       );
       assert.doesNotMatch(output, new RegExp(HEADER, "u"));
     }
@@ -713,11 +864,151 @@ describe("applying the file", () => {
       assert.equal(hub.call(true), 1);
       const output = hub.output.join("\n");
       assert.ok(
-        output.includes(`the answer was PUT ${ACTIONS}: no answer (${said}).`),
+        output.includes(`The answer was PUT ${ACTIONS}: no answer (${said}).`),
         output.slice(0, 2000),
       );
       assert.doesNotMatch(output, /Authorization|Location|x{301}/u);
     }
+  });
+
+  test("does not take a list of checks for written when the protection is gone after its request, and sends nothing after it", () => {
+    const hub = github((state) => {
+      state.protection.required_status_checks.checks.pop();
+      state.protection.required_signatures.enabled = true;
+      state.answers[`PATCH ${PROTECTION}/required_status_checks`] = (now) => {
+        now.protection = null;
+        return {
+          status: 1,
+          stdout: included(404, JSON.stringify({ message: "Branch not protected" })),
+          stderr: "gh: Branch not protected (HTTP 404)\n",
+        };
+      };
+    });
+    assert.equal(hub.call(true), 1);
+    assert.deepEqual(
+      hub.written().map(({ method, address }) => `${method} ${address}`),
+      [`PATCH ${PROTECTION}/required_status_checks`],
+    );
+    const output = hub.output.join("\n");
+    assert.match(
+      output,
+      /Not as the file says after it was sent: required checks\. Differences gone since the read before it: none; left: protection\. The answer was PATCH .*: Branch not protected \(HTTP 404\)\.\nNothing was sent before it\./u,
+    );
+    assert.match(output, /GitHub still differs from the file:\n- protection: GitHub has null/u);
+  });
+
+  test("does not take switched-off signatures for written when the protection is gone after the request", () => {
+    const hub = github((state) => {
+      state.protection.required_signatures.enabled = true;
+      state.answers[`DELETE ${PROTECTION}/required_signatures`] = (now) => {
+        now.protection = null;
+        return empty();
+      };
+    });
+    assert.equal(hub.call(true), 1);
+    assert.match(
+      hub.output.join("\n"),
+      /Not as the file says after it was sent: required signatures\. Differences gone since the read before it: required_signatures; left: protection\./u,
+    );
+  });
+
+  test("does not send a write the state read before it already shows as the file says", () => {
+    const hub = github((state) => {
+      state.actions.sha_pinning_required = false;
+      state.protection.required_status_checks.checks.pop();
+      state.answers[`PUT ${ACTIONS}`] = (now, write) => {
+        now.protection.required_status_checks.checks = structuredClone(
+          wanted.protection.required_status_checks.checks,
+        );
+        return write();
+      };
+    });
+    assert.equal(hub.call(true), 0);
+    assert.deepEqual(
+      hub.written().map(({ method, address }) => `${method} ${address}`),
+      [`PUT ${ACTIONS}`],
+    );
+    const output = hub.output.join("\n");
+    assert.match(
+      output,
+      /\nSent, and GitHub showed each as the file says after its request: actions\.\n/u,
+    );
+    assert.doesNotMatch(output.split("\n").slice(3).join("\n"), /required checks/u);
+  });
+
+  test("computes the first write from the state read after the file on main is checked", () => {
+    const hub = github((state) => {
+      state.actions.sha_pinning_required = false;
+      state.answers[`GET ${FILE}`] = (now, read) => {
+        now.actions.sha_pinning_required = true;
+        return read();
+      };
+    });
+    assert.equal(hub.call(true), 0);
+    assert.deepEqual(hub.written(), []);
+    assert.deepEqual(hub.output.slice(-2), [
+      "Nothing was sent: GitHub shows every part this script writes as the file says.",
+      "main of 1ma-ai/1ma is now protected as the file says",
+    ]);
+  });
+
+  test("sends each part once, even when a later read shows it differing again", () => {
+    const hub = github((state) => {
+      state.actions.sha_pinning_required = false;
+      state.protection.required_status_checks.checks.pop();
+      state.answers[`PATCH ${PROTECTION}/required_status_checks`] = (now, write) => {
+        now.actions.sha_pinning_required = false;
+        return write();
+      };
+    });
+    assert.equal(hub.call(true), 1);
+    assert.deepEqual(
+      hub.written().map(({ method, address }) => `${method} ${address}`),
+      [`PUT ${ACTIONS}`, `PATCH ${PROTECTION}/required_status_checks`],
+    );
+    assert.deepEqual(hub.output.slice(-3), [
+      "Sent, and GitHub showed each as the file says after its request: actions, required checks.",
+      "GitHub still differs from the file:",
+      "- actions.sha_pinning_required: GitHub has false, the file says true",
+    ]);
+  });
+
+  test("names what a refused write changed and what it left", () => {
+    const hub = github((state) => {
+      state.actions.enabled = false;
+      state.answers[`PUT ${ACTIONS}`] = (now) => {
+        now.actions.enabled = true;
+        now.actions.sha_pinning_required = false;
+        return empty();
+      };
+    });
+    assert.equal(hub.call(true), 1);
+    const output = hub.output.join("\n");
+    assert.match(
+      output,
+      /Not as the file says after it was sent: actions\. Differences gone since the read before it: actions\.enabled; left: actions\.sha_pinning_required\. The answer was PUT .*: HTTP 204\.\nNothing was sent before it\./u,
+    );
+    assert.doesNotMatch(output, /Nothing was written/u);
+  });
+
+  test("writes the Actions settings of a repository with Actions off, and decides by the read after it", () => {
+    const hub = github((state) => {
+      state.actions = { enabled: false };
+    });
+    assert.equal(hub.call(true), 0);
+    assert.deepEqual(hub.written(), [{ method: "PUT", address: ACTIONS, body: wanted.actions }]);
+    const half = github((state) => {
+      state.actions = { enabled: false };
+      state.answers[`PUT ${ACTIONS}`] = (now) => {
+        now.actions = { enabled: true };
+        return empty();
+      };
+    });
+    assert.equal(half.call(true), 1);
+    assert.match(
+      half.output.join("\n"),
+      /Not as the file says after it was sent: actions\. Differences gone since the read before it: actions\.enabled; left: actions\.allowed_actions, actions\.sha_pinning_required\./u,
+    );
   });
 
   test("cannot change what only the classic rules hold, and says so", () => {
@@ -766,5 +1057,23 @@ describe("running gh", () => {
       { code: "ETIMEDOUT" },
     );
     assert.ok(Date.now() - started < 15_000, `held for ${Date.now() - started} ms`);
+  });
+
+  test("starts gh without the settings that make it print its headers", () => {
+    const kept = { ...process.env };
+    Object.assign(process.env, { GH_DEBUG: "api", DEBUG: "1", A_SETTING_GH_KEEPS: "kept" });
+    try {
+      const gh = ghRunner({ program: process.execPath });
+      const env = JSON.parse(
+        gh(["-e", "process.stdout.write(JSON.stringify(process.env))"]).stdout,
+      );
+      assert.equal(env.GH_DEBUG, undefined);
+      assert.equal(env.DEBUG, undefined);
+      assert.equal(env.A_SETTING_GH_KEEPS, "kept");
+    } finally {
+      for (const name of ["GH_DEBUG", "DEBUG", "A_SETTING_GH_KEEPS"])
+        if (Object.hasOwn(kept, name)) process.env[name] = kept[name];
+        else delete process.env[name];
+    }
   });
 });

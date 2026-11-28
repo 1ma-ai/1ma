@@ -103,9 +103,10 @@ const CONDITIONAL_STEPS = {
 // installs, preparing the tree) are not listed: without them the job fails
 // anyway; of such a step only a command the later ones do without is listed.
 //
-// A command counts on a line of `run` that is not a comment. This is not a
-// shell parser: a command after `#` on its line, in a heredoc, in a function
-// nobody calls or behind a condition that is never true still counts.
+// A command counts in the text of a line of `run` before a comment. This is
+// not a shell parser: it does not tell whether the shell reaches the command.
+// One in a heredoc, in a function nobody calls, behind a condition that is
+// never true or in the text of an `echo` still counts.
 const WORK_STEPS = {
   "ci.yml check pnpm run check:marketplace": [
     ["pnpm run check:marketplace"],
@@ -236,6 +237,22 @@ const WORK_STEPS = {
   ],
 };
 
+// What desktop-release.yml needs in each artifact it downloads from a Desktop
+// run, by the job of desktop.yml that uploads it: the app, the ZIP and the feed
+// the app updates from, the version feed and the provenance for macOS; the
+// folder the package step fills for the server. The names of the artifacts are
+// read from the `gh run download` lines of the release workflow.
+const RELEASE_INPUTS = {
+  macos: [
+    "bb-src/apps/desktop/release/*.dmg",
+    "bb-src/apps/desktop/release/*.zip",
+    "bb-src/apps/desktop/release/latest-mac.yml",
+    "bb-src/apps/desktop/release/desktop-version.json",
+    "bb-src/1ma-provenance.json",
+  ],
+  "linux-server": ["${{ runner.temp }}/server/*"],
+};
+
 // The events a workflow with a required check starts on, no more and no
 // fewer. The check has to report for the commit of a pull request:
 // pull_request_target runs the code of the base, merge_group comes only from
@@ -348,8 +365,20 @@ const workStepOf = (key) => {
   return { file, job, name: words.join(" "), runs: WORK_STEPS[key][0] };
 };
 
-const commandLines = (step) =>
-  (step.run ?? "").split("\n").filter((line) => !line.trimStart().startsWith("#"));
+// A line's text up to a `#` that starts a comment: at the start of the line or
+// after whitespace, outside single and double quotes.
+function uncommented(line) {
+  let quote = null;
+  for (let at = 0; at < line.length; at += 1) {
+    const character = line[at];
+    if (quote !== null) {
+      if (character === quote) quote = null;
+    } else if (character === "'" || character === '"') quote = character;
+    else if (character === "#" && (at === 0 || /\s/u.test(line[at - 1]))) return line.slice(0, at);
+  }
+  return line;
+}
+const commandLines = (step) => (step.run ?? "").split("\n").map(uncommented);
 
 function doesItsWork(workflow) {
   for (const { file, job, name, runs } of Object.keys(WORK_STEPS).map(workStepOf)) {
@@ -416,19 +445,29 @@ function startsOnTheListedEvents(workflow) {
     );
 }
 
-// A push run of a workflow with a required check is chosen by branch and path
-// alone: tags start it on a tag as well, and these tests read the paths of
-// `paths` and the branches of `branches` only.
+// A push run of a workflow with a required check is chosen by named branches,
+// main among them, and in a gated workflow by paths as well: without
+// `branches` a tag push starts it too, and GitHub does not apply `paths` to
+// tags. These tests read branch names, not patterns, and the paths of `paths`.
+const PATTERN = /[*?+[\]!]/u;
 function pushesByBranchAndPath(workflow) {
   if (!eventsOf(workflow).includes("push")) return;
   const push = triggerOf(workflow, "push");
   for (const key of Object.keys(push))
     assert.ok(["branches", "paths"].includes(key), `${workflow.name}: push.${key}`);
-  for (const branch of listed(push.branches) ?? [])
+  const branches = listed(push.branches);
+  assert.ok(
+    branches !== undefined,
+    `${workflow.name}: push has no branches, so a tag push starts it too`,
+  );
+  for (const branch of branches)
     assert.ok(
-      !String(branch).startsWith("!"),
-      `${workflow.name}: push.branches negates ${String(branch).slice(1)}`,
+      typeof branch === "string" && !PATTERN.test(branch),
+      `${workflow.name}: push.branches has the pattern ${String(branch)}, not a branch name`,
     );
+  assert.ok(branches.includes("main"), `${workflow.name}: push.branches leaves out main`);
+  if (isGated(workflow))
+    assert.ok(listed(push.paths) !== undefined, `${workflow.name}: push has no paths`);
 }
 
 const GATED_SHAPE = [waitsForTheAnswer, resultJobsJudgeEveryJob, readsWhatItDecidesBy];
@@ -443,6 +482,8 @@ const shapeOf = (workflow, required) => {
   startsOnPullRequestsIntoMain(workflow);
 };
 
+// GitHub takes a skipped required check for a passed one: a required job of a
+// workflow without a result job runs on every pull request, after no other job.
 function requiredChecksReport(all, checks) {
   const names = all.flatMap((workflow) =>
     jobsOf(workflow).map(([id, job]) => ({ workflow, job, name: job.name ?? id })),
@@ -453,7 +494,13 @@ function requiredChecksReport(all, checks) {
     const [{ workflow, job }] = found;
     assert.ok(onPullRequests(workflow), `${context}: no pull request trigger`);
     if (isGated(workflow)) assert.ok(isResult(job), `${context}: only a result job always reports`);
-    else assert.equal(job.if, undefined, context);
+    else {
+      assert.equal(job.if, undefined, context);
+      assert.ok(
+        !Object.hasOwn(job, "needs"),
+        `${context}: waits for another job, and is skipped with it`,
+      );
+    }
   }
   for (const workflow of all.filter(onPullRequests))
     assert.ok(
@@ -467,27 +514,62 @@ function requiredChecksReport(all, checks) {
 function startsOnPushesToMain(workflow) {
   assert.ok(eventsOf(workflow).includes("push"), `${workflow.name} does not start on push`);
   pushesByBranchAndPath(workflow);
-  const branches = listed(triggerOf(workflow, "push").branches);
-  assert.ok(
-    branches === undefined || branches.includes("main"),
-    `${workflow.name}: push.branches leaves out main`,
-  );
 }
 const includes = (paths) => paths.filter((path) => !path.startsWith("!"));
 const excludes = (paths) => paths.filter((path) => path.startsWith("!"));
 function testsFollowBuilds(build, tests) {
   for (const workflow of [build, tests]) startsOnPushesToMain(workflow);
-  const [built, tested] = [build, tests].map((workflow) =>
-    listed(triggerOf(workflow, "push").paths),
-  );
-  if (tested === undefined) return;
-  assert.ok(
-    built !== undefined,
-    `bb tests skip the pushes outside their paths, on which ${build.name} builds`,
-  );
+  const [built, tested] = [build, tests].map((workflow) => {
+    const paths = listed(triggerOf(workflow, "push").paths);
+    assert.ok(paths !== undefined, `${workflow.name}: push has no paths`);
+    return paths;
+  });
   for (const path of includes(built)) assert.ok(tested.includes(path), `bb tests skip ${path}`);
   for (const path of excludes(tested))
     assert.ok(built.includes(path), `bb tests leave out ${path}`);
+}
+
+const downloadedBy = (release) =>
+  jobsOf(release).flatMap(([, job]) =>
+    (job.steps ?? []).flatMap((step) =>
+      commandLines(step)
+        .filter((line) => /\bgh run download\b/u.test(line))
+        .map((line) => /\s--name\s+(?<name>[^\s"'$]+)/u.exec(line)?.groups.name),
+    ),
+  );
+const isUpload = (step) => step.uses?.startsWith("actions/upload-artifact@") ?? false;
+function uploadsWhatTheReleaseTakes(build, release) {
+  const names = downloadedBy(release);
+  assert.ok(names.length > 0, `${release.name} downloads no artifact of a build run`);
+  const waited = new Set(resultsOf(build).flatMap(([, job]) => needsOf(job)));
+  const work = workOf(build).filter((id) => waited.has(id));
+  for (const name of names) {
+    assert.ok(name !== undefined, `${release.name} downloads an artifact this test cannot name`);
+    const uploads = work.flatMap((id) =>
+      (build.jobs[id].steps ?? [])
+        .filter((step) => isUpload(step) && step.with?.name === name)
+        .map((step) => ({ id, step })),
+    );
+    assert.equal(
+      uploads.length,
+      1,
+      `${build.name}: ${uploads.length} steps of the jobs its result waits for upload ${name}, ` +
+        `which ${release.name} downloads`,
+    );
+    const [{ id, step }] = uploads;
+    const where = `${build.name} ${id}: the upload of ${name}`;
+    assert.equal(step.with["if-no-files-found"], "error", `${where} passes without its files`);
+    assert.equal(step.if, undefined, `${where} runs on a condition`);
+    assert.ok(!Object.hasOwn(step, "continue-on-error"), `${where} may fail and pass`);
+    const needs = RELEASE_INPUTS[id];
+    assert.ok(needs !== undefined, `${where}: this test lists nothing the release needs of it`);
+    const paths = new Set(
+      String(step.with.path ?? "")
+        .split("\n")
+        .map((line) => line.trim()),
+    );
+    for (const path of needs) assert.ok(paths.has(path), `${where} leaves out ${path}`);
+  }
 }
 
 const stepOf = (workflow, job, name) =>
@@ -497,6 +579,21 @@ const eventMapOf = (workflow) => {
   if (typeof workflow.on === "string" || Array.isArray(workflow.on))
     workflow.on = Object.fromEntries(eventsOf(workflow).map((event) => [event, null]));
   return workflow.on;
+};
+// One filter of an event, for a test to change: a workflow without it fails
+// the test by the filter's name.
+const filterOf = (workflow, event, key) => {
+  const value = listed(triggerOf(workflow, event)[key]);
+  assert.ok(
+    value !== undefined,
+    `${workflow.name} has no on.${event}.${key} for this test to change`,
+  );
+  return value;
+};
+const pushWith = (workflow, change) => {
+  eventMapOf(workflow).push = { ...triggerOf(workflow, "push"), ...change };
+  for (const [key, value] of Object.entries(change))
+    if (value === undefined) delete workflow.on.push[key];
 };
 
 // Every test of this file, on one state of the workflows and the required checks.
@@ -537,7 +634,7 @@ function register({ workflows, required }) {
       for (const workflow of carrying) startsOnTheListedEvents(workflow);
     });
 
-    test("a workflow with a required check starts on pushes by branch and path alone", () => {
+    test("a workflow with a required check starts on pushes to named branches, main among them, and a gated one by paths as well", () => {
       for (const workflow of carrying) pushesByBranchAndPath(workflow);
     });
 
@@ -602,11 +699,15 @@ function register({ workflows, required }) {
     test("every push to main that builds Desktop also runs bb's tests on its commit", () => {
       testsFollowBuilds(...desktopPair());
       const [wider, tests] = desktopPair();
-      wider.on.push.paths.push("docs/**");
+      pushWith(wider, { paths: [...filterOf(wider, "push", "paths"), "docs/**"] });
       assert.throws(() => testsFollowBuilds(wider, tests), /bb tests skip docs/u);
       const [build, narrower] = desktopPair();
-      narrower.on.push.paths.push("!brand/**");
+      pushWith(narrower, { paths: [...filterOf(narrower, "push", "paths"), "!brand/**"] });
       assert.throws(() => testsFollowBuilds(build, narrower), /bb tests leave out !brand/u);
+    });
+
+    test("every artifact desktop-release.yml takes from a Desktop run is uploaded whole by a job the result waits for", () => {
+      uploadsWhatTheReleaseTakes(copyOf("desktop.yml"), copyOf("desktop-release.yml"));
     });
   });
 
@@ -701,6 +802,75 @@ function register({ workflows, required }) {
       }
     });
 
+    test("a command of a required check's work that only a comment on its line names", () => {
+      breaks(
+        copyOf("bots-e2e.yml", (w) => {
+          stepOf(w, "e2e", "Run the end-to-end tests").run =
+            "true # node --test e2e/bots/bots.test.mjs";
+        }),
+        /e2e "Run the end-to-end tests" does not run e2e\/bots\/bots\.test\.mjs/u,
+      );
+      for (const run of [
+        'echo "# not a comment" && node --test e2e/bots/bots.test.mjs',
+        "echo '# not a comment'; node --test e2e/bots/bots.test.mjs",
+        "issue#1=x node --test e2e/bots/bots.test.mjs",
+      ])
+        assert.doesNotThrow(
+          () =>
+            shapeOf(
+              copyOf("bots-e2e.yml", (w) => {
+                stepOf(w, "e2e", "Run the end-to-end tests").run = run;
+              }),
+              required,
+            ),
+          run,
+        );
+    });
+
+    test("an artifact desktop-release.yml takes that Desktop does not upload whole", () => {
+      const release = copyOf("desktop-release.yml");
+      const names = downloadedBy(release);
+      assert.ok(names.length > 0);
+      for (const name of names) {
+        const uploadOf = (w) => {
+          const [found] = workOf(w).flatMap((id) =>
+            (w.jobs[id].steps ?? [])
+              .filter((step) => isUpload(step) && step.with?.name === name)
+              .map((step) => ({ id, step })),
+          );
+          assert.ok(found !== undefined, `${w.name} uploads no ${name}`);
+          return found;
+        };
+        const catches = (change, expected) =>
+          assert.throws(
+            () => uploadsWhatTheReleaseTakes(copyOf("desktop.yml", change), release),
+            (error) => error.message.includes(expected),
+            expected,
+          );
+        const missing = `0 steps of the jobs its result waits for upload ${name}`;
+        catches((w) => {
+          const { id, step } = uploadOf(w);
+          w.jobs[id].steps = w.jobs[id].steps.filter((entry) => entry !== step);
+        }, missing);
+        catches((w) => {
+          uploadOf(w).step.with.name = `${name}-renamed`;
+        }, missing);
+        catches((w) => {
+          delete uploadOf(w).step.with["if-no-files-found"];
+        }, `the upload of ${name} passes without its files`);
+        catches((w) => {
+          uploadOf(w).step.if = "always()";
+        }, `the upload of ${name} runs on a condition`);
+        catches((w) => {
+          uploadOf(w).step["continue-on-error"] = true;
+        }, `the upload of ${name} may fail and pass`);
+        catches((w) => {
+          const { step } = uploadOf(w);
+          step.with.path = step.with.path.split("\n").slice(1).join("\n");
+        }, `the upload of ${name} leaves out `);
+      }
+    });
+
     test("a job whose work runs in another workflow", () => {
       breaks(
         copyOf("bots-e2e.yml", (w) => {
@@ -772,7 +942,7 @@ function register({ workflows, required }) {
       assert.doesNotThrow(() =>
         shapeOf(
           copyOf("bots-e2e.yml", (w) => {
-            w.on.pull_request = {
+            eventMapOf(w).pull_request = {
               branches: ["main"],
               types: ["opened", "synchronize", "reopened"],
             };
@@ -828,48 +998,72 @@ function register({ workflows, required }) {
       );
       const anyPush = (file) =>
         copyOf(file, (w) => {
-          w.on = ["push", "pull_request", "workflow_dispatch"];
+          w.on = eventsOf(w);
         });
-      for (const file of ["desktop.yml", "desktop-tests.yml"])
-        assert.doesNotThrow(() => shapeOf(anyPush(file), required), file);
-      assert.doesNotThrow(() =>
-        testsFollowBuilds(copyOf("desktop.yml"), anyPush("desktop-tests.yml")),
-      );
-      assert.throws(
-        () => testsFollowBuilds(anyPush("desktop.yml"), copyOf("desktop-tests.yml")),
-        /bb tests skip the pushes outside their paths/u,
-      );
+      for (const file of ["desktop.yml", "desktop-tests.yml", "ci.yml"])
+        breaks(anyPush(file), ": push has no branches, so a tag push starts it too");
+      for (const pair of [
+        [copyOf("desktop.yml"), anyPush("desktop-tests.yml")],
+        [anyPush("desktop.yml"), copyOf("desktop-tests.yml")],
+      ])
+        assert.throws(() => testsFollowBuilds(...pair), /: push has no branches/u);
     });
 
-    test("a push run of a workflow with a required check chosen by more than branch and path", () => {
+    test("a push run of a workflow with a required check chosen by more than named branches and paths", () => {
       for (const { file } of carrying.filter((workflow) => eventsOf(workflow).includes("push"))) {
         breaks(
           copyOf(file, (w) => {
-            w.on.push = { ...triggerOf(w, "push"), tags: ["desktop/v*"] };
+            pushWith(w, { tags: ["desktop/v*"] });
           }),
           `: push.tags`,
         );
         breaks(
           copyOf(file, (w) => {
-            w.on.push = { ...triggerOf(w, "push"), "branches-ignore": ["release-only"] };
-            delete w.on.push.branches;
+            pushWith(w, { "branches-ignore": ["release-only"], branches: undefined });
           }),
           `: push.branches-ignore`,
         );
         breaks(
           copyOf(file, (w) => {
-            w.on.push = { ...triggerOf(w, "push"), "paths-ignore": ["docs/**"] };
-            delete w.on.push.paths;
+            pushWith(w, { "paths-ignore": ["docs/**"], paths: undefined });
           }),
           `: push.paths-ignore`,
         );
         breaks(
           copyOf(file, (w) => {
-            w.on.push = { ...triggerOf(w, "push"), branches: ["main", "!release-only"] };
+            pushWith(w, { branches: undefined });
           }),
-          `: push.branches negates release-only`,
+          ": push has no branches, so a tag push starts it too",
+        );
+        for (const pattern of ["!release-only", "m*", "release/?", "ma+in", "[m]ain"])
+          breaks(
+            copyOf(file, (w) => {
+              pushWith(w, { branches: ["main", pattern] });
+            }),
+            `: push.branches has the pattern ${pattern}, not a branch name`,
+          );
+        breaks(
+          copyOf(file, (w) => {
+            pushWith(w, { branches: ["m*"] });
+          }),
+          ": push.branches has the pattern m*, not a branch name",
+        );
+        breaks(
+          copyOf(file, (w) => {
+            pushWith(w, { branches: ["release-only"] });
+          }),
+          ": push.branches leaves out main",
         );
       }
+      for (const file of gated
+        .filter((workflow) => eventsOf(workflow).includes("push"))
+        .map((workflow) => workflow.file))
+        breaks(
+          copyOf(file, (w) => {
+            pushWith(w, { paths: undefined });
+          }),
+          ": push has no paths",
+        );
     });
 
     test("a workflow that a change of how pnpm installs does not run", () => {
@@ -903,18 +1097,19 @@ function register({ workflows, required }) {
     test("a Desktop workflow that does not start on pushes to main", () => {
       for (const [push, error] of [
         [{ branches: ["release-only"] }, /push\.branches leaves out main/u],
-        [{ branches: ["main", "!main"] }, /push\.branches negates main/u],
+        [{ branches: ["main", "!main"] }, /push\.branches has the pattern !main/u],
         [{ "branches-ignore": ["release-only"] }, /push\.branches-ignore/u],
         [{ tags: ["desktop/v*"] }, /push\.tags/u],
+        [{}, /push has no branches, so a tag push starts it too/u],
       ])
         for (const index of [0, 1]) {
           const pair = desktopPair();
-          pair[index].on.push = { ...push, paths: pair[index].on.push.paths };
+          eventMapOf(pair[index]).push = { ...push, paths: filterOf(pair[index], "push", "paths") };
           assert.throws(() => testsFollowBuilds(...pair), error);
         }
       for (const index of [0, 1]) {
         const pair = desktopPair();
-        delete pair[index].on.push;
+        delete eventMapOf(pair[index]).push;
         assert.throws(() => testsFollowBuilds(...pair), /does not start on push/u);
       }
     });
@@ -928,16 +1123,20 @@ function register({ workflows, required }) {
     test("a second result job judges every job, and a required name has a job until it is no longer required", () => {
       for (const workflow of gated) {
         const [[id, job]] = requiredOf(workflow, required);
-        const spare = { ...structuredClone(job), name: `${job.name ?? id} spare` };
+        const spareId = unused("spare_result", new Set(Object.keys(workflow.jobs)), "_");
+        const spare = {
+          ...structuredClone(job),
+          name: unused(`${job.name ?? id} spare`, namesOf({ workflows, required }), " "),
+        };
         breaks(
           copyOf(workflow.file, (w) => {
-            w.jobs.spare_result = { ...spare, needs: ["changes"] };
+            w.jobs[spareId] = { ...spare, needs: ["changes"] };
           }),
-          `${workflow.name} spare_result does not wait for every job`,
+          `${workflow.name} ${spareId} does not wait for every job`,
         );
         const only = copyOf(workflow.file, (w) => {
           for (const [result] of resultsOf(w)) delete w.jobs[result];
-          w.jobs.spare_result = spare;
+          w.jobs[spareId] = spare;
         });
         assert.throws(
           () =>
@@ -946,6 +1145,28 @@ function register({ workflows, required }) {
               required,
             ),
           /0 jobs carry/u,
+        );
+      }
+    });
+
+    test("a required job of a workflow without a result job that waits for another job", () => {
+      const ci = copyOf("ci.yml");
+      const direct = requiredOf(ci, required);
+      assert.ok(direct.length > 0);
+      const [other] = jobsOf(ci).find(([id]) => !direct.some(([key]) => key === id));
+      for (const [id, job] of direct) {
+        const waiting = copyOf("ci.yml", (w) => {
+          w.jobs[id].needs = other;
+        });
+        assert.throws(
+          () =>
+            requiredChecksReport(
+              workflows.map((entry) => (entry.file === "ci.yml" ? waiting : entry)),
+              required,
+            ),
+          (error) =>
+            error.message === `${job.name ?? id}: waits for another job, and is skipped with it`,
+          id,
         );
       }
     });
@@ -965,51 +1186,65 @@ const unused = (base, taken, joint) => {
   for (let count = 2; taken.has(candidate); count += 1) candidate = `${base}${joint}${count}`;
   return candidate;
 };
-function renamed({ workflows, required }, file, step) {
-  const workflow = structuredClone(workflows.find((entry) => entry.file === file));
-  const [[id, job]] = requiredOf(workflow, required);
-  const old = job.name ?? id;
-  const names = new Set([
+const namesOf = ({ workflows, required }) =>
+  new Set([
     ...workflows.flatMap((entry) => jobsOf(entry).map(([key, other]) => other.name ?? key)),
     ...required.map((check) => check.context),
   ]);
-  const name = unused(`${old} after a rename`, names, " ");
-  workflow.jobs[unused("renamed_result", new Set(Object.keys(workflow.jobs)), "_")] = {
-    ...structuredClone(job),
-    name,
-  };
-  if (step === 2) delete workflow.jobs[id];
+const idsOf = (workflow) => new Set(Object.keys(workflow.jobs));
+// The id and the name the rename gives the new result job.
+const renameIdOf = (workflow) => unused("renamed_result", idsOf(workflow), "_");
+const renameNameOf = (repo, old) => unused(`${old} after a rename`, namesOf(repo), " ");
+
+// One rename step: the new result job is a copy of the required one under
+// `id` and `name`.
+function renamedAs({ workflows, required }, file, step, id, name) {
+  const workflow = structuredClone(workflows.find((entry) => entry.file === file));
+  const [[old, job]] = requiredOf(workflow, required);
+  const context = job.name ?? old;
+  workflow.jobs[id] = { ...structuredClone(job), name };
+  if (step === 2) delete workflow.jobs[old];
   return {
     workflows: workflows.map((entry) => (entry.file === file ? workflow : entry)),
     required:
       step === 0
         ? required
-        : required.map((check) => (check.context === old ? { ...check, context: name } : check)),
+        : required.map((check) =>
+            check.context === context ? { ...check, context: name } : check,
+          ),
   };
 }
+function renamed(repo, file, step) {
+  const workflow = repo.workflows.find((entry) => entry.file === file);
+  const [[id, job]] = requiredOf(workflow, repo.required);
+  return renamedAs(repo, file, step, renameIdOf(workflow), renameNameOf(repo, job.name ?? id));
+}
 
-// The repository with a work job of Bots under the id the rename starts from,
-// and a job in another workflow under the name it starts from.
-function crowded({ workflows, required }) {
+// The repository with a work job of Bots under the id the rename takes, and a
+// job in another workflow under the name it takes.
+function crowded(repo) {
+  const { workflows, required } = repo;
   const change = (file, edit) => {
     const workflow = structuredClone(workflows.find((entry) => entry.file === file));
     edit(workflow);
     return workflow;
   };
+  const names = namesOf(repo);
   const bots = change("bots-e2e.yml", (w) => {
-    w.jobs.renamed_result = {
-      name: "More end-to-end tests",
+    const work = renameIdOf(w);
+    w.jobs[work] = {
+      name: unused("More end-to-end tests", names, " "),
       needs: "changes",
       if: CHANGED,
       "runs-on": "ubuntu-latest",
       steps: [{ run: "true" }],
     };
-    for (const [, job] of resultsOf(w)) job.needs = [...needsOf(job), "renamed_result"];
+    for (const [, job] of resultsOf(w)) job.needs = [...needsOf(job), work];
   });
   const [[id, result]] = requiredOf(bots, required);
   const ci = change("ci.yml", (w) => {
-    w.jobs.namesake = {
-      name: `${result.name ?? id} after a rename`,
+    w.jobs[unused("namesake", idsOf(w), "_")] = {
+      name: renameNameOf(repo, result.name ?? id),
       "runs-on": "ubuntu-latest",
       steps: [{ run: "true" }],
     };
@@ -1021,13 +1256,26 @@ function crowded({ workflows, required }) {
   };
 }
 
-register(repository);
-for (const { file, name } of repository.workflows.filter(isGated))
+// Every registration of this file on one state of the repository: the state
+// itself, the three rename steps of every gated workflow, and the rename of
+// Bots where the first id and name it would take are in use.
+function registerAll(repo) {
+  register(repo);
+  for (const { file, name } of repo.workflows.filter(isGated))
+    for (const [step, state] of RENAME_STEPS.entries())
+      describe(`${name} with its required check renamed, ${state}`, () => {
+        register(renamed(repo, file, step));
+      });
   for (const [step, state] of RENAME_STEPS.entries())
-    describe(`${name} with its required check renamed, ${state}`, () => {
-      register(renamed(repository, file, step));
+    describe(`Bots end-to-end renamed where a job has the first id and another the first name, ${state}`, () => {
+      register(renamed(crowded(repo), "bots-e2e.yml", step));
     });
+}
+
+registerAll(repository);
+// The states the runbook's rename of Bots leaves behind, with the new result
+// job under the id the runbook may well choose.
 for (const [step, state] of RENAME_STEPS.entries())
-  describe(`Bots end-to-end renamed where a job has the first id and another the first name, ${state}`, () => {
-    register(renamed(crowded(repository), "bots-e2e.yml", step));
+  describe(`After the runbook's rename of Bots end-to-end, ${state}`, () => {
+    registerAll(renamedAs(repository, "bots-e2e.yml", step, "renamed_result", "Bots smoke result"));
   });

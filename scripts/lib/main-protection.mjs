@@ -24,21 +24,28 @@ import { isDeepStrictEqual } from "node:util";
 // Not covered: who may start workflows from forks and the rights of the workflow
 // token; they are separate settings of the repository.
 
+// `said` is the message of GitHub's own answer, when it gave one.
 export class GitHubError extends Error {
-  constructor(message, status) {
+  constructor(message, status, said) {
     super(message);
     this.status = status;
+    this.said = said;
   }
 }
 
 // A gh that does not finish within a minute gave no answer. It is killed, not
 // asked to end: spawnSync waits for the child, and one that handles SIGTERM
-// would hold the script.
+// would hold the script. GH_DEBUG and DEBUG would make gh write every header it
+// sent and got to stderr, where the script takes gh's own words from.
 export function ghRunner({ program = "gh", timeout = 60_000 } = {}) {
   return (args, input) => {
+    const env = { ...process.env };
+    delete env.GH_DEBUG;
+    delete env.DEBUG;
     const done = spawnSync(program, args, {
       encoding: "utf8",
       input,
+      env,
       timeout,
       killSignal: "SIGKILL",
     });
@@ -47,8 +54,11 @@ export function ghRunner({ program = "gh", timeout = 60_000 } = {}) {
   };
 }
 
+// The file names a repository of github.com; GH_HOST does not move the
+// requests to another host.
+const HOST = "github.com";
 const command = (method, address, body) => {
-  const args = ["api", "--include", "-X", method, address];
+  const args = ["api", "--hostname", HOST, "--include", "-X", method, address];
   return body === undefined ? args : [...args, "--input", "-"];
 };
 
@@ -67,8 +77,7 @@ function answerOf(done) {
 
 const succeeded = (status) => status >= 200 && status < 300;
 
-// With GH_DEBUG set gh prints every header it sent and got on stderr; what it
-// says about a missing answer is its last line.
+// What gh says about a missing answer is the last line it writes to stderr.
 const SAID_AT_MOST = 300;
 function lastWords(text) {
   const line = (text ?? "")
@@ -88,8 +97,12 @@ function refusal(method, address, done, { status, body }) {
   } catch {
     // The body is not GitHub's JSON: the status says it all.
   }
-  const said = typeof message === "string" ? `${message} ` : "";
-  return new GitHubError(`${method} ${address}: ${said}(HTTP ${status})`, status);
+  const said = typeof message === "string" ? message : undefined;
+  return new GitHubError(
+    `${method} ${address}: ${said === undefined ? "" : `${said} `}(HTTP ${status})`,
+    status,
+    said,
+  );
 }
 
 const isObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -169,18 +182,29 @@ function outsideRest(get, { repository, branch }) {
   const unreadable = () =>
     new Error(`GraphQL: the branch protection rule of ${branch} could not be read`);
   const found = answer?.data?.repository;
-  if (answer?.errors !== undefined || found?.mergeQueue === undefined || found.ref === undefined)
+  if (
+    answer?.errors !== undefined ||
+    !isObject(found) ||
+    !(found.mergeQueue === null || isObject(found.mergeQueue)) ||
+    !(found.ref === null || isObject(found.ref))
+  )
     throw unreadable();
   if (found.ref === null) throw new Error(`GraphQL: ${repository} has no branch ${branch}`);
   const rule = found.ref.branchProtectionRule;
-  if (rule === undefined) throw unreadable();
+  if (!(rule === null || isObject(rule))) throw unreadable();
   const environments = [];
   const actors = [];
   if (rule !== null) {
     const allowances = rule.bypassForcePushAllowances;
-    if (!Array.isArray(allowances?.nodes) || allowances.pageInfo?.hasNextPage) throw unreadable();
+    if (
+      typeof rule.requiresDeployments !== "boolean" ||
+      !Array.isArray(allowances?.nodes) ||
+      typeof allowances.pageInfo?.hasNextPage !== "boolean" ||
+      allowances.pageInfo.hasNextPage
+    )
+      throw unreadable();
     actors.push(...allowances.nodes.map((allowance) => actorName(allowance?.actor)));
-    if (rule.requiresDeployments === true) {
+    if (rule.requiresDeployments) {
       if (!Array.isArray(rule.requiredDeploymentEnvironments)) throw unreadable();
       environments.push(...rule.requiredDeploymentEnvironments);
     }
@@ -198,7 +222,7 @@ const statusChecks = (value) =>
     ? null
     : {
         strict: value.strict,
-        checks: byContext((value.checks ?? []).map(({ context, app_id }) => ({ context, app_id }))),
+        checks: byContext(value.checks.map(({ context, app_id }) => ({ context, app_id }))),
       };
 
 export function addresses({ repository, branch }) {
@@ -214,11 +238,47 @@ export function addresses({ repository, branch }) {
   };
 }
 
-const isProtection = (value) =>
+// The answers are checked before they are read, so that a value of the wrong
+// type is not taken for a setting that is off.
+const isSwitch = (value) => isObject(value) && typeof value.enabled === "boolean";
+const isCheck = (value) =>
   isObject(value) &&
-  (value.required_status_checks == null ||
-    (isObject(value.required_status_checks) &&
-      listOf(isObject)(value.required_status_checks.checks ?? [])));
+  typeof value.context === "string" &&
+  (value.app_id === null || Number.isInteger(value.app_id));
+
+// The protection of the branch asked about. Every on/off setting in it has a
+// boolean `enabled`, and so has each one the file names when GitHub reports it;
+// one GitHub leaves out is off. The required checks have to name their source
+// app, which the old `contexts` alone cannot.
+const isProtectionOf = (address, wanted) => (value) => {
+  if (!isObject(value) || typeof value.url !== "string" || !value.url.endsWith(`/${address}`))
+    return false;
+  const named = [
+    ...Object.keys(wanted.protection).filter(
+      (name) => typeof wanted.protection[name] === "boolean",
+    ),
+    "required_signatures",
+  ];
+  const checks = value.required_status_checks;
+  return (
+    Object.values(value).every(
+      (field) => !isObject(field) || !Object.hasOwn(field, "enabled") || isSwitch(field),
+    ) &&
+    named.every((name) => !Object.hasOwn(value, name) || isSwitch(value[name])) &&
+    (checks == null ||
+      (isObject(checks) && typeof checks.strict === "boolean" && listOf(isCheck)(checks.checks)))
+  );
+};
+
+// `enabled` is the one setting GitHub always reports; one of the others the
+// file names and GitHub leaves out, as for a repository with Actions off, is a
+// difference.
+const isActionsOf = (wanted) => (value) =>
+  isObject(value) &&
+  typeof value.enabled === "boolean" &&
+  Object.entries(wanted.actions).every(
+    ([key, wants]) => !Object.hasOwn(value, key) || typeof value[key] === typeof wants,
+  );
 
 // A renamed or moved repository still answers under its old name, through a
 // redirect, so the name GitHub gives is the one compared.
@@ -234,26 +294,21 @@ function identify(gh, wanted) {
     );
 }
 
-// What GitHub enforces now, in the shape of the file.
+// GitHub's message for a branch without protection; any other 404, such as a
+// branch that is not there, is an error.
+const UNPROTECTED = "Branch not protected";
+
+// What GitHub enforces now, in the shape of the file. A setting of Actions
+// GitHub reports no value for is undefined.
 export function read(gh, wanted) {
   const get = reader(gh);
   const at = addresses(wanted);
-  const actions = get(
-    at.actions,
-    (value) =>
-      isObject(value) && Object.keys(wanted.actions).every((key) => Object.hasOwn(value, key)),
-  );
+  const actions = get(at.actions, isActionsOf(wanted));
   let live;
   try {
-    live = get(at.protection, isProtection);
+    live = get(at.protection, isProtectionOf(at.protection, wanted));
   } catch (error) {
-    if (
-      !(
-        error instanceof GitHubError &&
-        error.status === 404 &&
-        /not protected/iu.test(error.message)
-      )
-    )
+    if (!(error instanceof GitHubError && error.status === 404 && error.said === UNPROTECTED))
       throw error;
     live = null;
   }
@@ -317,45 +372,70 @@ export function differences(found, wanted) {
 
 const ofProtection = (name) => name === "protection" || name.startsWith("protection.");
 
-// The writes that remove the differences: only the parts that differ. A write
-// is done when none of the differences it owns is left after it.
-export function writes(list, wanted) {
+// The parts this script writes, in the order it writes them. A part is as the
+// file says when the state read from GitHub shows it so, whatever GitHub
+// answered its request; `owns` names the differences that are about it. The
+// list of required checks and the signatures are written through addresses
+// under the branch's protection, so they need one.
+function parts(wanted) {
   const at = addresses(wanted);
-  const names = list.map((entry) => entry.name);
-  const steps = [];
-  if (names.some((name) => name.startsWith("actions.")))
-    steps.push({
+  const checks = statusChecks(wanted.protection.required_status_checks);
+  return {
+    actions: {
       part: "actions",
       owns: (name) => name.startsWith("actions."),
+      shown: (found) =>
+        Object.entries(wanted.actions).every(([key, wants]) =>
+          isDeepStrictEqual(found.actions[key], wants),
+        ),
       method: "PUT",
       address: at.actions,
       body: wanted.actions,
-    });
-  const protection = names.filter(ofProtection);
-  if (protection.length === 1 && protection[0] === "protection.required_status_checks")
-    steps.push({
+    },
+    checks: {
       part: "required checks",
-      owns: (name) => name === "protection.required_status_checks",
+      owns: (name) => name === "protection" || name === "protection.required_status_checks",
+      shown: (found) =>
+        found.protection !== null &&
+        isDeepStrictEqual(found.protection.required_status_checks, checks),
       method: "PATCH",
       address: at.statusChecks,
       body: wanted.protection.required_status_checks,
-    });
-  else if (protection.length > 0)
-    steps.push({
+    },
+    protection: {
       part: "branch protection",
       owns: ofProtection,
+      shown: (found) =>
+        found.protection !== null &&
+        !differences(found, wanted).some(({ name }) => ofProtection(name)),
       method: "PUT",
       address: at.protection,
       body: wanted.protection,
-    });
-  if (names.includes("required_signatures"))
-    steps.push({
+    },
+    signatures: {
       part: "required signatures",
-      owns: (name) => name === "required_signatures",
+      owns: (name) => name === "protection" || name === "required_signatures",
+      shown: (found) =>
+        found.protection !== null && found.required_signatures === wanted.required_signatures,
       method: wanted.required_signatures ? "POST" : "DELETE",
       address: at.signatures,
-    });
-  return steps;
+    },
+  };
+}
+
+// The next write, from the latest state read: the first part not yet sent in
+// this run that GitHub does not show as the file says. The list of required
+// checks goes alone while the branch has a protection and nothing else of it
+// differs.
+function nextWrite(found, wanted, sent) {
+  const { actions, checks, protection, signatures } = parts(wanted);
+  const differing = differences(found, wanted)
+    .map(({ name }) => name)
+    .filter(ofProtection);
+  const onlyChecks = differing.length === 1 && differing[0] === "protection.required_status_checks";
+  return [actions, onlyChecks ? checks : protection, signatures].find(
+    (step) => !sent.has(step.part) && !step.shown(found),
+  );
 }
 
 // Where the parts this script only reads are changed, by hand.
@@ -371,21 +451,43 @@ const READ_ONLY = {
 const show = (value) => JSON.stringify(value);
 const lines = (list) =>
   list.map(
-    ({ name, has, wants }) => `- ${name}: GitHub has ${show(has)}, the file says ${show(wants)}`,
+    ({ name, has, wants }) =>
+      `- ${name}: ${has === undefined ? "GitHub reports no value" : `GitHub has ${show(has)}`}, ` +
+      `the file says ${show(wants)}`,
   );
+
+// What the output says of the parts sent before: each was shown by GitHub as
+// the file says in the read right after its request.
+const SHOWN = "and GitHub showed each as the file says after its request";
+const sentBefore = (shown) =>
+  shown.length > 0
+    ? `Sent before it, ${SHOWN}: ${shown.join(", ")}.`
+    : "Nothing was sent before it.";
+
+// The differences of a step that the read after its request no longer shows,
+// and the ones it shows. A difference of the whole protection covers each of
+// its settings.
+function outcome(step, before, after) {
+  const owned = (list) => list.map(({ name }) => name).filter(step.owns);
+  const left = owned(after);
+  const gone = owned(before).filter(
+    (name) => !left.some((other) => name === other || name.startsWith(`${other}.`)),
+  );
+  return { gone, left };
+}
 
 // Returns the exit code: 0 when GitHub enforces what the file says.
 export function run({ apply, gh, text, log }) {
   const wanted = JSON.parse(text);
   const where = `${wanted.branch} of ${wanted.repository}`;
   identify(gh, wanted);
-  const before = differences(read(gh, wanted), wanted);
-  if (before.length === 0) {
+  const first = differences(read(gh, wanted), wanted);
+  if (first.length === 0) {
     log(`${where} is protected as .github/main-protection.json says`);
     return 0;
   }
   log(`${where} is not protected as .github/main-protection.json says:`);
-  for (const line of lines(before)) log(line);
+  for (const line of lines(first)) log(line);
   if (!apply) return 1;
 
   let onBranch;
@@ -407,42 +509,54 @@ export function run({ apply, gh, text, log }) {
     return 1;
   }
 
-  const written = [];
-  let left = before;
+  // Each read serves as the outcome of the request before it and as the base
+  // of the next one; a part is sent at most once.
+  let found = read(gh, wanted);
+  let left = differences(found, wanted);
+  const sent = new Set();
+  const shown = [];
   let stop = null;
-  for (const step of writes(before, wanted)) {
+  for (;;) {
+    const step = nextWrite(found, wanted, sent);
+    if (step === undefined) break;
+    sent.add(step.part);
     const answer = attempt(gh, step);
+    const before = left;
     try {
-      left = differences(read(gh, wanted), wanted);
+      found = read(gh, wanted);
     } catch (error) {
-      if (written.length > 0) log(`Written: ${written.join(", ")}.`);
+      log(sentBefore(shown));
       log(
-        `Writing ${step.part}: GitHub could not be read after it, so it is not known ` +
-          `whether it was written (the answer was ${answer.said}).`,
+        `Sent ${step.part}: GitHub could not be read after it, so it is not known ` +
+          `whether GitHub shows it as the file says (the answer was ${answer.said}).`,
       );
       throw error;
     }
-    const owned = left.filter(({ name }) => step.owns(name)).map(({ name }) => name);
-    if (owned.length > 0) {
-      stop = { step, answer, owned };
+    left = differences(found, wanted);
+    if (!step.shown(found)) {
+      stop = { step, answer, ...outcome(step, before, left) };
       break;
     }
-    written.push(step.part);
+    shown.push(step.part);
     if (!answer.succeeded)
-      log(`${step.part}: GitHub shows it written, although the answer was ${answer.said}.`);
+      log(
+        `${step.part}: GitHub shows it as the file says, although the answer was ${answer.said}.`,
+      );
   }
   if (stop === null) {
-    log(`Written: ${written.join(", ") || "nothing"}.`);
-  } else {
-    const { step, answer, owned } = stop;
     log(
-      answer.succeeded
-        ? `Not written: ${step.part}. GitHub answered success (${answer.said}), ` +
-            `yet it still differs from the file in ${owned.join(", ")}.`
-        : `Not written: ${step.part}. GitHub still differs from the file in ` +
-            `${owned.join(", ")}; the answer was ${answer.said}.`,
+      shown.length > 0
+        ? `Sent, ${SHOWN}: ${shown.join(", ")}.`
+        : "Nothing was sent: GitHub shows every part this script writes as the file says.",
     );
-    log(written.length > 0 ? `Already written: ${written.join(", ")}.` : "Nothing was written.");
+  } else {
+    const { step, answer, gone, left: still } = stop;
+    log(
+      `Not as the file says after it was sent: ${step.part}. Differences gone since the read ` +
+        `before it: ${gone.join(", ") || "none"}; left: ${still.join(", ")}. ` +
+        `The answer was ${answer.said}.`,
+    );
+    log(sentBefore(shown));
   }
   if (left.length === 0) {
     log(`${where} is now protected as the file says`);
