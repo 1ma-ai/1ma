@@ -367,7 +367,9 @@ export class BotStore {
   released(): ReleasedBot[] {
     const threads = new Map<string, ReleasedBot["threads"]>();
     for (const row of this.db
-      .prepare<[string], ThreadRow>("SELECT * FROM bot_threads WHERE owner_id = ? ORDER BY position")
+      .prepare<[string], ThreadRow>(
+        "SELECT * FROM bot_threads WHERE owner_id = ? ORDER BY position",
+      )
       .all(this.owner)) {
       const ofBot = threads.get(row.bot_id) ?? [];
       threads.set(row.bot_id, ofBot);
@@ -736,7 +738,12 @@ export class BotStore {
          ${page.after === null ? "" : `AND position ${beyond} ?`}
          ORDER BY position ${direction} LIMIT ?`,
       )
-      .all(this.owner, botId, ...(page.after === null ? [] : [page.after.position]), page.limit + 1);
+      .all(
+        this.owner,
+        botId,
+        ...(page.after === null ? [] : [page.after.position]),
+        page.limit + 1,
+      );
     const shown = rows.slice(0, page.limit);
     return {
       threads: shown.map((row) => {

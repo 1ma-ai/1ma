@@ -202,7 +202,12 @@ describe("1000 bots and 50 000 conversations", () => {
     const before = t.harness.experimental_rpcInvalidations.length;
     await write(
       "bots.v2.moveThreads",
-      { botId: bot, sources: [source], target: { ...target, placement: "before" }, levelShown: true },
+      {
+        botId: bot,
+        sources: [source],
+        target: { ...target, placement: "before" },
+        levelShown: true,
+      },
       20,
     );
     await write("bots.v1.assign", { threadId: moved, botId: botId(501), place: "first" }, 15);

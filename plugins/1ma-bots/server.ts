@@ -509,7 +509,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     for (let after: Cursor | null = null; ;) {
       // In another order by now: read from its beginning.
       if (after !== null && after.order !== store.orderRevision(botId)) after = null;
-      const { threads, next } = store.threads(botId, { from: "first", after, limit: THREAD_IDS_MAX });
+      const { threads, next } = store.threads(botId, {
+        from: "first",
+        after,
+        limit: THREAD_IDS_MAX,
+      });
       const page = threads.map((member) => member.threadId);
       const branches = await branchesOf([...(await shownRows(page, reads)).keys()], reads);
       const first = page.find(
@@ -767,7 +771,14 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         const routeTo = (toThreadId: string | null) =>
           routeLetter(
             store,
-            { fromThreadId: ctx.threadId, to: input.to, toBotId, toThreadId, now: now(), ownerTurn },
+            {
+              fromThreadId: ctx.threadId,
+              to: input.to,
+              toBotId,
+              toThreadId,
+              now: now(),
+              ownerTurn,
+            },
             limits,
           );
         route = input.threadId
@@ -1193,7 +1204,10 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     missingSince = missing;
   };
 
-  const forgetDeleted = async (threadIds: readonly string[], rows: ReadonlyMap<string, ThreadRow>) => {
+  const forgetDeleted = async (
+    threadIds: readonly string[],
+    rows: ReadonlyMap<string, ThreadRow>,
+  ) => {
     for (const threadId of threadIds)
       if (!rows.has(threadId) && (await isDeleted(threadId))) store.forgetThread(threadId);
   };
@@ -1567,7 +1581,10 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         find: cliCommand({
           summary: `Find bots by name, role or work area; at most ${CLI_ROWS_MAX}`,
           positionals: [
-            { name: "text", description: "Text in the name, role or work areas; any when left out" },
+            {
+              name: "text",
+              description: "Text in the name, role or work areas; any when left out",
+            },
           ],
           options: { json: { type: "boolean", description: "Emit machine-readable JSON" } },
           run(input) {

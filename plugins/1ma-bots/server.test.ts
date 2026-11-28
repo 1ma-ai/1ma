@@ -4440,10 +4440,7 @@ describe("a change made while a request reads bb", () => {
     await hide(true);
     t.advance(1000);
     t.recordTurn("thr_target", "user", null);
-    t.threads.set(
-      "thr_target",
-      makeThreadResponse({ id: "thr_target", updatedAt: START + 1002 }),
-    );
+    t.threads.set("thr_target", makeThreadResponse({ id: "thr_target", updatedAt: START + 1002 }));
     t.bbCalls.after = async (call, ids) => {
       if (call !== "list" || !ids.includes("thr_target")) return;
       t.bbCalls.after = undefined;
@@ -4471,7 +4468,10 @@ describe("a change made while a request reads bb", () => {
     refuse(new Error("refused"));
     await sent;
     expect(
-      t.bb.storage.database().prepare("SELECT kind FROM bot_events WHERE bot_id = ?").all(t.sender.id),
+      t.bb.storage
+        .database()
+        .prepare("SELECT kind FROM bot_events WHERE bot_id = ?")
+        .all(t.sender.id),
     ).toEqual([]);
   });
 

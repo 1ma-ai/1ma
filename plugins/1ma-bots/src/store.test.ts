@@ -168,7 +168,8 @@ describe("a database the released version writes to again after this one", () =>
     chain: "INSERT INTO chains (id, letters, created_at) VALUES (?, 1, ?)",
     letter: `INSERT INTO letters (chain_id, from_bot, from_thread, to_bot, to_thread, sent_at)
              VALUES (?, ?, ?, ?, ?, ?)`,
-    pending: "INSERT INTO pending_letters (token, chain_id, to_thread, created_at) VALUES (?, ?, ?, ?)",
+    pending:
+      "INSERT INTO pending_letters (token, chain_id, to_thread, created_at) VALUES (?, ?, ?, ?)",
   };
 
   function sent(t: Opened) {
@@ -278,12 +279,7 @@ describe("removing a bot", () => {
     expect(before.letters).toHaveLength(1);
     expect(t.rows("pending_letters")).toEqual(waiting);
     expect(waiting).toContainEqual(expect.objectContaining({ to_thread: "thr_gone_2" }));
-    expect(ids("letter_spend", "bot_id")).toEqual([
-      gone.id,
-      gone.id,
-      kept.id,
-      other.id,
-    ]);
+    expect(ids("letter_spend", "bot_id")).toEqual([gone.id, gone.id, kept.id, other.id]);
   });
 });
 

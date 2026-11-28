@@ -949,7 +949,10 @@ describe("released and new plugins installed one at a time", () => {
 
   it("keeps working and leaves conversations in their projects with the released Bots put back", async () => {
     server.installPlugin(releasedDirs().bots);
-    assert.equal((await rpc("bots.v1.forThread", { threadId: fixture.first }))?.botId, fixture.bot.id);
+    assert.equal(
+      (await rpc("bots.v1.forThread", { threadId: fixture.first }))?.botId,
+      fixture.bot.id,
+    );
     fixture.second = await startConversation(fixture.bot, "[stub:reply second]", projects.alpha);
     await waitTurns(fixture.second, 1);
     await rpc("bots.v1.setHidden", { botId: fixture.bot.id, hidden: true });

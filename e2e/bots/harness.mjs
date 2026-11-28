@@ -204,7 +204,9 @@ function pluginDatabase() {
 export function hiddenOf(botId) {
   const db = pluginDatabase();
   try {
-    const row = db.prepare("SELECT hidden, hidden_at AS hiddenAt FROM bots WHERE id = ?").get(botId);
+    const row = db
+      .prepare("SELECT hidden, hidden_at AS hiddenAt FROM bots WHERE id = ?")
+      .get(botId);
     return { hidden: row.hidden === 1, hiddenAt: row.hiddenAt };
   } finally {
     db.close();

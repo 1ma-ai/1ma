@@ -59,11 +59,7 @@ export function seenThread(members: Members, rows: TreeRows, threadId: string): 
 
 // Moves the conversation first under its own parent; null when that changes
 // nothing in its group (open or done) of the bot's tree.
-export function topMove(
-  members: Members,
-  rows: TreeRows,
-  threadId: string,
-): MoveToTopInput | null {
+export function topMove(members: Members, rows: TreeRows, threadId: string): MoveToTopInput | null {
   const botId = members.get(threadId)?.botId;
   const parentOf = (id: string) => branchIn(members, rows, id)[1] ?? null;
   const keptOpen = new Set(
