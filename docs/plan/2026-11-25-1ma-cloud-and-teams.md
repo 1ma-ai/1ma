@@ -6,6 +6,11 @@ are estimates, not promises.
 
 ## Two approvals
 
+**Approving this plan now** confirms it as the basis for the stage documents, and nothing more:
+the owner said on 28.11 that implementation starts later. Until the owner gives the explicit start
+of approval 1, nobody creates projects, accounts, repositories, prototypes or product code, and the
+budget is $0. Both approvals below are asked then, one after the other.
+
 The owner's decision of 25.11: «В два шага (Рекомендую)». Each approval says what it allows.
 
 1. **Direction and research on made-up data.** Allows: this document's direction; prototypes of
@@ -46,10 +51,10 @@ Five people, each on an own Mac with an Apple chip. This is what they get in sta
 | What is installed           | 1ma with personal tasks, Claude Code or Codex, by the owner together with the person                                                                                                                |
 | Not in it                   | Shared chats, files or board, access from a browser or phone, work around the clock                                                                                                                 |
 | Who signs                   | The agency and the operator named in the private launch card. Free or paid: «Who may be given what»                                                                                                 |
-| What 1ma's cloud sees       | Name, email, Google's id and picture link, sign-in times, IP address and browser of the sign-in, state of the account («Data»). Not chats, files, tasks or model keys                               |
+| What 1ma's cloud sees       | Name, email, Google's id and picture link, times of sign-in and renewal, IP address and browser of the sign-in, a Google sign-in in progress, state of the account («Data»). Not chats, files, tasks or model keys |
 | What Claude or Codex sees   | What the person and their agent include in requests: messages, and files the agent reads for the work, under the vendor's terms                                                                     |
 | The agency pays             | Its Claude seats to Anthropic (US price before tax: $125 a month for five, or $1,200 a year; nothing new if it has them), the services it ordered. The app is free                                  |
-| The owner pays              | About $35 a month in stage 1: two small Supabase projects and Resend's free mail; an EU mail provider by quote («Cost»). Apple $99 a year at level 5                                                |
+| The owner pays              | About $35 a month in stage 1: two small Supabase projects and Resend's free mail. The recommended EU mail provider (decision 6) adds its quoted price («Cost»). Apple: $99 a year at level 5, separately; the local price may differ |
 | Claude would be paid by key | Found before the first request: a screen, no request. The agency may choose its own key at the price and limit agreed before                                                                        |
 | Claude refuses the plan     | A clear screen, no automatic paid request                                                                                                                                                           |
 | No network                  | Whoever is signed in continues until the date shown (28 days from the last renewal); the model itself needs the network. A new person cannot sign in                                                |
@@ -125,35 +130,55 @@ account only once, and lets an existing confirmed account get a letter and a ses
 check, also through Google. So the list is checked on the server at three places, with hooks Supabase
 offers on Free and Pro: before an account is created («before user created»), before any sign-in
 letter is sent («send email»: no letter to an address without an active admission), and whenever a
-token is issued or renewed («custom access token»: no token after the end date or a removal; the end
-date travels in the token). Removing a person also bans the account. The email form answers everybody
-the same. Google may still show its own page before 1ma refuses; the promise is about 1ma's account
-and 1ma's letter.
+token is issued or renewed («custom access token»: no token after the end date, a removal or a
+block; the end date travels in the token). This last hook also checks the block itself, because
+Supabase's exchange of a Google code does not. Removing a person also bans the account and ends all
+its sessions, so enabling it again needs a new sign-in; old sessions do not come back. The email form
+answers everybody the same. «No letter» means no letter for a request made after the removal. Test
+mail is checked with a made-up address outside the project's team, and the hook's refusal has no
+fallback to Supabase's own mail. Google may still show its own page before 1ma refuses; the promise
+is about 1ma's account and 1ma's letter.
 
 | Who signs in                                        | Expected                                                                                                                                                |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | A new stranger                                      | No account, no letter, no session                                                                                                                       |
 | A former participant, or a pilot past its end date  | No letter, no session, no renewal; an open app follows «Session and block»                                                                              |
-| A new employee given a former participant's address | A new admission and a new account id (the old account's address was changed or the account deleted when the person left); an old directory stays closed |
+| A new employee given a former participant's address | A new admission and a new account id, by Google and by email; an old directory stays closed                                                             |
 | An admitted person                                  | Signs in by Google or email                                                                                                                             |
 
-The operator ends the admission before a shared mailbox or a Mac goes to somebody else. The local
-binding stores the admission entry id as well as the account id, so a re-issued address never opens
-the old directory.
+**Passing on an address.** Changing the old account's email is not enough: Supabase keeps the old
+Google sign-in with its own copy of the address and would lead the new person back to the old
+account. Before a shared mailbox or a Mac goes to somebody else, the operator ends the admission and
+deletes the old account with all its sign-in methods, or removes every one of them, and checks that
+the address now leads nowhere. Until that check passes, the operator's screen shows a refusal or the
+next step, not a finished hand-over. The server issues the admission entry id for that account; the
+local binding checks the pair of account id and admission id, so a re-issued address never opens
+the old directory. Tested separately: the old account, a sign-in started in the browser before the
+hand-over, and the old local directory.
 
 **Data.** Named in the card: who does it, what it contains, format, term, stores, the parties' roles
 as they really act, and the basis for any transfer outside the EU (checked before level 2). Deleting
 the current record, database copies, logs and a mail provider's request are separate steps with their
-own terms. Accepted when: one test account's export is compared with every store below and holds
-nobody else's rows; it is deleted; a copy made before the deletion is restored, compared and the
-deleted account removed again **before** the service opens. The privacy text does not promise that
-this deletes files or traces at other suppliers. Files on the person's Mac are not touched by it.
+own terms.
+
+**Restoring a copy** never brings back what was taken away after it. Before a restored service
+opens, the deletions, ended admissions and blocks made since the copy are applied again, and the
+restored sessions are ended unless each one is confirmed as current. The record of those changes is
+kept apart from the database; where is decided in the stage 1 document.
+
+Accepted when: one test account's export is compared with every store below, holds nobody else's
+rows and keeps secret values out; it is deleted; one copy made before the following is restored and
+checked for three cases before the service opens: a deleted account stays deleted; a person removed
+from the pilot early gets no letter and no sign-in; a session revoked after the copy does not
+continue. The privacy text does not promise that this deletes files or traces at other suppliers.
+Files on the person's Mac are not touched by it.
 
 | Data                                                                  | Received by                 | Where                                      | Kept                                                                                             |
 | --------------------------------------------------------------------- | --------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------ |
 | Account, admission, sign-in times; Google's id, name and picture link | Supabase                    | EU region                                  | Until deletion; Pro's daily database copies 7 days                                               |
 | IP address and browser of sessions and sign-in events                 | Supabase                    | Sessions in the EU region; logs to confirm | Sessions until removed; logs by their own terms                                                  |
-| Google sign-in                                                        | Google                      | Google's terms                             | Google's terms                                                                                   |
+| Google sign-in in progress: the code, Google's access and refresh tokens | Supabase                 | EU region                                  | Until the exchange; an abandoned one until cleanup, its term checked after cancel and crash in stage 1 |
+| Google sign-in                                                        | Google                      | Google's terms                             | Google's terms; only the basic scopes (email, profile) are asked                                 |
 | Sign-in mail: address and letter                                      | Mail provider (decision 6)  | Resend: USA                                | Resend: 30 days on Free, Pro, Scale; earlier deletion of named letters by request to its support |
 | Prompts and files for the model                                       | The person's model provider | Its terms                                  | Its terms; not 1ma's cloud                                                                       |
 
@@ -278,9 +303,10 @@ around the app's main pages at **every** start by a small bb patch. The owner ag
 | New person             | Signs in, if admitted                                                | Cannot start; the screen says why                    |
 | Day 27                 | A use with a successful renewal moves the date                       | Works; shows how long is left                        |
 | Day 28                 | Sign-in screen                                                       | Sign-in screen; files untouched; signs in afterwards |
-| Account disabled       | Sign-in screen at the next check; a new sign-in is refused           | At the next check, at the latest on the date         |
-| Admission ends         | No renewal or letter; sign-in screen at the next check               | On the end date, which the Mac already knows         |
-| Log out on all devices | This Mac at once, others at their next check; signing in again works | This Mac only, and the app says so                   |
+| Account disabled       | Sign-in screen at the next successful check; a new sign-in, also one already started in the browser, is refused | At the next successful check, at the latest on the date |
+| Enabled again          | A new sign-in; the old sessions stay ended                           | —                                                    |
+| Admission ends         | No renewal or letter; sign-in screen at the next successful check    | On the end date, which the Mac already knows         |
+| Log out on all devices | This Mac at once. «Done» and «others at their next check» only when the server confirmed it; otherwise the app says other devices may still be signed in. An ended token: sign in again first, or a local log-out with a warning | This Mac only, and the app says so |
 | Plugin fails           | The kept answer decides until the date; a stored refusal stays       | Same                                                 |
 | Mail provider is down  | Google works, email waits; signed-in people are not affected         | —                                                    |
 
@@ -295,7 +321,10 @@ refused by the server is not «done»; an old token on the operator's functions 
 block on day 2 found on the first action on day 5. Two Macs: one with a valid token, one on day 8
 offline with an ended token and a valid local date; «everywhere» pressed on the second renews
 nothing silently and shows no false «done»; confirmed revocation, unconfirmed revocation, network
-failure and a block on the other Mac each have their own expected result.
+failure and a block on the other Mac each have their own expected result. The other Mac shows the
+refusal when it gets a definite refusal from the server, or on its local date. Also: removal from
+the pilot, a temporary block, enabling again, and a Google callback before a block with the code
+exchanged after it.
 
 ### Account service
 
@@ -329,7 +358,11 @@ Before the first client, on a new **and** an updated installation:
   unless the key variant was agreed. A key outranks a plan, so the setup also applies Claude Code's
   own `forceLoginMethod` where it takes effect; its effect through bb is tested on a new and an
   updated Mac. On a mismatch a screen appears and no request is made. 1ma does not remove sign-in
-  methods from the official program; it refuses to start it in the wrong mode;
+  methods from the official program; it refuses to start it in the wrong mode. The check belongs to
+  each actual start of an agent, also a later one from another project or after a change of mode.
+  The stage 1 checks cover a plan, a saved Console sign-in, a key in the environment,
+  `apiKeyHelper`, another profile, a company sign-in, a gateway and the cloud providers' modes, for
+  which `forceLoginMethod` alone is not enough;
 - after a separately permitted task the account's usage page (Settings → Usage for a plan, the
   Console for a key) is compared with the expected payer;
 - a team's paid extra usage, if the client turned it on, is named in decision 4 as a payer;
@@ -381,7 +414,7 @@ version.
 | Delivery                       | Checked before it                                                                                                                                                                        |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | First Mac, by hand (stage 1)   | The owner's signature over the build's hashes, checked by the manual procedure with a fingerprint received apart; the app's notice of a new version; the transition from the old channel |
-| Mac by link, installing itself | Level 5, and patch 0004 removed for Apple-signed builds (decision 8a); then every rule below on the automatic way                                                                        |
+| Mac by link, installing itself | Level 5, and patch 0004 removed for Apple-signed builds (decision 8a); then every rule below on the automatic way. A signed build given by link before that is level 5 and uses the manual check |
 | Linux server (stage 2)         | Every rule below on every entrance of 0009, the manual one included; a fixed set of dependencies                                                                                         |
 
 Requirements:
@@ -398,12 +431,21 @@ Requirements:
 - **Two keys with different powers**, both public parts in the app from the first signed build and
   in the first client's. The owner's main key signs releases; the reserve key only changes which keys
   are trusted, and its private part is kept by the owner apart from the main one. A release key
-  cannot change trust. Trust changes are versioned on their own and the accepted version is kept on
-  the Mac outside the app, so it survives a reinstall. After the main key is stolen, the reserve key
-  replaces it, and installed apps recover even if the thief published a higher release number. The
-  scheme is an existing, reviewed one (in the manner of TUF), chosen in the implementation document,
-  not invented. The fingerprint for a manual installation reaches the owner by a way of its own, not
-  from the download place.
+  cannot change trust. Trust changes are versioned on their own, come before the release number, and
+  are checked before every installation, the first manual Mac included. The accepted version is kept
+  on the Mac outside the app. The release-number barrier belongs to one set of trusted keys and starts
+  again with a new set, so a higher number the thief published under the stolen key does not block an
+  honest release under the new set. The scheme is an existing, reviewed one (in the manner of TUF),
+  chosen in the implementation document, not invented. The fingerprint for a manual installation
+  reaches the owner by a way of its own, not from the download place.
+- **What recovery covers.** An installed app that already saw the thief's release, and one that missed
+  the change of trust, both accept the new set once they get it. Until an app can get the current
+  trust, from the download place or the second place named in the implementation document, it accepts
+  no new package. A foreign package obtained before the change can no longer be installed after it. An
+  installation over the same system keeps the newer trust; a clean installation from an old download
+  starts from the trust built into it and gets the current one before any update. If foreign code
+  has already run, nothing repairs itself: the owner's manual procedure restores a checked copy and
+  checks the data separately.
 - **Refused before anything is unpacked**: an unsigned, foreign or withdrawn key, a wrong channel or
   architecture, a pointer and package that do not match, a lower release number, the same number
   with other contents, a pointer past its term («could not confirm this is the latest»). The same
@@ -426,8 +468,10 @@ Accepted for the first Mac by hand: old app → transition → next release with
 skipped transition; an empty or half-filled download repository; each refusal above by the manual
 way; a failed update; a clean Mac. Accepted
 for the reserve key, before any client build is given out: a higher number signed only by the stolen
-key, an attempt to withdraw the reserve with the stolen key, skipped releases, a replayed old pointer,
-a reinstall, the same number with other contents; a legitimate manual roll-back. The Linux and
+key, on an app that saw it and on one that missed the change of trust; an attempt to withdraw the
+reserve with the stolen key; skipped releases; a replayed old pointer; an installation over the same
+system and a clean one from an old download, with their different expected results; a foreign package
+obtained before the change; the same number with other contents; a legitimate manual roll-back. The Linux and
 automatic Mac lines are accepted in their own stages.
 
 ### Done when
@@ -450,7 +494,8 @@ Named so that nobody waits for it in stage 1. Research done is kept here in shor
 approved on its own.
 
 - **Gateway and its vendor** (stage 2). The owner's choice of 25.11 stays whole: the client turns it
-  on, it works in the browsers named beforehand, one 1ma gateway in the EU, only named fields are
+  on, it works in any browser (the owner's words; the stage document may narrow this to named
+  browsers only with the owner's confirmation), one 1ma gateway in the EU, only named fields are
   stored, and the absence of end-to-end encryption is said openly. The stage document shows that the
   gateway's operator, or an attacker on it, could reach content and live connections, and who ends
   open sessions. Prototypes: frp (Apache-2.0), with the design of bb's former `connect-next` (MIT; bb
@@ -516,9 +561,9 @@ named.
 | Apple Developer Program         | $99 a year                                      | Level 5; the same membership serves the phone if it is the same team                        |
 | Windows check, Windows signing  | To quote                                        | Before the order                                                                            |
 
-Sums: **about $35 a month with the test project and Resend's free mail** (recommended), $25 without
-the test project; $55 and $45 with Resend Pro ($20). With the recommended EU mail provider: about $35
-plus its quote. Excluded: the rows «to quote» and use above the included limits.
+Sums: **about $35 a month with the test project and Resend's free mail**, $25 without the test
+project; $55 and $45 with Resend Pro ($20). The test project is recommended, and so is an EU mail
+provider (decision 6): then about $35 plus its quote. Excluded: the rows «to quote» and use above the included limits.
 
 | The agency of five, own Macs | Price (US price before tax; only if it needs these seats)                         |
 | ---------------------------- | --------------------------------------------------------------------------------- |
@@ -531,7 +576,7 @@ plus its quote. Excluded: the rows «to quote» and use above the included limit
 | Gateway                | From €5.99 a month (Hetzner CX23 with IPv4, **not available to order** on the day); to quote                                                                                                                                                                                                                                                                                                                                                | Owner  |
 | Server for one person  | €30–36 a month (CPX32), €17–20 (CPX22), **not available** on the day, shared processors; five CPX32: €152–180, five CPX22: €85–100; price confirmed before the order                                                                                                                                                                                                                                                                        | Client |
 | One large server       | €111–130 (CPX62), after the container test, **not available** on the day; price confirmed before the order                                                                                                                                                                                                                                                                                                                                  | Client |
-| Bot                    | A machine as above, and API use. An active Team in good standing gives $20 a seat a month of API credit ($100 for five; pooled, at most $500 a month), seven days after the plan starts and once its owner links one Console organization (only support changes it), with the Claude and Console roles that needs; then requests stop unless the client buys credit or turns on automatic top-up; with an invoiced contract it is billed on | Client |
+| Bot                    | A machine as above, and API use. An active Team in good standing gives $20 a Standard seat a month of API credit ($100 for five; $100 a Premium seat; pooled, at most $500 a month), seven days after the plan starts and once its owner links one Console organization (only support changes it), with the Claude and Console roles that needs; then requests stop unless the client buys credit or turns on automatic top-up; with an invoiced contract it is billed on | Client |
 | Phone stores           | Google Play $25 once; Expo: free builds within limits, then from $19 a month plus use                                                                                                                                                                                                                                                                                                                                                       | Owner  |
 | Board and files        | In their documents                                                                                                                                                                                                                                                                                                                                                                                                                          | —      |
 
@@ -551,7 +596,7 @@ weeks». Google, the company, Apple and mail add their own waiting.
 
 ## Order of work
 
-1. Approval 1. Test projects (Supabase Free, Google, test mail) and test identities the owner
+1. Approval 1, after the owner's explicit start. Test projects (Supabase Free, Google, test mail) and test identities the owner
    creates, $0; the paid 28-day test asked separately; prototypes and the check of chats on made-up
    data; design system.
 2. The owner's choices from the results; screens and failures of stage 1; approval 2.
