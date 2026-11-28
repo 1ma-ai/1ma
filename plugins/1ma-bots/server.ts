@@ -725,15 +725,22 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   // calls run inside it as turns too.
   const isOwnTurnStart = (row: EventRow) =>
     row.type === "turn/started" && row.data.parentToolCallId === undefined;
+  type TurnRequest = Extract<EventRow, { type: "client/turn/requested" }>["data"];
+  // A request bb sent while the conversation was busy (auto, steer) may join the
+  // running turn or start the next one; only the provider's acceptance tells.
+  // A history older than acceptances has no target and reads as new-turn.
+  const asksForNewTurn = (request: TurnRequest) =>
+    request.target.kind === "new-turn" || request.target.kind === "thread-start";
 
   // The turn now running in a conversation, when the owner started it: the
   // latest turn the provider confirmed (turn/started) and the request bb
-  // recorded just before it (client/turn/requested, not rejected). bb records
-  // a request only after every dispatch hook and wait let it through, and a
-  // message steered into a running turn is recorded after its start, so it
-  // never counts as a new turn. A turn the provider started on its own, with no
-  // request before it (ACP reports agent output after a turn as a new one),
-  // continues the turn before it.
+  // recorded just before it (client/turn/requested, not rejected): the one the
+  // provider accepted into that turn, or one that asked for a new turn and has
+  // no acceptance. bb records a request only after every dispatch hook and wait
+  // let it through. A message steered into a running turn, or one whose turn the
+  // provider has not confirmed, never counts as a new turn. A turn the provider
+  // started on its own, with no request before it (ACP reports agent output
+  // after a turn as a new one), continues the turn before it.
   const ownerTurnOf = async (threadId: string): Promise<number | null> => {
     let started: EventRow | null = null;
     const rejected = new Set<string>();
@@ -750,7 +757,10 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       if (row.type !== "client/turn/requested" || started === null) continue;
       if (rejected.has(row.data.requestId)) continue;
       const scope = acceptedIn.get(row.data.requestId);
-      if (scope !== undefined && !isDeepStrictEqual(scope, started.scope)) continue;
+      if (
+        scope === undefined ? !asksForNewTurn(row.data) : !isDeepStrictEqual(scope, started.scope)
+      )
+        continue;
       return row.data.initiator === "user" && row.data.senderThreadId === null ? started.seq : null;
     }
     return null;
@@ -758,7 +768,8 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
 
   // When the provider last took input into a conversation after `since`: a new
   // turn, or a message steered into the running one. What bb's own notice about
-  // a sub-thread started does not count, nor does a retry of that turn.
+  // a sub-thread started does not count, nor does a retry of that turn, nor a
+  // turn the provider started with no request.
   const lastInputAfter = async (threadId: string, since: number): Promise<number | null> => {
     const events = eventsOf(threadId, [
       "turn/started",
@@ -774,37 +785,64 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       }
       return rows[index];
     };
-    const requestOf = async (fits: (requestId: string, row: EventRow) => boolean) => {
+    const requestOf = async (fits: (request: TurnRequest) => boolean) => {
       for (let index = 0; ; index += 1) {
         const row = await rowAt(index);
         if (row === undefined) return undefined;
-        if (row.type === "client/turn/requested" && fits(row.data.requestId, row)) return row.data;
+        if (row.type === "client/turn/requested" && fits(row.data)) return row.data;
+      }
+    };
+    // Acceptances and refusals come after their request, so the rows read down
+    // to a request already hold them.
+    const isTaken = (requestId: string) =>
+      rows.some(
+        (other) =>
+          (other.type === "turn/input/accepted" && other.data.clientRequestId === requestId) ||
+          (other.type === "client/turn/rejected" && other.data.requestId === requestId),
+      );
+    // The request a turn with no acceptance of its own took: one between it and
+    // the turn before it that asked for a new turn and nothing took. None: the
+    // provider started the turn itself, with no input.
+    const requestOfTurn = async (index: number) => {
+      for (let at = index + 1; ; at += 1) {
+        const row = await rowAt(at);
+        if (row === undefined || isOwnTurnStart(row)) return undefined;
+        if (
+          row.type === "client/turn/requested" &&
+          asksForNewTurn(row.data) &&
+          !isTaken(row.data.requestId)
+        )
+          return row.data;
       }
     };
     for (let index = 0; ; index += 1) {
       const row = await rowAt(index);
       if (row === undefined || row.createdAt <= since) return null;
-      let request: Awaited<ReturnType<typeof requestOf>>;
+      let request: TurnRequest | undefined;
       if (row.type === "turn/input/accepted") {
-        request = await requestOf((requestId) => requestId === row.data.clientRequestId);
+        request = await requestOf(({ requestId }) => requestId === row.data.clientRequestId);
       } else if (isOwnTurnStart(row)) {
         const hasOwnInput = rows.some(
           (other) =>
             other.type === "turn/input/accepted" && isDeepStrictEqual(other.scope, row.scope),
         );
         if (hasOwnInput) continue;
-        const isTaken = (requestId: string) =>
-          rows.some(
-            (other) =>
-              (other.type === "turn/input/accepted" && other.data.clientRequestId === requestId) ||
-              (other.type === "client/turn/rejected" && other.data.requestId === requestId),
-          );
-        request = await requestOf((requestId, asked) => asked.seq < row.seq && !isTaken(requestId));
+        request = await requestOfTurn(index);
+        if (request === undefined) continue;
       } else continue;
       // Messages sent together are one request with the kind of the first, a
-      // retry included: only a retry sent alone is what it retries.
-      const origin = request?.inputGroups === undefined ? request?.retryOfRequestId : undefined;
-      if (origin !== undefined) request = await requestOf((requestId) => requestId === origin);
+      // retry included. A retry sent alone runs the attempt before it again, or
+      // asks to continue it once the provider took it, so it is what that
+      // attempt is. Every attempt names the first request and its number.
+      while (request?.inputGroups === undefined && request?.retryOfRequestId !== undefined) {
+        const origin = request.retryOfRequestId;
+        const previous = (request.retryAttempt ?? 2) - 1;
+        request = await requestOf((asked) =>
+          previous === 1
+            ? asked.requestId === origin
+            : asked.retryOfRequestId === origin && asked.retryAttempt === previous,
+        );
+      }
       const isNotice =
         request?.inputGroups === undefined && OWNERSHIP_NOTICES.has(request?.systemMessageKind);
       if (!isNotice) return row.createdAt;
