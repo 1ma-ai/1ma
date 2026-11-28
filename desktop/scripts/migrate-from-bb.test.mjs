@@ -207,6 +207,21 @@ describe("where a path leads", () => {
         relative,
       );
   });
+
+  test("a path the kernel cannot reach has no place, a missing folder to be made has one", () => {
+    const root = fresh("unreachable");
+    write(root, "x/file");
+    write(root, "f");
+    symlinkSync("missing/../x", path.join(root, "l"));
+    symlinkSync("f/..", path.join(root, "up"));
+    assert.throws(() => real(path.join(root, "l")), /missing, which does not exist/);
+    for (const relative of ["f/x", "up"])
+      assert.throws(() => real(path.join(root, relative)), /f is not a folder/, relative);
+    assert.equal(
+      real(path.join(root, "missing/a/b")),
+      path.join(realpathSync(root), "missing/a/b"),
+    );
+  });
 });
 
 describe("Pi sessions of a bb older than 0.50", () => {
@@ -443,6 +458,38 @@ describe("Pi sessions of a bb older than 0.50", () => {
       assert.deepEqual(readdirSync(path.join(outside, "a/b")), []);
     });
 
+  test("are not written through a link that goes back out of a missing folder", () => {
+    const home = fresh("home");
+    const given = fresh("pi-given");
+    write(given, "thr_given.jsonl", "given\n");
+    const to = fresh("1ma");
+    const reached = path.join(realpathSync(path.dirname(to)), path.basename(to));
+    const bridgeData = "plugins/provider-pi/bridge-data";
+    const prepare = (from) => {
+      mkdirSync(path.join(from, bridgeData), { recursive: true });
+      symlinkSync("missing/../store", path.join(from, bridgeData, "sessions"));
+    };
+    assert.throws(
+      () => homeImport(home, { more: ["--pi-sessions", given], prepare, to }),
+      (error) => {
+        assert.ok(
+          error.message.includes(
+            `${path.join(reached, bridgeData, "missing")}, which does not exist`,
+          ),
+          error.message,
+        );
+        return true;
+      },
+    );
+    const failed = readdirSync(path.dirname(to)).find((name) =>
+      name.startsWith(`${path.basename(to)}.failed-`),
+    );
+    assert.ok(failed);
+    const kept = path.join(path.dirname(to), failed, bridgeData);
+    assert.ok(lstatSync(path.join(kept, "sessions")).isSymbolicLink());
+    assert.equal(existsSync(path.join(kept, "store")), false);
+  });
+
   test("a folder given for them that cannot exist brings none, one that leads into 1ma's is refused", () => {
     const home = fresh("home");
     const file = fresh("a-file");
@@ -603,6 +650,36 @@ describe("importing into 1ma", () => {
         [],
       );
     }
+  });
+
+  test("a 1ma folder that is a link the kernel cannot follow is refused without a folder to pass", () => {
+    const from = bbFolder();
+    const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
+    const disk = fresh("disk");
+    mkdirSync(disk);
+    const to = fresh("1ma");
+    symlinkSync(`missing/../${path.basename(disk)}`, to);
+    assert.throws(
+      () => importIntoOneMa(importArgs(from, to, cli), quiet),
+      (error) => {
+        assert.match(error.message, /missing, which does not exist/);
+        assert.doesNotMatch(error.message, /--to/);
+        return true;
+      },
+    );
+    assert.ok(lstatSync(to).isSymbolicLink());
+    assert.deepEqual(readdirSync(disk), []);
+  });
+
+  test("the command that turns bb connect on names the 1ma folder as one shell argument", () => {
+    const from = bbFolder();
+    const to = fresh("1ma's data");
+    const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
+    const lines = [];
+    importIntoOneMa(importArgs(from, to, cli), (line) => lines.push(line));
+    const quoted = /allow-connect --data-dir ('.*') \(only once/.exec(lines.join("\n"))?.[1];
+    assert.ok(quoted, lines.join("\n"));
+    assert.equal(execFileSync("/bin/sh", ["-c", `printf %s ${quoted}`], { encoding: "utf8" }), to);
   });
 
   test("an export older than bb's latest work is refused unless confirmed", () => {

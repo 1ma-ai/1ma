@@ -271,32 +271,38 @@ function within(child, parent) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-// A name under a regular file does not exist either; lstat reports it as ENOTDIR.
-function isLink(file) {
-  try {
-    return lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink() === true;
-  } catch (error) {
-    if (error.code === "ENOTDIR") return false;
-    throw error;
-  }
+function kind(file) {
+  const stats = lstatSync(file, { throwIfNoEntry: false });
+  if (stats === undefined) return "missing";
+  if (stats.isSymbolicLink()) return "link";
+  return stats.isDirectory() ? "folder" : "file";
 }
+
+class Unreachable extends Error {}
 
 // The place the kernel reaches for a path, existing or not: each symbolic link
 // is followed where it stands, `..` leaves the folder reached so far, and a
-// name that does not exist yet keeps its place.
+// name that does not exist yet keeps its place, as `mkdir -p` makes it. The
+// kernel goes neither back out of a missing name nor through a regular file.
 export function real(dir) {
   const rest = path.resolve(dir).split("/").toReversed();
   let reached = "/";
+  let last = "folder";
   for (let links = 0; rest.length > 0;) {
     const name = rest.pop();
     if (name === "" || name === ".") continue;
+    if (last === "file") throw new Unreachable(`${reached} is not a folder`);
     if (name === "..") {
+      if (last === "missing")
+        throw new Unreachable(`${dir} leads through ${reached}, which does not exist`);
       reached = path.dirname(reached);
       continue;
     }
     const next = path.join(reached, name);
-    if (!isLink(next)) {
+    const found = last === "missing" ? "missing" : kind(next);
+    if (found !== "link") {
       reached = next;
+      last = found;
       continue;
     }
     if ((links += 1) > MAX_LINKS) throw new Error(`${dir} passes through a loop of symbolic links`);
@@ -314,6 +320,17 @@ function shellQuoted(text) {
 
 function overlaps(a, b) {
   return within(real(a), real(b)) || within(real(b), real(a));
+}
+
+// A folder the kernel cannot reach holds nothing and lies in no other folder.
+function reachable(dir) {
+  try {
+    real(dir);
+    return true;
+  } catch (error) {
+    if (error instanceof Unreachable) return false;
+    throw error;
+  }
 }
 
 // bb's CLI reads BB_* variables first; a terminal inside a bb thread has them
@@ -363,9 +380,9 @@ export function exportBb(options, log = console.log) {
 function checkBeforeImport(options) {
   const { from, to } = options;
   if (overlaps(from, to)) throw new Error(`${from} and ${to} must be two separate folders`);
-  if (overlaps(options.piSessions, to))
+  if (reachable(options.piSessions) && overlaps(options.piSessions, to))
     throw new Error(`Pi's earlier conversations in ${options.piSessions} must be outside ${to}`);
-  if (isLink(to))
+  if (kind(to) === "link")
     throw new Error(
       `${to} is a symbolic link to ${real(to)}. The import moves and renames the folder it is given, and would do that to the link and not to the data behind it: pass --to ${shellQuoted(real(to))}`,
     );
