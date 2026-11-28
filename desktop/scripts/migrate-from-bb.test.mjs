@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -22,6 +25,7 @@ import {
   parseArgs,
   PI_SESSIONS,
   processesUsing,
+  real,
   runningFrom,
 } from "./migrate-from-bb.mjs";
 
@@ -169,6 +173,42 @@ describe("the machine data an export leaves behind", () => {
   });
 });
 
+describe("where a path leads", () => {
+  test("a path that exists leads where the system resolves it", () => {
+    const root = fresh("layout");
+    write(root, "x/y/z/file");
+    symlinkSync(path.join(root, "x"), path.join(root, "absolute"));
+    symlinkSync("../../y", path.join(root, "x/y/z/up"));
+    symlinkSync("absolute", path.join(root, "to-link"));
+    symlinkSync(path.join(root, "to-link"), path.join(root, "absolute-to-link"));
+    for (const relative of [
+      "x/y/z/file",
+      "absolute/y",
+      "x/y/z/up/z",
+      "x/y/z/up/z/up/z/file",
+      "to-link/y/z",
+      "absolute-to-link/y/z/up",
+    ]) {
+      const file = path.join(root, relative);
+      assert.equal(real(file), realpathSync(file), relative);
+    }
+  });
+
+  test("a loop of symbolic links is named, also in a folder above the name", () => {
+    const root = fresh("loop");
+    mkdirSync(root);
+    symlinkSync("b", path.join(root, "a"));
+    symlinkSync("a", path.join(root, "b"));
+    symlinkSync("self", path.join(root, "self"));
+    for (const relative of ["a", "self/sub"])
+      assert.throws(
+        () => real(path.join(root, relative)),
+        /passes through a loop of symbolic links/,
+        relative,
+      );
+  });
+});
+
 describe("Pi sessions of a bb older than 0.50", () => {
   // The data directory patch replaces the line naming the home folder where bb
   // kept them with the one where 1ma looks when a session is not in its data.
@@ -210,10 +250,9 @@ describe("Pi sessions of a bb older than 0.50", () => {
     }
   }
 
-  function homeImport(home, { more = [], env = {}, prepare = () => {} } = {}) {
+  function homeImport(home, { more = [], env = {}, prepare = () => {}, to = fresh("1ma") } = {}) {
     const from = bbFolder();
     prepare(from);
-    const to = fresh("1ma");
     const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
     const lines = [];
     const record = withEnv({ HOME: home, BB_PI_BRIDGE_SESSION_DIR: undefined, ...env }, () =>
@@ -294,6 +333,176 @@ describe("Pi sessions of a bb older than 0.50", () => {
     );
     assert.equal(sessionOneMaReads(fromOption.to, home, "thr_configured.jsonl"), undefined);
   });
+
+  // bb's Pi bridge data can be a link to storage kept elsewhere. The copy keeps
+  // the link, so a session written under 1ma's folder would land in that storage.
+  const everyFile = (dir) =>
+    readdirSync(dir, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => path.relative(dir, path.join(entry.parentPath, entry.name)))
+      .toSorted();
+
+  for (const [linked, there] of [
+    ["bridge-data", true],
+    ["bridge-data/sessions", true],
+    ["bridge-data/sessions", false],
+  ])
+    test(`are not written through a link out of 1ma's data folder (${linked}${there ? "" : ", its folder missing"})`, () => {
+      const home = fresh("home");
+      const given = fresh("pi-given");
+      write(given, "thr_given.jsonl", "given\n");
+      const to = fresh("1ma");
+      write(to, "earlier.txt", "earlier 1ma\n");
+      let storage;
+      const prepare = (from) => {
+        storage = path.join(from, "moved-pi-storage");
+        if (there) write(storage, "other/thr_other.jsonl", "bb's own\n");
+        const link = path.join(from, "plugins/provider-pi", linked);
+        mkdirSync(path.dirname(link), { recursive: true });
+        symlinkSync(storage, link);
+      };
+      assert.throws(
+        () => homeImport(home, { more: ["--pi-sessions", given, "--move-aside"], prepare, to }),
+        (error) => {
+          assert.match(error.message, /would be written outside/);
+          assert.ok(error.message.includes(storage), error.message);
+          assert.match(error.message, /Nothing was written into/);
+          return true;
+        },
+      );
+      if (there) assert.deepEqual(everyFile(storage), ["other/thr_other.jsonl"]);
+      else assert.equal(existsSync(storage), false);
+      assert.equal(readFileSync(path.join(to, "earlier.txt"), "utf8"), "earlier 1ma\n");
+    });
+
+  test("are not written through a link whose own folder is reached through a link", () => {
+    // The link's text is relative: followed from where the link is named it
+    // stays inside 1ma's folder, followed from where the link is it does not.
+    const home = fresh("home");
+    const given = fresh("pi-given");
+    write(given, "thr_given.jsonl", "given\n");
+    const to = fresh("1ma");
+    write(to, "earlier.txt", "earlier 1ma\n");
+    const outside = fresh("pi-storage");
+    const bridgeData = path.join(outside, "kept/deep/bridge-data");
+    mkdirSync(bridgeData, { recursive: true });
+    symlinkSync("../../../store", path.join(bridgeData, "sessions"));
+    const prepare = (from) => {
+      mkdirSync(path.join(from, "plugins/provider-pi"), { recursive: true });
+      symlinkSync(bridgeData, path.join(from, "plugins/provider-pi/bridge-data"));
+    };
+    assert.throws(
+      () => homeImport(home, { more: ["--pi-sessions", given, "--move-aside"], prepare, to }),
+      (error) => {
+        assert.match(error.message, /would be written outside/);
+        assert.ok(error.message.includes(path.join(outside, "store")), error.message);
+        return true;
+      },
+    );
+    assert.deepEqual(readdirSync(outside), ["kept"]);
+    assert.equal(readFileSync(path.join(to, "earlier.txt"), "utf8"), "earlier 1ma\n");
+  });
+
+  // The `..` in the link's text leaves the folder host-data leads to, not
+  // host-data's own name.
+  for (const hostDataLinked of [true, false])
+    test(`go where a link with \`..\` after a link leads (host-data ${hostDataLinked ? "a link out" : "a folder"})`, () => {
+      const home = fresh("home");
+      const given = fresh("pi-given");
+      write(given, "thr_given.jsonl", "given\n");
+      const outside = fresh("pi-storage");
+      mkdirSync(path.join(outside, "a/b"), { recursive: true });
+      const prepare = (from) => {
+        const provider = path.join(from, "plugins/provider-pi");
+        mkdirSync(path.join(provider, "bridge-data"), { recursive: true });
+        if (hostDataLinked)
+          symlinkSync(path.join(outside, "a/b"), path.join(provider, "host-data"));
+        else write(provider, "host-data/state.json", "{}");
+        symlinkSync("../host-data/../store", path.join(provider, "bridge-data/sessions"));
+      };
+      const imported = () => homeImport(home, { more: ["--pi-sessions", given], prepare });
+      if (hostDataLinked)
+        assert.throws(imported, (error) => {
+          assert.match(error.message, /would be written outside/);
+          assert.ok(
+            error.message.includes(path.join(realpathSync(outside), "a/store")),
+            error.message,
+          );
+          return true;
+        });
+      else {
+        const { from, to, record } = imported();
+        assert.equal(record.piSessions.copied, 1);
+        assert.equal(
+          readFileSync(path.join(to, "plugins/provider-pi/store/thr_given.jsonl"), "utf8"),
+          "given\n",
+        );
+        assert.equal(existsSync(path.join(from, "plugins/provider-pi/store")), false);
+      }
+      assert.deepEqual(readdirSync(path.join(outside, "a")), ["b"]);
+      assert.deepEqual(readdirSync(path.join(outside, "a/b")), []);
+    });
+
+  test("a folder given for them that cannot exist brings none, one that leads into 1ma's is refused", () => {
+    const home = fresh("home");
+    const file = fresh("a-file");
+    writeFileSync(file, "not a folder");
+    const underAFile = path.join(file, "sessions");
+    const { record } = homeImport(home, { more: ["--pi-sessions", underAFile] });
+    assert.deepEqual(record.piSessions, { from: underAFile, copied: 0, kept: 0 });
+
+    const to = fresh("1ma");
+    const link = fresh("pi-link");
+    symlinkSync(path.join(to, "not-there-yet"), link);
+    assert.throws(
+      () => homeImport(home, { more: ["--pi-sessions", link], to }),
+      /Pi's earlier conversations in .* must be outside/,
+    );
+    assert.equal(existsSync(to), false);
+  });
+
+  test("a linked folder that already has the session is left as it is", () => {
+    const home = fresh("home");
+    const given = fresh("pi-given");
+    write(given, "thr_given.jsonl", "given\n");
+    let storage;
+    const { record } = homeImport(home, {
+      more: ["--pi-sessions", given],
+      prepare: (from) => {
+        storage = path.join(from, "moved-pi-storage");
+        write(storage, "sessions/thr_given.jsonl", "bb's own\n");
+        mkdirSync(path.join(from, "plugins/provider-pi"), { recursive: true });
+        symlinkSync(storage, path.join(from, "plugins/provider-pi/bridge-data"));
+      },
+    });
+    assert.deepEqual(record.piSessions, { from: given, copied: 0, kept: 1 });
+    assert.deepEqual(everyFile(storage), ["sessions/thr_given.jsonl"]);
+    assert.equal(
+      readFileSync(path.join(storage, "sessions/thr_given.jsonl"), "utf8"),
+      "bb's own\n",
+    );
+  });
+
+  test("are written through a link that stays inside 1ma's data folder", () => {
+    const home = fresh("home");
+    const given = fresh("pi-given");
+    write(given, "thr_given.jsonl", "given\n");
+    const { from, to, record } = homeImport(home, {
+      more: ["--pi-sessions", given],
+      prepare: (bb) => {
+        write(bb, "plugins/provider-pi/bridge-data/store/thr_own.jsonl", "bb's own\n");
+        symlinkSync("store", path.join(bb, "plugins/provider-pi/bridge-data/sessions"));
+      },
+    });
+    assert.equal(record.piSessions.copied, 1);
+    assert.equal(
+      readFileSync(path.join(to, "plugins/provider-pi/bridge-data/store/thr_given.jsonl"), "utf8"),
+      "given\n",
+    );
+    assert.deepEqual(everyFile(path.join(from, "plugins/provider-pi/bridge-data/store")), [
+      "thr_own.jsonl",
+    ]);
+  });
 });
 
 describe("importing into 1ma", () => {
@@ -358,6 +567,42 @@ describe("importing into 1ma", () => {
     const names = readdirSync(path.dirname(to));
     assert.ok(names.some((name) => name.startsWith(`${path.basename(to)}.failed-`)));
     assert.ok(!names.some((name) => name.startsWith(`${path.basename(to)}.before-migration-`)));
+  });
+
+  test("a 1ma folder that is a symbolic link is refused: the import would move the link, not the data", () => {
+    const from = bbFolder();
+    const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
+    for (const [earlier, more] of [
+      [["earlier.txt"], ["--move-aside"]],
+      [[], []],
+    ]) {
+      const disk = fresh("owner's disk");
+      mkdirSync(disk);
+      for (const name of earlier) write(disk, name, "earlier 1ma\n");
+      const to = fresh("1ma");
+      symlinkSync(disk, to);
+      assert.throws(
+        () => importIntoOneMa(importArgs(from, to, cli, more), quiet),
+        (error) => {
+          assert.match(error.message, /is a symbolic link to /);
+          const quoted = /pass --to ('.*')$/.exec(error.message)?.[1];
+          assert.ok(quoted, error.message);
+          assert.equal(
+            execFileSync("/bin/sh", ["-c", `printf %s ${quoted}`], { encoding: "utf8" }),
+            realpathSync(disk),
+          );
+          return true;
+        },
+      );
+      assert.ok(lstatSync(to).isSymbolicLink());
+      assert.deepEqual(readdirSync(disk), earlier);
+      assert.deepEqual(
+        readdirSync(path.dirname(to)).filter(
+          (name) => name.startsWith(`${path.basename(to)}.`) && name !== path.basename(to),
+        ),
+        [],
+      );
+    }
   });
 
   test("an export older than bb's latest work is refused unless confirmed", () => {

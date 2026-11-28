@@ -33,6 +33,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   statSync,
@@ -50,6 +51,7 @@ export const PLUGIN_HOST_DIRECTORIES = ["host-data", "bridge-data"];
 // them from its bridge data in 1ma's data folder.
 const PI_LEGACY_SESSIONS = path.join(".bb", "pi-bridge-sessions");
 export const PI_SESSIONS = "plugins/provider-pi/bridge-data/sessions";
+const MAX_LINKS = 40;
 // Copying these would leave stale duplicates: the database points at the
 // originals, and 1ma removes them there when their threads are archived.
 export const LEFT_IN_PLACE = [
@@ -203,12 +205,20 @@ export function piSessionPlan(dir) {
 }
 
 // A session the 1ma data folder already has is newer than bb's and stays.
+// The machine entries copied before keep bb's symbolic links as they are, so
+// the folder may lead out of the 1ma data folder: nothing is written there.
+// Inside it, the folder is made where the links lead.
 export function copyPiSessions({ from, to, plan }) {
   const target = path.join(to, PI_SESSIONS);
   let copied = 0;
   for (const name of plan) {
     if (existsSync(path.join(target, name))) continue;
-    mkdirSync(target, { recursive: true });
+    const physical = real(target);
+    if (!within(physical, real(to)))
+      throw new Error(
+        `Pi's earlier conversations would be written outside ${to}: ${target} is a symbolic link to ${physical}, copied from bb as it is. Replace the link in bb's data folder with a real folder, or pass --pi-sessions with an empty folder to import without them, then run the import again.`,
+      );
+    mkdirSync(physical, { recursive: true });
     copyFileSync(path.join(from, name), path.join(target, name), constants.COPYFILE_EXCL);
     copied += 1;
   }
@@ -261,16 +271,45 @@ function within(child, parent) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-// A folder that does not exist yet resolves through its nearest existing
-// parent, so both sides of a comparison pass the same symbolic links.
-function real(dir) {
-  const missing = [];
-  let existing = path.resolve(dir);
-  while (!existsSync(existing) && path.dirname(existing) !== existing) {
-    missing.unshift(path.basename(existing));
-    existing = path.dirname(existing);
+// A name under a regular file does not exist either; lstat reports it as ENOTDIR.
+function isLink(file) {
+  try {
+    return lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink() === true;
+  } catch (error) {
+    if (error.code === "ENOTDIR") return false;
+    throw error;
   }
-  return path.join(realpathSync(existing), ...missing);
+}
+
+// The place the kernel reaches for a path, existing or not: each symbolic link
+// is followed where it stands, `..` leaves the folder reached so far, and a
+// name that does not exist yet keeps its place.
+export function real(dir) {
+  const rest = path.resolve(dir).split("/").toReversed();
+  let reached = "/";
+  for (let links = 0; rest.length > 0;) {
+    const name = rest.pop();
+    if (name === "" || name === ".") continue;
+    if (name === "..") {
+      reached = path.dirname(reached);
+      continue;
+    }
+    const next = path.join(reached, name);
+    if (!isLink(next)) {
+      reached = next;
+      continue;
+    }
+    if ((links += 1) > MAX_LINKS) throw new Error(`${dir} passes through a loop of symbolic links`);
+    const text = readlinkSync(next);
+    if (text.startsWith("/")) reached = "/";
+    rest.push(...text.split("/").toReversed());
+  }
+  return reached;
+}
+
+// A path as one argument of a POSIX shell command.
+function shellQuoted(text) {
+  return `'${text.replaceAll("'", "'\\''")}'`;
 }
 
 function overlaps(a, b) {
@@ -326,6 +365,10 @@ function checkBeforeImport(options) {
   if (overlaps(from, to)) throw new Error(`${from} and ${to} must be two separate folders`);
   if (overlaps(options.piSessions, to))
     throw new Error(`Pi's earlier conversations in ${options.piSessions} must be outside ${to}`);
+  if (isLink(to))
+    throw new Error(
+      `${to} is a symbolic link to ${real(to)}. The import moves and renames the folder it is given, and would do that to the link and not to the data behind it: pass --to ${shellQuoted(real(to))}`,
+    );
   if (!existsSync(path.join(from, "bb.db")) || !existsSync(path.join(from, "host-id")))
     throw new Error(`${from} is not a bb data folder (no bb.db or host-id)`);
   if (!existsSync(options.archive)) throw new Error(`${options.archive} does not exist`);
@@ -427,7 +470,7 @@ export function importIntoOneMa(options, log = console.log, now = new Date()) {
     );
   log("next: start 1ma. On its first start it finishes the import and rewrites the plugin paths.");
   log(
-    `bb connect stays off in 1ma until you run: bb server allow-connect --data-dir ${to} (only once bb is no longer used, or both servers fight over the tunnel)`,
+    `bb connect stays off in 1ma until you run: bb server allow-connect --data-dir ${shellQuoted(to)} (only once bb is no longer used, or both servers fight over the tunnel)`,
   );
   return record;
 }
