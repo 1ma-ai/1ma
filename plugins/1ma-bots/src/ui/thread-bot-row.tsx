@@ -24,7 +24,7 @@ function InstructionPreview({ bot }: { bot: BotSummary }) {
   const [open, setOpen] = useState(false);
   const instructions = useRpcQuery({
     contract: botsRpc,
-    method: "bots.v1.instructions",
+    method: "bots.v2.instructions",
     input: { botId: bot.id },
     enabled: open,
   });
@@ -47,12 +47,12 @@ function InstructionPreview({ bot }: { bot: BotSummary }) {
 
 export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
   const navigate = useBbNavigate();
-  const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
+  const list = useRpcQuery({ contract: botsRpc, method: "bots.v2.list", input: {} });
   const assign = useRpcMutation({ contract: botsRpc, method: "bots.v2.assign" });
   const continueInBot = useRpcMutation({ contract: botsRpc, method: "bots.v2.continueInBot" });
   const member = useRpcKeyedQuery({
     contract: botsRpc,
-    method: "bots.v1.forThreads",
+    method: "bots.v2.forThreads",
     keys: [threadId],
   }).data?.[threadId];
   const bots = list.data?.bots ?? [];

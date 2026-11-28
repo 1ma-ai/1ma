@@ -54,6 +54,20 @@ jobs:
           for plugin in 1ma-bots 1ma-sidebar; do
             (cd "plugins/$plugin" && node "$bb" plugin build)
           done
+      # The tests install the released and the new versions one at a time, as
+      # the Linux release does; main is what that release ships.
+      - name: Build the released plugins from main
+        run: |
+          released="$RUNNER_TEMP/released"
+          git fetch --no-tags --depth=1 origin main
+          git worktree add --detach "$released" FETCH_HEAD
+          echo "E2E_RELEASED_DIR=$released" >> "$GITHUB_ENV"
+          bb="$E2E_ROOT/server-package/node_modules/bb-app/dist/bb.js"
+          cd "$released"
+          pnpm install --frozen-lockfile
+          for plugin in 1ma-bots 1ma-sidebar; do
+            (cd "plugins/$plugin" && node "$bb" plugin build)
+          done
       - name: Install Chromium for Playwright
         run: |
           mkdir -p "$E2E_PLAYWRIGHT_DIR"

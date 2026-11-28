@@ -86,7 +86,7 @@ const eachKey = <Value,>(input: unknown, read: (key: string) => Value): Record<s
 // 1ma-bots' reads of these bots.
 function readsOf(bots: () => { bots: Bot[] } | Promise<{ bots: Bot[] }>) {
   return {
-    "bots.v1.list": async () => ({
+    "bots.v2.list": async () => ({
       bots: (await bots()).bots.map(({ id, name, role, appearance, capabilities, hidden }) => ({
         id,
         name,
@@ -96,7 +96,7 @@ function readsOf(bots: () => { bots: Bot[] } | Promise<{ bots: Bot[] }>) {
         hidden,
       })),
     }),
-    "bots.v1.forThreads": async (input: unknown) => {
+    "bots.v2.forThreads": async (input: unknown) => {
       const members = new Map<string, BotMember>();
       for (const bot of (await bots()).bots) {
         for (const [position, { threadId, ...member }] of bot.threads.entries()) {
@@ -105,7 +105,7 @@ function readsOf(bots: () => { bots: Bot[] } | Promise<{ bots: Bot[] }>) {
       }
       return eachKey(input, (threadId) => members.get(threadId) ?? null);
     },
-    "bots.v1.threads": async (input: unknown) => {
+    "bots.v2.threads": async (input: unknown) => {
       const { botId, from } = input as { botId: string; from: BotDropTarget["place"] };
       const bot = (await bots()).bots.find(({ id }) => id === botId)!;
       const threads = bot.threads.map((thread, position) => ({ ...thread, position }));
@@ -156,7 +156,7 @@ function render(options: {
         ...readsOf(options.bots ?? (() => ({ bots: [] }))),
         ...options.reads,
         "bots.v2.main": options.main ?? (() => ({ threadId: null })),
-        "bots.v1.mains": (input: unknown) =>
+        "bots.v2.mains": (input: unknown) =>
           eachKey(input, () => options.main?.().threadId ?? null),
         "bots.v1.setHidden": options.setHidden ?? (() => ({ ok: true })),
         "bots.v2.assign": options.assign ?? (() => ({ botId: "bot_m", startedFromBot: false })),
@@ -245,6 +245,26 @@ describe("the bots block", () => {
     expect(screen.queryByText("Marketer")).toBeNull();
   });
 
+  it("says the bots are unavailable while 1ma-bots is older than bots.v2, and shows them once it is updated", async () => {
+    let updated = false;
+    const view = render({
+      bots: () => {
+        if (!updated)
+          throw Object.assign(new Error('plugin "1ma-bots" has no rpc method "bots.v2.list"'), {
+            code: "unknown_method",
+          });
+        return { bots: [marketer()] };
+      },
+    });
+    await screen.findByText(strings.unavailable);
+    expect(threadIdsInList()).toEqual(expect.arrayContaining(["thr_bot", "thr_plain"]));
+    updated = true;
+    await view.behavior.experimental_invalidateRpc(null, "1ma-bots");
+    await screen.findByText("Marketer");
+    expect(screen.queryByText(strings.unavailable)).toBeNull();
+    expect(threadIdsIn(botElement("bot_m"))).toEqual(["thr_bot", "thr_bot_child"]);
+  });
+
   it("draws nothing while it is not yet known whether there is a bot", async () => {
     render({ bots: () => new Promise<never>(() => undefined) });
     await screen.findByText("Creatives");
@@ -254,7 +274,7 @@ describe("the bots block", () => {
   it("draws nothing while it is not yet known which conversations are the bots'", async () => {
     render({
       bots: () => ({ bots: [marketer()] }),
-      reads: { "bots.v1.forThreads": () => new Promise<never>(() => undefined) },
+      reads: { "bots.v2.forThreads": () => new Promise<never>(() => undefined) },
     });
     await screen.findByText("Creatives");
     expect(document.querySelector("[data-1ma-bots-block]")).toBeNull();
@@ -264,7 +284,7 @@ describe("the bots block", () => {
     render({
       bots: () => ({ bots: [marketer()] }),
       reads: {
-        "bots.v1.forThreads": () => {
+        "bots.v2.forThreads": () => {
           throw new Error("1ma-bots is reloading");
         },
       },
@@ -411,7 +431,7 @@ describe("a click on a bot", () => {
       return <button onClick={() => setStatus("active")}>{thread?.id ?? "none"}</button>;
     }
     renderSlot({ component: Probe as never }, {} as never, {
-      rpc: { "bots.v1.mains": (input: unknown) => eachKey(input, () => main) },
+      rpc: { "bots.v2.mains": (input: unknown) => eachKey(input, () => main) },
     });
     const button = await screen.findByText("thr_bot");
     main = "thr_plain";
@@ -434,7 +454,7 @@ describe("a click on a bot", () => {
     }
     renderSlot({ component: Probe as never }, {} as never, {
       rpc: {
-        "bots.v1.mains": async () => {
+        "bots.v2.mains": async () => {
           reads += 1;
           if (reads > 1) return { bot_m: "thr_plain" };
           await new Promise<void>((resolve) => (answerFirst = resolve));
@@ -807,10 +827,7 @@ describe("dragging conversations onto a bot", () => {
       },
     });
     await screen.findByText("Editor");
-    document.elementsFromPoint = () => [botElement("bot_e").querySelector("button")!];
-    botDrop.start(["thr_bot", "thr_plain"]);
-    botDrop.over({ x: 100, y: 10 });
-    botDrop.end();
+    drag(["thr_bot", "thr_plain"], { botId: "bot_e", place: "last" }).end();
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls).toEqual([
       {
@@ -882,7 +899,9 @@ describe("dragging conversations onto a bot", () => {
     await screen.findByText(strings.dropFirst(1));
     fireEvent.mouseUp(document);
     await waitFor(() =>
-      expect(calls).toEqual([{ threadId: "thr_plain", botId: "bot_m", place: "first" }]),
+      expect(calls).toEqual([
+        { threadId: "thr_plain", botId: "bot_m", place: "first", seen: null },
+      ]),
     );
   });
 });

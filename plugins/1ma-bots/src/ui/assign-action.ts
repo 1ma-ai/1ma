@@ -18,7 +18,7 @@ interface AssignData {
 }
 
 function useAssignData({ threadIds }: { threadIds: readonly string[] }): AssignData {
-  const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
+  const list = useRpcQuery({ contract: botsRpc, method: "bots.v2.list", input: {} });
   const assign = useRpcMutation({ contract: botsRpc, method: "bots.v2.assign" });
   return {
     bots: list.data?.bots ?? [],

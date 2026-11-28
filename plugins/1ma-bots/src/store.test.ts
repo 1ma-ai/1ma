@@ -1,6 +1,6 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it } from "vitest";
-import { routeLetter } from "./letters.js";
+import { acceptDelivery, routeLetter } from "./letters.js";
 import { BotStore, INSTALLATION_OWNER, MIGRATIONS, broughtBack } from "./store.js";
 
 const START = Date.parse("2026-11-14T10:00:00Z");
@@ -27,7 +27,7 @@ function open(migrations: readonly string[] = MIGRATIONS) {
   const letter = (store: BotStore, fromThreadId: string, to: string, toThreadId: string) =>
     routeLetter(
       store,
-      { fromThreadId, to, toThreadId, now: clock.now, ownerTurn: null },
+      { fromThreadId, to, toBotId: to, toThreadId, now: clock.now, ownerTurn: null },
       { chainLetters: 100, hourlyLetters: 100 },
     );
   return {
@@ -74,15 +74,18 @@ describe("a database of an earlier version", () => {
     thread.run("thr_4", "bot_b", 0, 0, null, 40);
     db.exec(`
       INSERT INTO chains (id, letters, created_at) VALUES ('ch_kept', 2, 1), ('ch_gone', 1, 1);
-      INSERT INTO thread_chains (thread_id, chain_id) VALUES ('thr_1', 'ch_kept'), ('thr_left', 'ch_gone');
+      INSERT INTO thread_chains (thread_id, chain_id) VALUES ('thr_1', 'ch_kept'), ('thr_left', 'ch_gone'),
+        ('thr_unnamed', 'ch_kept'), ('thr_mixed', 'ch_kept');
       INSERT INTO letters (chain_id, from_bot, from_thread, to_bot, to_thread, sent_at) VALUES
         ('ch_kept', 'bot_a', 'thr_1', 'bot_b', 'thr_4', 5),
         ('ch_gone', 'bot_gone', 'thr_left', 'bot_b', 'thr_4', 6),
-        ('ch_gone', 'bot_a', 'thr_1', 'bot_gone', 'thr_left', 7);
+        ('ch_gone', 'bot_a', 'thr_1', 'bot_gone', 'thr_left', 7),
+        ('ch_kept', 'bot_a', 'thr_mixed', 'bot_gone', 'thr_left', 8);
       INSERT INTO bot_events (at, bot_id, kind, actor_kind) VALUES
         (1, 'bot_a', 'bot.created', 'owner'), (2, 'bot_gone', 'bot.removed', 'owner');
       INSERT INTO pending_letters (token, chain_id, to_thread, created_at) VALUES
-        ('tok_kept', 'ch_kept', 'thr_4', 5), ('tok_gone', 'ch_gone', 'thr_left', 5);
+        ('tok_kept', 'ch_kept', 'thr_4', 5), ('tok_gone', 'ch_gone', 'thr_left', 5),
+        ('tok_unnamed', 'ch_kept', 'thr_unnamed', 3);
       INSERT INTO pending_starts (token, bot_id, created_at) VALUES
         ('start_kept', 'bot_a', 5), ('start_gone', 'bot_gone', 5);
     `);
@@ -118,16 +121,32 @@ describe("a database of an earlier version", () => {
       ["thr_4", 700],
     ]);
     expect(t.rows("bot_events")).toMatchObject([{ bot_id: "bot_a" }]);
-    expect(t.rows("letters")).toMatchObject([{ from_bot: "bot_a", to_bot: "bot_b" }]);
+    expect(t.rows("letters")).toMatchObject([{ id: 1, from_bot: "bot_a", to_bot: "bot_b" }]);
     expect(t.rows("chains")).toMatchObject([{ id: "ch_kept" }]);
-    expect(t.rows("thread_chains")).toMatchObject([{ thread_id: "thr_1" }]);
-    expect(t.rows("pending_letters")).toMatchObject([{ token: "tok_kept" }]);
+    // Only a link every letter shows to be of a removed bot goes.
+    expect(t.rows("thread_chains")).toMatchObject([
+      { thread_id: "thr_1" },
+      { thread_id: "thr_unnamed" },
+      { thread_id: "thr_mixed" },
+    ]);
+    expect(t.rows("pending_letters")).toMatchObject([
+      { token: "tok_kept", letter_id: 1 },
+      { token: "tok_unnamed", letter_id: null },
+    ]);
     expect(t.rows("pending_starts")).toMatchObject([{ token: "start_kept" }]);
+    expect(t.rows("letter_spend")).toEqual(
+      [5, 6, 7, 8].map((at, index) => ({
+        owner_id: INSTALLATION_OWNER,
+        bot_id: index === 1 ? "bot_gone" : "bot_a",
+        at,
+      })),
+    );
     expect(t.tables().sort()).toEqual([
       "bot_events",
       "bot_threads",
       "bots",
       "chains",
+      "letter_spend",
       "letters",
       "pending_letters",
       "pending_starts",
@@ -139,8 +158,85 @@ describe("a database of an earlier version", () => {
   });
 });
 
+describe("a database the released version writes to again after this one", () => {
+  // The writes of the released store (f6a016d src/store.ts, src/letters.ts),
+  // which knows none of the columns added since.
+  const released = {
+    setHidden: "UPDATE bots SET hidden = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+    bind: `INSERT INTO bot_threads (thread_id, bot_id, position, started_from_bot, completed_at, bound_at)
+           VALUES (?, ?, 0, ?, NULL, ?)`,
+    chain: "INSERT INTO chains (id, letters, created_at) VALUES (?, 1, ?)",
+    letter: `INSERT INTO letters (chain_id, from_bot, from_thread, to_bot, to_thread, sent_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+    pending: "INSERT INTO pending_letters (token, chain_id, to_thread, created_at) VALUES (?, ?, ?, ?)",
+  };
+
+  function sent(t: Opened) {
+    const from = botWith(t.store, "From", ["thr_from"]);
+    const to = botWith(t.store, "To", ["thr_to"]);
+    t.db.prepare(released.chain).run("ch_old", START);
+    t.db.prepare(released.letter).run("ch_old", from.id, "thr_from", to.id, "thr_to", START);
+    return { from, to };
+  }
+
+  it("keeps when a bot it hides was hidden", () => {
+    const t = open();
+    const bot = botWith(t.store, "Bot", ["thr_1"]);
+    const hide = t.db.prepare(released.setHidden);
+    hide.run(1, START + 5, bot.id);
+    expect(t.store.hiddenAt(bot.id)).toBe(START + 5);
+    hide.run(0, START + 9, bot.id);
+    expect(t.store.hiddenAt(bot.id)).toBeNull();
+    t.store.setHidden(bot.id, true, { kind: "owner", id: null });
+    expect(t.store.hiddenAt(bot.id)).toBe(START);
+  });
+
+  it("gives each conversation it assigns an assignment of its own", () => {
+    const t = open();
+    const bot = botWith(t.store, "Bot", []);
+    const bind = t.db.prepare(released.bind);
+    bind.run("thr_1", bot.id, 0, START);
+    bind.run("thr_2", bot.id, 0, START);
+    const [first, second] = ["thr_1", "thr_2"].map((id) => t.store.assignmentOf(id)?.assignment);
+    expect(first).toMatch(/^[0-9a-f]{32}$/);
+    expect(second).toMatch(/^[0-9a-f]{32}$/);
+    expect(first).not.toBe(second);
+  });
+
+  it("counts a letter it sent in the sender's hourly limit", () => {
+    const t = open();
+    const { from, to } = sent(t);
+    expect(() =>
+      routeLetter(
+        t.store,
+        {
+          fromThreadId: "thr_from",
+          to: to.id,
+          toBotId: to.id,
+          toThreadId: "thr_to",
+          now: START,
+          ownerTurn: null,
+        },
+        { chainLetters: 100, hourlyLetters: 1 },
+      ),
+    ).toThrow(/already sent 1 letters in the last hour/);
+    expect(t.rows("letter_spend")).toEqual([
+      { owner_id: INSTALLATION_OWNER, bot_id: from.id, at: START },
+    ]);
+  });
+
+  it("keeps the record of a letter it sent while the letter waits in bb's queue", () => {
+    const t = open();
+    sent(t);
+    t.db.prepare(released.pending).run("tok_old", "ch_old", "thr_to", START);
+    expect(t.rows("pending_letters")).toMatchObject([{ token: "tok_old", letter_id: 1 }]);
+    t.store.dropHistory(START + 1, 100);
+    expect(t.rows("letters")).toHaveLength(1);
+  });
+});
+
 describe("removing a bot", () => {
-  it("leaves nothing of it and all of the others", () => {
+  it("leaves nothing of it but its letters in bb's queue and what it spent, and all of the others", () => {
     const t = open();
     const { store } = t;
     const gone = botWith(store, "Gone", ["thr_gone_1", "thr_gone_2", "thr_gone_3"]);
@@ -163,18 +259,36 @@ describe("removing a bot", () => {
       threads: [kept, other].map(({ id }) => orderOf(store, id)),
     });
     const before = keptRows();
+    const waiting = t.rows("pending_letters");
     store.remove(gone.id);
-    const everything = JSON.stringify(t.tables().map(t.rows));
+    const stays = ["pending_letters", "letter_spend"];
+    const everything = JSON.stringify(
+      t
+        .tables()
+        .filter((table) => !stays.includes(table))
+        .map(t.rows),
+    );
+    const ids = (table: string, column: string) =>
+      t.rows(table).map((row) => (row as Record<string, string>)[column]);
+    expect(ids("chains", "id")).toEqual(expect.arrayContaining(ids("pending_letters", "chain_id")));
     expect(everything).not.toContain(gone.id);
     expect(everything).not.toContain("thr_gone");
     expect(everything).not.toContain(over);
     expect(keptRows()).toEqual({ ...before, bots: [kept.id, other.id] });
     expect(before.letters).toHaveLength(1);
+    expect(t.rows("pending_letters")).toEqual(waiting);
+    expect(waiting).toContainEqual(expect.objectContaining({ to_thread: "thr_gone_2" }));
+    expect(ids("letter_spend", "bot_id")).toEqual([
+      gone.id,
+      gone.id,
+      kept.id,
+      other.id,
+    ]);
   });
 });
 
 describe("retention", () => {
-  it("drops the old event log and letters, but not an exchange still going on", () => {
+  it("drops the old event log and delivered letters in batches, nothing a waiting letter or a limit needs", () => {
     const t = open();
     const { store } = t;
     const a = botWith(store, "Alpha", ["thr_a"]);
@@ -182,21 +296,27 @@ describe("retention", () => {
     const c = botWith(store, "Gamma", ["thr_c"]);
     const d = botWith(store, "Delta", ["thr_d"]);
     const { chainId: going } = t.letter(store, "thr_a", b.id, "thr_b");
-    t.letter(store, "thr_c", d.id, "thr_d");
+    const { token } = t.letter(store, "thr_c", d.id, "thr_d");
+    expect(acceptDelivery(store, "thr_d", [token], false)).toBe(true);
     for (const id of ["thr_c", "thr_d"]) store.forgetThread(id);
     expect(t.rows("letters")).toHaveLength(2);
     store.record({ botId: c.id, kind: "old", actor: { kind: "owner", id: null } });
     store.record({ botId: a.id, kind: "old", actor: { kind: "owner", id: null } });
     t.clock.now += 1000;
     store.record({ botId: b.id, kind: "new", actor: { kind: "owner", id: null } });
+    const waiting = t.rows("pending_letters");
+    const spent = t.rows("letter_spend");
     t.told.length = 0;
-    store.dropHistory(t.clock.now);
-    expect(t.rows("letters")).toEqual([]);
-    expect(t.rows("pending_letters")).toEqual([]);
+    const batches = [store.dropHistory(t.clock.now, 1), store.dropHistory(t.clock.now, 1)];
+    expect([...batches, store.dropHistory(t.clock.now, 1)]).toEqual([true, true, false]);
+    expect(t.rows("letters")).toMatchObject([{ chain_id: going }]);
+    expect(t.rows("pending_letters")).toEqual(waiting);
+    expect(waiting).toMatchObject([{ chain_id: going }]);
+    expect(t.rows("letter_spend")).toEqual(spent);
     expect(store.events(a.id, 10)).toEqual([]);
     expect(store.events(b.id, 10).map(({ kind }) => kind)).toEqual(["new"]);
     expect(t.rows("chains")).toMatchObject([{ id: going, letters: 1 }]);
-    expect(t.told).toEqual([[`events:${a.id}`, `events:${c.id}`].sort()]);
+    expect(t.told).toEqual([[`events:${c.id}`], [`events:${a.id}`]]);
     expect(t.letter(store, "thr_a", b.id, "thr_b").letterNumber).toBe(2);
   });
 });
@@ -228,6 +348,7 @@ describe("two owners in one database", () => {
     expect(theirs.botOfThread("thr_1")).toBeNull();
     expect(theirs.members(["thr_1", "thr_2"]).size).toBe(0);
     expect(theirs.memberPage("", 10)).toEqual([]);
+    expect(theirs.strayLinks("", 10)).toEqual([]);
     expect(orderOf(theirs, bot.id)).toEqual([]);
     expect(theirs.events(bot.id, 10)).toEqual([]);
     expect(theirs.hasAssignmentDecision("thr_1")).toBe(false);
@@ -235,7 +356,7 @@ describe("two owners in one database", () => {
     theirs.reopen(["thr_1"]);
     expect(theirs.unbind("thr_1")).toBeNull();
     expect(theirs.claimPendingStart("thr_9", token, null)).toBeNull();
-    theirs.dropHistory(Number.MAX_SAFE_INTEGER);
+    expect(theirs.dropHistory(Number.MAX_SAFE_INTEGER, 100)).toBe(false);
     theirs.saveDefaults(bot.id, { projectId: "proj_theirs" });
     theirs.reorderBots([], []);
     for (const refused of [

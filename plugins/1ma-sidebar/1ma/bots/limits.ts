@@ -10,7 +10,11 @@ export const CHAIN_LETTERS_DEFAULT = 6;
 export const HOURLY_LETTERS_DEFAULT = 20;
 export const HOUR_MS = 60 * 60 * 1000;
 export const DAY_MS = 24 * HOUR_MS;
-export const RETENTION_DAYS_DEFAULT = 30;
+// Nothing is deleted until the owner chooses a period: bb gives a setting it
+// cannot read its default.
+export const RETENTION_DAYS_DEFAULT = 0;
+export const RETENTION_BATCH = 500;
+export const RETENTION_BUDGET_MS = 10_000;
 // bb's limit of ids in one call.
 export const THREAD_IDS_MAX = 200;
 export const REACH_MAX = 5_000;

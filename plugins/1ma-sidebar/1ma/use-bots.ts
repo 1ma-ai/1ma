@@ -36,14 +36,14 @@ export function useSidebarBots(
   const list = useRpcQuery({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.list",
+    method: "bots.v2.list",
     input: {},
     enabled,
   });
   const members = useRpcKeyedQuery({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.forThreads",
+    method: "bots.v2.forThreads",
     // A parent that is not in the list still says whose its sub-threads are.
     keys: threads.flatMap(({ id, parentThreadId }) =>
       parentThreadId === null ? [id] : [id, parentThreadId],

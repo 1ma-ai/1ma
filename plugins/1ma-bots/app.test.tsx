@@ -36,7 +36,7 @@ function membersOf(
 
 const membersFor = (members: ReadonlyMap<string, BotMember>, input: unknown) =>
   Object.fromEntries(
-    botsRpc["bots.v1.forThreads"].input
+    botsRpc["bots.v2.forThreads"].input
       .parse(input)
       .keys.map((key) => [key, members.get(key) ?? null]),
   );
@@ -55,10 +55,10 @@ async function threadRow(
     {
       pluginId: "1ma-bots",
       rpc: {
-        "bots.v1.list": () => ({ bots }),
-        "bots.v1.forThreads": (input) => membersFor(members, input),
-        "bots.v1.instructions": (input) => ({
-          text: `${botsRpc["bots.v1.instructions"].input.parse(input).botId}: ${text}`,
+        "bots.v2.list": () => ({ bots }),
+        "bots.v2.forThreads": (input) => membersFor(members, input),
+        "bots.v2.instructions": (input) => ({
+          text: `${botsRpc["bots.v2.instructions"].input.parse(input).botId}: ${text}`,
         }),
         "bots.v2.continueInBot": () => ({ threadId: "thr_continued" }),
         "bots.v2.assign": () => ({ botId: null, startedFromBot: false }),
@@ -168,8 +168,8 @@ describe("the bot page", () => {
     const view = renderSlot(panel, { subPath: "bot_1" } as never, {
       pluginId: "1ma-bots",
       rpc: {
-        "bots.v1.get": () => detail,
-        "bots.v1.list": () => ({ bots: [] }),
+        "bots.v2.get": () => detail,
+        "bots.v2.list": () => ({ bots: [] }),
         "bots.v1.events": () => ({ events: [] }),
       },
     });
@@ -228,8 +228,8 @@ describe("Assign to bot in a thread's menu", () => {
     const view = renderSlot({ component: Probe as never }, {} as never, {
       pluginId: "1ma-bots",
       rpc: {
-        "bots.v1.list": () => ({ bots: [bot("bot_a", "Marketer")] }),
-        "bots.v1.forThreads": (input) => membersFor(membersOf("bot_a", ["thr_1"]), input),
+        "bots.v2.list": () => ({ bots: [bot("bot_a", "Marketer")] }),
+        "bots.v2.forThreads": (input) => membersFor(membersOf("bot_a", ["thr_1"]), input),
         "bots.v2.assign": () => ({ botId: null, startedFromBot: false }),
       },
     });

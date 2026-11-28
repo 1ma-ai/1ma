@@ -40,7 +40,7 @@ it("a new conversation shows in its project only once it is known to be no bot's
   renderSlot({ component: Probe as never }, {} as never, {
     sidebarNavigation: { items: [PANEL] },
     rpc: {
-      "bots.v1.list": () => ({
+      "bots.v2.list": () => ({
         bots: [
           {
             id: "bot_m",
@@ -52,7 +52,7 @@ it("a new conversation shows in its project only once it is known to be no bot's
           },
         ],
       }),
-      "bots.v1.forThreads": async (input: unknown) => {
+      "bots.v2.forThreads": async (input: unknown) => {
         const { keys } = input as { keys: string[] };
         asked.push(keys);
         if (asked.length > 1) await new Promise<void>((resolve) => (answer = resolve));

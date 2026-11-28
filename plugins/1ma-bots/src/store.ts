@@ -15,10 +15,15 @@ import {
   type BotThread,
   type ChatDefaults,
   type CreateBotInput,
+  type Cursor,
+  type ReleasedBot,
+  type ReleasedDetail,
   type UpdateBotInput,
 } from "./contract.js";
 import { randomAppearance } from "./appearance.js";
+import { avatarDataUrl } from "./avatar.js";
 import { BotsError } from "./errors.js";
+import { HOUR_MS } from "./limits.js";
 import { agentText } from "../strings.js";
 
 // The only owner of an installation without sign-in; migration 6 gives it every
@@ -39,6 +44,36 @@ const OWNED_TABLES = [
 const UNUSED_CHAIN = `NOT EXISTS (SELECT 1 FROM thread_chains WHERE chain_id = chains.id)
   AND NOT EXISTS (SELECT 1 FROM letters WHERE chain_id = chains.id)
   AND NOT EXISTS (SELECT 1 FROM pending_letters WHERE chain_id = chains.id)`;
+// Its letters name only removed bots on its side; what no letter names may be
+// an exchange of a conversation that left its bot.
+const ofRemovedBots = (table: string, column: string) => `
+  WITH sides AS (
+    SELECT from_thread AS thread_id, from_bot AS bot_id FROM letters
+    UNION SELECT to_thread, to_bot FROM letters
+  )
+  DELETE FROM ${table} WHERE ${column} NOT IN (SELECT thread_id FROM bot_threads)
+    AND ${column} IN (SELECT thread_id FROM sides)
+    AND ${column} NOT IN (SELECT thread_id FROM sides WHERE bot_id IN (SELECT id FROM bots));`;
+// The letter a waiting one was written with.
+const WRITTEN_TOGETHER = `letters.chain_id = pending_letters.chain_id
+  AND letters.to_thread = pending_letters.to_thread AND letters.sent_at = pending_letters.created_at`;
+
+// An earlier version put back after this one still writes these tables, but
+// not the columns added since; the database keeps them for every version.
+const KEPT_BY_THE_DATABASE = `
+  CREATE TRIGGER bots_hidden_at AFTER UPDATE OF hidden ON bots
+    WHEN (NEW.hidden = 1) <> (NEW.hidden_at IS NOT NULL)
+    BEGIN UPDATE bots SET hidden_at = CASE NEW.hidden WHEN 1 THEN NEW.updated_at END
+      WHERE rowid = NEW.rowid; END;
+  CREATE TRIGGER bot_threads_assignment AFTER INSERT ON bot_threads WHEN NEW.assignment = ''
+    BEGIN UPDATE bot_threads SET assignment = lower(hex(randomblob(16)))
+      WHERE thread_id = NEW.thread_id; END;
+  CREATE TRIGGER letters_spend AFTER INSERT ON letters
+    BEGIN INSERT INTO letter_spend (owner_id, bot_id, at)
+      VALUES (NEW.owner_id, NEW.from_bot, NEW.sent_at); END;
+  CREATE TRIGGER pending_letters_letter AFTER INSERT ON pending_letters WHEN NEW.letter_id IS NULL
+    BEGIN UPDATE pending_letters SET letter_id = (SELECT MAX(id) FROM letters WHERE ${WRITTEN_TOGETHER})
+      WHERE token = NEW.token; END;`;
 
 export const MIGRATIONS = [
   `CREATE TABLE bots (
@@ -119,6 +154,7 @@ export const MIGRATIONS = [
   ).join("\n")}
   ALTER TABLE bots ADD COLUMN hidden_at INTEGER;
   UPDATE bots SET hidden_at = updated_at WHERE hidden = 1;
+  ALTER TABLE bots ADD COLUMN order_revision INTEGER NOT NULL DEFAULT 0;
   UPDATE bot_threads SET position = ordered.place FROM (
     SELECT thread_id, ROW_NUMBER() OVER (PARTITION BY bot_id ORDER BY position, bound_at) AS place
     FROM bot_threads
@@ -129,15 +165,23 @@ export const MIGRATIONS = [
   CREATE INDEX letters_by_chain ON letters(chain_id);
   CREATE INDEX letters_by_recipient ON letters(to_bot);
   CREATE INDEX letters_by_time ON letters(sent_at);
+  ALTER TABLE pending_letters ADD COLUMN letter_id INTEGER;
+  UPDATE pending_letters SET letter_id = (SELECT MAX(id) FROM letters WHERE ${WRITTEN_TOGETHER});
+  CREATE INDEX pending_letters_by_letter ON pending_letters(letter_id);
+  CREATE TABLE letter_spend (owner_id TEXT NOT NULL, bot_id TEXT NOT NULL, at INTEGER NOT NULL);
+  CREATE INDEX letter_spend_by_bot ON letter_spend(owner_id, bot_id, at);
+  INSERT INTO letter_spend SELECT owner_id, from_bot, sent_at FROM letters
+    WHERE sent_at > (SELECT MAX(sent_at) FROM letters) - ${HOUR_MS};
   CREATE INDEX bot_events_by_time ON bot_events(at);
   CREATE INDEX pending_letters_by_chain ON pending_letters(chain_id);
   CREATE INDEX pending_letters_by_recipient ON pending_letters(to_thread);
+  ${ofRemovedBots("thread_chains", "thread_id")}
+  ${ofRemovedBots("pending_letters", "to_thread")}
   DELETE FROM bot_events WHERE bot_id NOT IN (SELECT id FROM bots);
   DELETE FROM letters WHERE from_bot NOT IN (SELECT id FROM bots) OR to_bot NOT IN (SELECT id FROM bots);
   DELETE FROM pending_starts WHERE bot_id NOT IN (SELECT id FROM bots);
-  DELETE FROM thread_chains WHERE thread_id NOT IN (SELECT thread_id FROM bot_threads);
-  DELETE FROM pending_letters WHERE to_thread NOT IN (SELECT thread_id FROM bot_threads);
-  DELETE FROM chains WHERE ${UNUSED_CHAIN};`,
+  DELETE FROM chains WHERE ${UNUSED_CHAIN};
+  ${KEPT_BY_THE_DATABASE}`,
 ];
 
 interface SummaryRow {
@@ -156,6 +200,7 @@ interface BotRow extends SummaryRow {
   hidden_at: number | null;
   reach: string | null;
   revision: number;
+  order_revision: number;
 }
 
 interface ThreadRow {
@@ -183,8 +228,8 @@ export interface MemberRow {
   threadId: string;
   botId: string;
   completedAt: number | null;
-  boundAt: number;
   hiddenAt: number | null;
+  assignment: string;
 }
 
 const PENDING_START_TTL_MS = 24 * 60 * 60 * 1000;
@@ -209,6 +254,15 @@ function toMember(row: ThreadRow): BotMember {
   };
 }
 
+function toReleasedThread(row: ThreadRow): ReleasedBot["threads"][number] {
+  return {
+    threadId: row.thread_id,
+    startedFromBot: row.started_from_bot === 1,
+    completed: row.completed_at !== null,
+    assignment: row.assignment,
+  };
+}
+
 function toSummary(row: SummaryRow): BotSummary {
   return {
     id: row.id,
@@ -219,6 +273,8 @@ function toSummary(row: SummaryRow): BotSummary {
     hidden: row.hidden === 1,
   };
 }
+
+const parseReach = (raw: string | null) => (raw === null ? null : (JSON.parse(raw) as string[]));
 
 function parseDefaults(raw: string | null): ChatDefaults | null {
   if (raw === null) return null;
@@ -281,7 +337,7 @@ export class BotStore {
   private detail(row: BotRow): BotDetail {
     return {
       ...toSummary(row),
-      reach: row.reach === null ? null : (JSON.parse(row.reach) as string[]),
+      reach: parseReach(row.reach),
       conversations: this.db
         .prepare<[string, string], { n: number }>(
           "SELECT COUNT(*) AS n FROM bot_threads WHERE owner_id = ? AND bot_id = ?",
@@ -306,6 +362,60 @@ export class BotStore {
 
   get(botId: string): BotDetail {
     return this.detail(this.requireRow(botId));
+  }
+
+  released(): ReleasedBot[] {
+    const threads = new Map<string, ReleasedBot["threads"]>();
+    for (const row of this.db
+      .prepare<[string], ThreadRow>("SELECT * FROM bot_threads WHERE owner_id = ? ORDER BY position")
+      .all(this.owner)) {
+      const ofBot = threads.get(row.bot_id) ?? [];
+      threads.set(row.bot_id, ofBot);
+      ofBot.push(toReleasedThread(row));
+    }
+    return this.db
+      .prepare<[string], BotRow>(
+        "SELECT * FROM bots WHERE owner_id = ? ORDER BY position, created_at",
+      )
+      .all(this.owner)
+      .map((row) => {
+        const bot = toSummary(row);
+        return {
+          ...bot,
+          avatar: avatarDataUrl(bot.appearance),
+          reach: parseReach(row.reach),
+          threads: threads.get(row.id) ?? [],
+        };
+      });
+  }
+
+  releasedDetail(botId: string): ReleasedDetail {
+    const { conversations: _, ...bot } = this.get(botId);
+    return {
+      ...bot,
+      avatar: avatarDataUrl(bot.appearance),
+      threads: this.db
+        .prepare<[string, string], ThreadRow>(
+          "SELECT * FROM bot_threads WHERE owner_id = ? AND bot_id = ? ORDER BY position",
+        )
+        .all(this.owner, botId)
+        .map(toReleasedThread),
+    };
+  }
+
+  hiddenAt(botId: string): number | null {
+    return this.row(botId)?.hidden_at ?? null;
+  }
+
+  // Which order of the bot's conversations this is; every change of it counts.
+  orderRevision(botId: string): number {
+    return this.row(botId)?.order_revision ?? 0;
+  }
+
+  private noteOrder(botId: string): void {
+    this.db
+      .prepare("UPDATE bots SET order_revision = order_revision + 1 WHERE owner_id = ? AND id = ?")
+      .run(this.owner, botId);
   }
 
   find(botId: string): BotDetail | null {
@@ -482,19 +592,25 @@ export class BotStore {
     this.mark(tags.bot(botId));
   }
 
-  // Everything kept for the bot goes with it; its conversations stay in bb.
+  // Everything kept for the bot goes with it, except letters still in bb's queue;
+  // its conversations stay in bb.
   remove(botId: string): void {
     this.transaction(() => {
       this.requireRow(botId);
-      const threads = "SELECT thread_id FROM bot_threads WHERE owner_id = ? AND bot_id = ?";
-      for (const sql of [
-        `DELETE FROM thread_chains WHERE owner_id = ? AND thread_id IN (${threads})`,
-        `DELETE FROM pending_letters WHERE owner_id = ? AND to_thread IN (${threads})`,
-      ])
-        this.db.prepare(sql).run(this.owner, this.owner, botId);
-      this.db
-        .prepare("DELETE FROM letters WHERE owner_id = ? AND (from_bot = ? OR to_bot = ?)")
-        .run(this.owner, botId, botId);
+      const left = [
+        ...this.db
+          .prepare<[string, string, string], { chain_id: string }>(
+            `DELETE FROM thread_chains WHERE owner_id = ? AND thread_id IN (
+               SELECT thread_id FROM bot_threads WHERE owner_id = ? AND bot_id = ?
+             ) RETURNING chain_id`,
+          )
+          .all(this.owner, this.owner, botId),
+        ...this.db
+          .prepare<[string, string, string], { chain_id: string }>(
+            "DELETE FROM letters WHERE owner_id = ? AND (from_bot = ? OR to_bot = ?) RETURNING chain_id",
+          )
+          .all(this.owner, botId, botId),
+      ];
       for (const sql of [
         "DELETE FROM bot_events WHERE owner_id = ? AND bot_id = ?",
         "DELETE FROM pending_starts WHERE owner_id = ? AND bot_id = ?",
@@ -502,7 +618,7 @@ export class BotStore {
         "DELETE FROM bots WHERE owner_id = ? AND id = ?",
       ])
         this.db.prepare(sql).run(this.owner, botId);
-      this.dropUnusedChains();
+      this.dropUnusedChains(left);
       this.mark(
         tags.bots,
         tags.bot(botId),
@@ -513,27 +629,37 @@ export class BotStore {
     });
   }
 
-  private dropUnusedChains(): void {
-    this.db.prepare(`DELETE FROM chains WHERE owner_id = ? AND ${UNUSED_CHAIN}`).run(this.owner);
+  // Of the exchanges these rows were in, those nothing is in any more.
+  dropUnusedChains(left: readonly { chain_id: string }[]): void {
+    this.db
+      .prepare(
+        `DELETE FROM chains WHERE owner_id = ? AND id IN (SELECT value FROM json_each(?)) AND ${UNUSED_CHAIN}`,
+      )
+      .run(this.owner, JSON.stringify(left.map((row) => row.chain_id)));
   }
 
-  // An exchange a conversation is still in is not history: its letter limit
-  // keeps counting.
-  dropHistory(before: number): void {
-    this.transaction(() => {
-      const bots = this.db
-        .prepare<[string, number], { bot_id: string }>(
-          "DELETE FROM bot_events WHERE owner_id = ? AND at < ? RETURNING bot_id",
+  // Deletes at most `limit` old rows of each journal; false when there were none.
+  // A letter still in bb's queue is not history, however old.
+  dropHistory(before: number, limit: number): boolean {
+    return this.transaction(() => {
+      const events = this.db
+        .prepare<[string, number, number], { bot_id: string }>(
+          `DELETE FROM bot_events WHERE id IN (
+             SELECT id FROM bot_events WHERE owner_id = ? AND at < ? LIMIT ?
+           ) RETURNING bot_id`,
         )
-        .all(this.owner, before);
-      this.db
-        .prepare("DELETE FROM letters WHERE owner_id = ? AND sent_at < ?")
-        .run(this.owner, before);
-      this.db
-        .prepare("DELETE FROM pending_letters WHERE owner_id = ? AND created_at < ?")
-        .run(this.owner, before);
-      this.dropUnusedChains();
-      this.mark(...new Set(bots.map((row) => tags.events(row.bot_id))));
+        .all(this.owner, before, limit);
+      const letters = this.db
+        .prepare<[string, number, number], { chain_id: string }>(
+          `DELETE FROM letters WHERE id IN (
+             SELECT id FROM letters WHERE owner_id = ? AND sent_at < ?
+             AND NOT EXISTS (SELECT 1 FROM pending_letters WHERE letter_id = letters.id) LIMIT ?
+           ) RETURNING chain_id`,
+        )
+        .all(this.owner, before, limit);
+      this.dropUnusedChains(letters);
+      this.mark(...new Set(events.map((row) => tags.events(row.bot_id))));
+      return events.length + letters.length > 0;
     });
   }
 
@@ -588,7 +714,7 @@ export class BotStore {
     return this.db
       .prepare<[string, string, number], MemberRow>(
         `SELECT thread_id AS threadId, bot_id AS botId, completed_at AS completedAt,
-           bound_at AS boundAt, bots.hidden_at AS hiddenAt
+           bots.hidden_at AS hiddenAt, assignment
          FROM bot_threads JOIN bots ON bots.id = bot_threads.bot_id
          WHERE bot_threads.owner_id = ? AND thread_id > ? ${options.open ? "AND completed_at IS NULL" : ""}
          ORDER BY thread_id LIMIT ?`,
@@ -598,8 +724,11 @@ export class BotStore {
 
   threads(
     botId: string,
-    page: { from: "first" | "last"; after: number | null; limit: number },
-  ): { threads: BotThread[]; next: number | null } {
+    page: { from: "first" | "last"; after: Cursor | null; limit: number },
+  ): { threads: BotThread[]; next: Cursor | null } {
+    const order = this.orderRevision(botId);
+    if (page.after !== null && page.after.order !== order)
+      throw new BotsError("conflict", agentText.orderChanged);
     const [beyond, direction] = page.from === "first" ? [">", "ASC"] : ["<", "DESC"];
     const rows = this.db
       .prepare<(string | number)[], ThreadRow>(
@@ -607,21 +736,21 @@ export class BotStore {
          ${page.after === null ? "" : `AND position ${beyond} ?`}
          ORDER BY position ${direction} LIMIT ?`,
       )
-      .all(this.owner, botId, ...(page.after === null ? [] : [page.after]), page.limit + 1);
+      .all(this.owner, botId, ...(page.after === null ? [] : [page.after.position]), page.limit + 1);
     const shown = rows.slice(0, page.limit);
     return {
       threads: shown.map((row) => {
         const { botId: _, ...thread } = toMember(row);
         return { threadId: row.thread_id, ...thread };
       }),
-      next: rows.length > shown.length ? shown.at(-1)!.position : null,
+      next: rows.length > shown.length ? { order, position: shown.at(-1)!.position } : null,
     };
   }
 
   bind(
     threadId: string,
     botId: string,
-    options: { startedFromBot: boolean; place: ThreadPlace },
+    options: { startedFromBot: boolean; place: ThreadPlace; boundAt?: number },
   ): void {
     this.transaction(() => {
       this.requireRow(botId);
@@ -639,9 +768,10 @@ export class BotStore {
           botId,
           position,
           Number(options.startedFromBot),
-          this.now(),
+          options.boundAt ?? this.now(),
           randomUUID(),
         );
+      this.noteOrder(botId);
       this.mark(tags.thread(threadId), tags.conversations(botId));
     });
   }
@@ -671,13 +801,15 @@ export class BotStore {
     sourceThreadId: string,
     sourceBranch: readonly string[],
     startedFromBot: boolean,
+    boundAt?: number,
   ): boolean {
     return this.transaction(() => {
       if (this.hasAssignmentDecision(threadId)) return false;
       const botId = this.botOfThread(sourceThreadId);
       if (botId === null) return false;
       this.recordAssignmentDecision(threadId);
-      this.bind(threadId, botId, { startedFromBot, place: { before: sourceBranch.at(-1) } });
+      const place = { before: sourceBranch.at(-1) };
+      this.bind(threadId, botId, { startedFromBot, place, boundAt });
       this.reopen(sourceBranch.filter((id) => this.botOfThread(id) === botId));
       return true;
     });
@@ -687,13 +819,25 @@ export class BotStore {
     this.transaction(() => {
       this.unbind(threadId);
       this.recordAssignmentDecision(threadId);
-      this.db
-        .prepare("DELETE FROM thread_chains WHERE owner_id = ? AND thread_id = ?")
-        .run(this.owner, threadId);
-      this.db
-        .prepare("DELETE FROM pending_letters WHERE owner_id = ? AND to_thread = ?")
-        .run(this.owner, threadId);
+      const left = [
+        "DELETE FROM thread_chains WHERE owner_id = ? AND thread_id = ? RETURNING chain_id",
+        "DELETE FROM pending_letters WHERE owner_id = ? AND to_thread = ? RETURNING chain_id",
+      ].flatMap((sql) =>
+        this.db.prepare<[string, string], { chain_id: string }>(sql).all(this.owner, threadId),
+      );
+      this.dropUnusedChains(left);
     });
+  }
+
+  // A page of the conversations that are in an exchange and in no bot.
+  strayLinks(after: string, limit: number): string[] {
+    return this.db
+      .prepare<[string, string, number], { thread_id: string }>(
+        `SELECT thread_id FROM thread_chains WHERE owner_id = ? AND thread_id > ?
+         AND thread_id NOT IN (SELECT thread_id FROM bot_threads) ORDER BY thread_id LIMIT ?`,
+      )
+      .all(this.owner, after, limit)
+      .map((row) => row.thread_id);
   }
 
   // The bot the conversation was in.
@@ -704,6 +848,7 @@ export class BotStore {
       )
       .get(this.owner, threadId);
     if (left === undefined) return null;
+    this.noteOrder(left.bot_id);
     this.mark(tags.thread(threadId), tags.conversations(left.bot_id));
     return left.bot_id;
   }
@@ -738,6 +883,7 @@ export class BotStore {
         "UPDATE bot_threads SET position = ? WHERE owner_id = ? AND thread_id = ?",
       );
       moved.forEach((threadId, index) => write.run(positions[index], this.owner, threadId));
+      this.noteOrder(botId);
       this.mark(tags.conversations(botId), ...moved.map(tags.thread));
     });
   }
@@ -817,26 +963,28 @@ export class BotStore {
     return reach === null || (JSON.parse(reach) as string[]).includes(toBotId);
   }
 
+  // Nothing for a bot that was removed meanwhile.
   record(event: {
     botId: string;
     kind: string;
     actor: Actor;
     detail?: Record<string, unknown>;
   }): void {
-    this.db
+    const { changes } = this.db
       .prepare(
-        "INSERT INTO bot_events (owner_id, at, bot_id, kind, actor_kind, actor_id, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        `INSERT INTO bot_events (owner_id, at, bot_id, kind, actor_kind, actor_id, detail)
+         SELECT owner_id, ?, id, ?, ?, ?, ? FROM bots WHERE owner_id = ? AND id = ?`,
       )
       .run(
-        this.owner,
         this.now(),
-        event.botId,
         event.kind,
         event.actor.kind,
         event.actor.id,
         JSON.stringify(event.detail ?? {}),
+        this.owner,
+        event.botId,
       );
-    this.mark(tags.events(event.botId));
+    if (changes > 0) this.mark(tags.events(event.botId));
   }
 
   events(botId: string, limit: number): BotEvent[] {

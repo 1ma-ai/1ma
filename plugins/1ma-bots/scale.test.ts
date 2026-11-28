@@ -26,6 +26,10 @@ const threadId = (bot: number, index: number) => `thr_${bot}_${index}`;
 function setup() {
   const quiet = new Set<string>();
   const calls: string[] = [];
+  // What bb's list of all conversations holds, in its order.
+  const common: string[] = [];
+  // Rows bb steps over to reach the pages of its list asked for by offset.
+  const skipped = { rows: 0 };
   const row = (id: string) =>
     makeThreadResponse({
       id,
@@ -47,7 +51,10 @@ function setup() {
         list: async (filter = {}) => {
           calls.push("list");
           expect(filter.threadIds?.length ?? 0).toBeLessThanOrEqual(200);
-          return (filter.threadIds ?? []).map((id) => ({
+          const offset = filter.offset ?? 0;
+          if (filter.threadIds === undefined) skipped.rows += offset;
+          const page = common.slice(offset, offset + (filter.limit ?? common.length));
+          return (filter.threadIds ?? page).map((id) => ({
             ...row(id),
             hasPendingInteraction: false,
             queuedWork: "none",
@@ -120,7 +127,7 @@ function setup() {
   };
   const rpc = (method: string, input: unknown) =>
     cost(async () => JSON.stringify(await host.harness.behavior.callRpc(method, input)));
-  return { harness: host.harness, db, quiet, calls, cost, rpc };
+  return { harness: host.harness, db, quiet, calls, common, skipped, cost, rpc };
 }
 
 describe("1000 bots and 50 000 conversations", () => {
@@ -133,20 +140,23 @@ describe("1000 bots and 50 000 conversations", () => {
 
   // Characters of the answer, SQL statements, calls to bb.
   it.each<[string, unknown, number, number, number]>([
-    ["bots.v1.list", {}, 650_000, 1, 0],
+    // What the panel released before bots.v2 reads: every bot with all of its conversations.
+    ["bots.v1.list", {}, 9_000_000, 3, 0],
     ["bots.v1.forThread", { threadId: thread }, 100, 3, 0],
+    ["bots.v1.get", { botId: bot }, 30_000, 3, 0],
+    ["bots.v1.events", { botId: bot }, 100, 3, 0],
+    ["bots.v2.list", {}, 650_000, 1, 0],
     [
-      "bots.v1.forThreads",
+      "bots.v2.forThreads",
       { keys: Array.from({ length: 200 }, (_, i) => threadId(i, 3)) },
-      25_000,
+      30_000,
       1,
       0,
     ],
-    ["bots.v1.threads", { botId: bot }, 5_000, 3, 0],
-    ["bots.v1.get", { botId: bot }, 21_000, 2, 0],
-    ["bots.v1.instructions", { botId: bot }, HOST_INSTRUCTIONS_MAX * 1.5, 4, 0],
-    ["bots.v1.mains", { keys: Array.from({ length: 200 }, (_, i) => botId(i)) }, 12_000, 205, 4],
-    ["bots.v1.events", { botId: bot }, 100, 3, 0],
+    ["bots.v2.threads", { botId: bot }, 7_000, 4, 0],
+    ["bots.v2.get", { botId: bot }, 21_000, 2, 0],
+    ["bots.v2.instructions", { botId: bot }, HOST_INSTRUCTIONS_MAX * 1.5, 4, 0],
+    ["bots.v2.mains", { keys: Array.from({ length: 200 }, (_, i) => botId(i)) }, 12_000, 405, 4],
   ])("%s costs what its answer does", async (method, input, characters, statements, calls) => {
     const cost = await t.rpc(method, input);
     expect(cost.result.length).toBeLessThanOrEqual(characters);
@@ -177,21 +187,25 @@ describe("1000 bots and 50 000 conversations", () => {
   });
 
   it("a write costs the same in a bot of 50 conversations and tells only what it changed", async () => {
-    const before = t.harness.experimental_rpcInvalidations.length;
     const write = async (method: string, input: unknown, statements: number) =>
       expect((await t.rpc(method, input)).sql).toBeLessThanOrEqual(statements);
     const moved = threadId(500, 40);
+    const seen = async (id: string) => {
+      const { result } = await t.rpc("bots.v2.forThreads", { keys: [id] });
+      const { assignment, completed } = (
+        JSON.parse(result) as Record<string, { assignment: string; completed: boolean }>
+      )[id]!;
+      const branch = [{ threadId: id, assignment, completed }];
+      return { threadId: id, parentThreadId: null, branch, shownDone: completed };
+    };
+    const [source, target] = [await seen(moved), await seen(thread)];
+    const before = t.harness.experimental_rpcInvalidations.length;
     await write(
-      "bots.v1.moveThreads",
-      {
-        botId: bot,
-        sources: [{ threadId: moved, parentThreadId: null, real: true }],
-        target: { threadId: thread, placement: "before", parentThreadId: null },
-        levelShown: true,
-      },
-      10,
+      "bots.v2.moveThreads",
+      { botId: bot, sources: [source], target: { ...target, placement: "before" }, levelShown: true },
+      20,
     );
-    await write("bots.v1.assign", { threadId: moved, botId: botId(501), place: "first" }, 10);
+    await write("bots.v1.assign", { threadId: moved, botId: botId(501), place: "first" }, 15);
     await write("bots.v1.setCompleted", { threadId: thread, completed: true }, 8);
     await write("bots.v1.setCompleted", { threadId: thread, completed: false }, 8);
     expect(
@@ -225,11 +239,14 @@ describe("1000 bots and 50 000 conversations", () => {
     },
   );
 
-  it("the command lists a page of bots and how many more there are", async () => {
-    const { result, sql } = await t.cost(() => t.harness.behavior.runCli(["list"]));
+  it("the command finds a page of bots and says how many more there are", async () => {
+    const { result, sql } = await t.cost(() => t.harness.behavior.runCli(["find"]));
     expect(sql).toBeLessThanOrEqual(2);
     expect(result.stdout.trimEnd().split("\n")).toHaveLength(201);
     expect(result.stdout).toContain("800 more");
+    const all = await t.cost(() => t.harness.behavior.runCli(["list", "--json"]));
+    expect(all.sql).toBeLessThanOrEqual(2);
+    expect(JSON.parse(all.result.stdout)).toHaveLength(BOTS);
   });
 
   it("auto-complete asks bb about pages, and about single conversations only before marking them", async () => {
@@ -240,7 +257,7 @@ describe("1000 bots and 50 000 conversations", () => {
     // A list per page; for each page with a quiet conversation also the main
     // conversation (3 calls), the branches and the last look at it (3).
     expect(calls).toBeLessThanOrEqual(pages + old.length * 8);
-    const members = JSON.parse((await t.rpc("bots.v1.forThreads", { keys: old })).result) as Record<
+    const members = JSON.parse((await t.rpc("bots.v2.forThreads", { keys: old })).result) as Record<
       string,
       { completed: boolean }
     >;
@@ -256,6 +273,22 @@ describe("1000 bots and 50 000 conversations", () => {
     const run = t.harness.behavior.runService(RECONCILE_SERVICE);
     run.controller.abort();
     await run.done;
+  });
+
+  // At start and every hour: the bots' conversations by pages, then all of bb's
+  // list for continuations, by offset until a short page. The numbers are those
+  // of the plan's open item "going on without OFFSET".
+  it("looking for missed events with all 50 000 conversations in bb's list", async () => {
+    for (let i = 0; i < BOTS; i += 1)
+      for (let j = 0; j < EACH; j += 1) t.common.push(threadId(i, j));
+    t.skipped.rows = 0;
+    const { calls } = await t.cost(() => t.harness.behavior.runSchedule(UPKEEP_SCHEDULE));
+    t.common.length = 0;
+    const pages = CONVERSATIONS / 200;
+    expect(calls).toBe(pages + pages + 1);
+    expect(new Set(t.calls)).toEqual(new Set(["list"]));
+    expect(t.skipped.rows).toBe((200 * pages * (pages + 1)) / 2);
+    expect(t.skipped.rows).toBe(6_275_000);
   });
 
   it("removing a bot costs the same however many there are", async () => {

@@ -84,6 +84,26 @@ export const botDetailSchema = botSummarySchema.extend({
 });
 export type BotDetail = z.infer<typeof botDetailSchema>;
 
+// What bots.v1 answers: a 1ma-sidebar released before this one reads all of a
+// bot and its conversations at once.
+export const releasedBotSchema = botSummarySchema.extend({
+  avatar: z.string(),
+  reach: z.array(z.string()).nullable(),
+  threads: z.array(botThreadSchema.omit({ position: true })),
+});
+export type ReleasedBot = z.infer<typeof releasedBotSchema>;
+
+export const releasedDetailSchema = releasedBotSchema.extend(
+  botDetailSchema.pick({
+    instructions: true,
+    memory: true,
+    memorySha256: true,
+    defaults: true,
+    revision: true,
+  }).shape,
+);
+export type ReleasedDetail = z.infer<typeof releasedDetailSchema>;
+
 export const actorSchema = z.object({
   kind: z.enum(["owner", "agent", "plugin", "system"]),
   id: z.string().nullable(),
@@ -184,6 +204,10 @@ export type MoveThreadsInput = z.infer<typeof moveThreadsInput>;
 export const moveToTopInput = z.object({ botId: z.string(), thread: seenRow });
 export type MoveToTopInput = z.infer<typeof moveToTopInput>;
 
+// A place in a bot's order, as long as that order is the one it was read from.
+const cursorSchema = z.object({ order: z.number().int(), position: z.number() });
+export type Cursor = z.infer<typeof cursorSchema>;
+
 const assignInput = z.object({
   threadId: z.string(),
   botId: z.string().nullable(),
@@ -192,21 +216,30 @@ const assignInput = z.object({
 export type AssignInput = z.infer<typeof assignInput>;
 const assignOutput = z.object({ botId: z.string().nullable(), startedFromBot: z.boolean() });
 
+// Reads of panels released before bots.v2. They declare no tags.
+export const RELEASED_READS = ["bots.v1.list", "bots.v1.forThread", "bots.v1.get"] as const;
+
 export const botsReads = {
   "bots.v1.list": {
     input: z.object({}),
-    output: z.object({ bots: z.array(botSummarySchema) }),
-    tags: () => [tags.bots],
+    output: z.object({ bots: z.array(releasedBotSchema) }),
   },
   "bots.v1.forThread": {
     input: threadId,
     output: z.object({ botId: z.string(), capabilities: z.array(z.string()) }).nullable(),
-    tags: (input: z.infer<typeof threadId>, output: { botId: string } | null) => [
-      tags.thread(input.threadId),
-      ...(output === null ? [] : [tags.bot(output.botId), tags.members(output.botId)]),
-    ],
   },
-  "bots.v1.forThreads": {
+  "bots.v1.get": { input: botId, output: releasedDetailSchema },
+  "bots.v1.events": {
+    input: z.object({ botId: z.string(), limit: z.number().int().min(1).max(200).optional() }),
+    output: z.object({ events: z.array(botEventSchema) }),
+    tags: (input: z.infer<typeof botId>) => [tags.events(input.botId)],
+  },
+  "bots.v2.list": {
+    input: z.object({}),
+    output: z.object({ bots: z.array(botSummarySchema) }),
+    tags: () => [tags.bots],
+  },
+  "bots.v2.forThreads": {
     input: keys,
     output: z.record(z.string(), botMemberSchema.nullable()),
     keyTags: (key: string, member: BotMember | null) => [
@@ -215,18 +248,18 @@ export const botsReads = {
     ],
   },
   // A page of the bot's conversations in its order, or from its end: those
-  // beyond the position `after`.
-  "bots.v1.threads": {
+  // beyond `after`. Another order by now is a conflict: start from the beginning.
+  "bots.v2.threads": {
     input: z.object({
       botId: z.string(),
       from: z.enum(["first", "last"]).optional(),
-      after: z.number().optional(),
+      after: cursorSchema.optional(),
       limit: z.number().int().min(1).max(THREAD_IDS_MAX).optional(),
     }),
-    output: z.object({ threads: z.array(botThreadSchema), next: z.number().nullable() }),
+    output: z.object({ threads: z.array(botThreadSchema), next: cursorSchema.nullable() }),
     tags: (input: z.infer<typeof botId>) => [tags.conversations(input.botId)],
   },
-  "bots.v1.get": {
+  "bots.v2.get": {
     input: botId,
     output: botDetailSchema,
     tags: (input: z.infer<typeof botId>) => [
@@ -235,21 +268,16 @@ export const botsReads = {
     ],
   },
   // What the bot's agents are told, word for word.
-  "bots.v1.instructions": {
+  "bots.v2.instructions": {
     input: botId,
     output: z.object({ text: z.string() }),
     tags: (input: z.infer<typeof botId>) => [tags.bot(input.botId), tags.bots],
   },
   // The main conversations of many bots, for showing: they may be behind by one change.
-  "bots.v1.mains": {
+  "bots.v2.mains": {
     input: keys,
     output: z.record(z.string(), z.string().nullable()),
     keyTags: (key: string) => [tags.conversations(key)],
-  },
-  "bots.v1.events": {
-    input: z.object({ botId: z.string(), limit: z.number().int().min(1).max(200).optional() }),
-    output: z.object({ events: z.array(botEventSchema) }),
-    tags: (input: z.infer<typeof botId>) => [tags.events(input.botId)],
   },
   // The conversation a click on the bot opens; null when a click starts a new one.
   "bots.v2.main": {
@@ -260,8 +288,8 @@ export const botsReads = {
 
 // Every method here has a row in the plan's table.
 export const botsWrites = {
-  "bots.v1.create": { input: createBotInput, output: botDetailSchema },
-  "bots.v1.update": { input: updateBotInput, output: botDetailSchema },
+  "bots.v1.create": { input: createBotInput, output: releasedDetailSchema },
+  "bots.v1.update": { input: updateBotInput, output: releasedDetailSchema },
   "bots.v1.remove": { input: botId, output: ok },
   "bots.v1.setHidden": {
     input: z.object({ botId: z.string(), hidden: z.boolean() }),
@@ -275,6 +303,8 @@ export const botsWrites = {
     input: z.object({ threadId: z.string(), completed: z.boolean() }),
     output: ok,
   },
+  "bots.v2.create": { input: createBotInput, output: botDetailSchema },
+  "bots.v2.update": { input: updateBotInput, output: botDetailSchema },
   "bots.v2.assign": {
     input: assignInput.extend({ seen: seenAssignment.nullable() }),
     output: assignOutput,

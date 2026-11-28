@@ -21,6 +21,15 @@ export const pluginDirs = {
   sidebar: path.resolve(import.meta.dirname, "../../plugins/1ma-sidebar"),
 };
 
+// The plugins as released, built by the workflow from main.
+export function releasedDirs() {
+  const released = requireEnv("E2E_RELEASED_DIR");
+  return {
+    bots: path.join(released, "plugins/1ma-bots"),
+    sidebar: path.join(released, "plugins/1ma-sidebar"),
+  };
+}
+
 export const fleet = new Fleet({ root, packageDir: path.join(scratch, "server-package") });
 // bb's custom ACP agents have no fork support. Exercise its fork-capable omp
 // registration against the same offline agent used for ordinary conversations.
@@ -144,7 +153,7 @@ export function say(threadId, text) {
 
 // A bot's conversations in its order.
 export async function conversations(botId) {
-  const { threads } = await rpc("bots.v1.threads", { botId });
+  const { threads } = await rpc("bots.v2.threads", { botId });
   return threads.map(({ threadId, completed, startedFromBot }) => ({
     threadId,
     completed,
@@ -190,6 +199,16 @@ function pluginDatabase() {
     db.close();
   }
   throw new Error(`no 1ma-bots database under ${server.dataDir}`);
+}
+
+export function hiddenOf(botId) {
+  const db = pluginDatabase();
+  try {
+    const row = db.prepare("SELECT hidden, hidden_at AS hiddenAt FROM bots WHERE id = ?").get(botId);
+    return { hidden: row.hidden === 1, hiddenAt: row.hiddenAt };
+  } finally {
+    db.close();
+  }
 }
 
 // The exchange a conversation belongs to and the letters waiting for it, read

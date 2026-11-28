@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import type { z } from "zod";
 import {
   createFakePluginHost,
   makeMessageDispatchHookContext,
@@ -16,9 +17,12 @@ import {
   type BotThread,
   type SeenThread,
 } from "./src/contract.js";
-import { RETENTION_DAYS_DEFAULT } from "./src/limits.js";
+import { CLI_ROWS_MAX, RETENTION_BATCH, RETENTION_BUDGET_MS } from "./src/limits.js";
+import { botsRpc as sidebar5cf684b } from "./src/released/sidebar-5cf684b.js";
+import { botsRpc as sidebar8f7db7d } from "./src/released/sidebar-8f7db7d.js";
 import { BotStore } from "./src/store.js";
 import { assignmentOf, seenThread, topMove, type TreeRow } from "./src/ui/seen.js";
+import { agentText, strings } from "./strings.js";
 import botsPlugin, {
   AUTO_COMPLETE_SCHEDULE,
   RECONCILE_SERVICE,
@@ -46,6 +50,7 @@ interface TurnExtra {
 
 function setup(settings: Record<string, number> = {}) {
   const delivery = { immediate: true, queued: [] as SentLetter[] };
+  const inQueue = new Set<SentLetter>();
   // The thread events bb records per conversation: turn requests, refusals
   // and provider-confirmed turn starts, in order.
   type Scope = { kind: "thread" } | { kind: "turn"; turnId: string };
@@ -123,6 +128,7 @@ function setup(settings: Record<string, number> = {}) {
     });
   // Stands in for bb taking a queued letter out of the queue into a turn.
   const deliver = async (letter: SentLetter, kind: "start" | "steer" = "start") => {
+    inQueue.delete(letter);
     recordTurn(letter.threadId, "agent", letter.senderThreadId ?? null, kind);
     if (kind === "start") await settle(letter.threadId);
     await host.harness.behavior.emitThreadEvent("message.dispatched", {
@@ -182,7 +188,23 @@ function setup(settings: Record<string, number> = {}) {
             return { delivery: "sent" };
           }
           delivery.queued.push(letter);
+          inQueue.add(letter);
           return { delivery: "queued" };
+        },
+        queue: {
+          list: async () =>
+            [...inQueue].map((letter) =>
+              makeQueueEntry({
+                threadId: letter.threadId,
+                initiator: "agent",
+                senderThreadId: letter.senderThreadId ?? null,
+                content: letter.input.map((block) => ({
+                  type: "text",
+                  text: block.text,
+                  mentions: [],
+                })) as never,
+              }),
+            ),
         },
         spawn: async () => ({ id: `thr_new${nextThread++}` }),
         fork: async () => ({ id: `thr_fork${nextThread++}` }),
@@ -349,9 +371,9 @@ function setup(settings: Record<string, number> = {}) {
       }),
     );
   };
-  const bots = async () => (await rpc<{ bots: BotSummary[] }>("bots.v1.list")).bots;
+  const bots = async () => (await rpc<{ bots: BotSummary[] }>("bots.v2.list")).bots;
   const threadsOf = async (botId: string) =>
-    (await rpc<{ threads: BotThread[] }>("bots.v1.threads", { botId })).threads;
+    (await rpc<{ threads: BotThread[] }>("bots.v2.threads", { botId })).threads;
   const list = async () => ({
     bots: await Promise.all(
       (await bots()).map(async ({ id }) => ({
@@ -641,7 +663,7 @@ describe("an old conversation bound to a bot", () => {
       expect(
         await harness.behavior.callRpc("bots.v1.forThread", { threadId: thread.id }),
       ).toBeNull();
-      expect(await harness.behavior.callRpc("bots.v1.threads", { botId: bot.id })).toMatchObject({
+      expect(await harness.behavior.callRpc("bots.v2.threads", { botId: bot.id })).toMatchObject({
         threads: [{ threadId: "thr_source", completed: true }],
       });
     },
@@ -2278,10 +2300,10 @@ describe("nested conversations", () => {
     for (const id of ["thr_child", "thr_parent"]) await t.mark(id);
     let changes = 0;
     t.bbCalls.before = async (call) => {
-      // One more than a request puts up with.
+      // One more than a request puts up with, each in the branch it reads.
       if (call !== "list" || changes === 6) return;
       changes += 1;
-      await t.queueEvent("message.queued", "thr_other");
+      await t.queueEvent("message.queued", "thr_parent");
     };
     await happens(t);
     expect(changes).toBe(6);
@@ -3281,7 +3303,8 @@ describe("nested conversations", () => {
     };
     await t.harness.behavior.runSchedule(AUTO_COMPLETE_SCHEDULE);
     expect(t.bbCalls.before).toBeUndefined();
-    expect(await t.done()).toEqual([]);
+    // Its branch stays open; the quiet ones the owner did not read are marked.
+    expect(await t.done()).toEqual(["thr_sibling", "thr_other"]);
   });
 
   describe("a change after the window showed what a request acts on", () => {
@@ -3504,6 +3527,20 @@ describe("nested conversations", () => {
         ...ofBot,
         method: "bots.v1.update",
         does: "edits the bot",
+        needs: ["bot", "revision"],
+        input: (t) => ({ botId: t.bot.id, expectedRevision: t.bot.revision, name: "Renamed" }),
+      },
+      {
+        method: "bots.v2.create",
+        does: "creates a bot without its conversations",
+        asksBb: false,
+        needs: [],
+        input: () => ({ name: "New" }),
+      },
+      {
+        ...ofBot,
+        method: "bots.v2.update",
+        does: "edits the bot without its conversations",
         needs: ["bot", "revision"],
         input: (t) => ({ botId: t.bot.id, expectedRevision: t.bot.revision, name: "Renamed" }),
       },
@@ -3762,12 +3799,14 @@ describe("nested conversations", () => {
       const inputs: Record<keyof typeof botsReads, unknown> = {
         "bots.v1.list": {},
         "bots.v1.forThread": { threadId: "thr_child" },
-        "bots.v1.forThreads": { keys: ["thr_child"] },
-        "bots.v1.threads": { botId: t.bot.id },
         "bots.v1.get": { botId: t.bot.id },
-        "bots.v1.instructions": { botId: t.bot.id },
-        "bots.v1.mains": { keys: [t.bot.id] },
         "bots.v1.events": { botId: t.bot.id },
+        "bots.v2.list": {},
+        "bots.v2.forThreads": { keys: ["thr_child"] },
+        "bots.v2.threads": { botId: t.bot.id },
+        "bots.v2.get": { botId: t.bot.id },
+        "bots.v2.instructions": { botId: t.bot.id },
+        "bots.v2.mains": { keys: [t.bot.id] },
         "bots.v2.main": { botId: t.bot.id },
       };
       for (const method of Object.keys(botsReads) as Array<keyof typeof botsReads>) {
@@ -3826,8 +3865,8 @@ describe("nested conversations", () => {
       "Move to top puts %s first under its parent, whatever another window put there since",
       async (id, other, parent) => {
         const t = await withEditor();
-        const input = toTop(t, await t.view(), id);
-        await t.rpc("bots.v2.moveToTop", toTop(t, await t.view(), other));
+        const input = toTop(await t.view(), id);
+        await t.rpc("bots.v2.moveToTop", toTop(await t.view(), other));
         const refreshed = t.harness.experimental_rpcInvalidations.length;
         await t.rpc("bots.v2.moveToTop", input);
         expect(t.harness.experimental_rpcInvalidations).toHaveLength(refreshed + 1);
@@ -3843,7 +3882,7 @@ describe("nested conversations", () => {
       async (state) => {
         const t = await withEditor();
         t.nest("thr_child", "thr_parent", state);
-        await t.rpc("bots.v2.moveToTop", toTop(t, await t.view(), "thr_second"));
+        await t.rpc("bots.v2.moveToTop", toTop(await t.view(), "thr_second"));
         const level = (await t.order()).filter(
           (member) => t.place(member).parentThreadId === "thr_parent",
         );
@@ -3854,18 +3893,18 @@ describe("nested conversations", () => {
     it("Move to top takes a sub-thread no further than its siblings", async () => {
       const t = await withEditor();
       t.nest("thr_child", null);
-      await t.rpc("bots.v2.moveToTop", toTop(t, await t.view(), "thr_spare"));
+      await t.rpc("bots.v2.moveToTop", toTop(await t.view(), "thr_spare"));
       t.nest("thr_child", "thr_parent");
       const others = (await t.order()).filter((id) => id !== "thr_second");
       const first = others.indexOf("thr_child");
       expect(first).toBeGreaterThan(0);
-      await t.rpc("bots.v2.moveToTop", toTop(t, await t.view(), "thr_second"));
+      await t.rpc("bots.v2.moveToTop", toTop(await t.view(), "thr_second"));
       expect(await t.order()).toEqual(others.toSpliced(first, 0, "thr_second"));
     });
 
     it("Move to top refuses a conversation archived since", async () => {
       const t = await withEditor();
-      const input = toTop(t, await t.view(), "thr_second");
+      const input = toTop(await t.view(), "thr_second");
       t.nest("thr_second", "thr_parent", { archivedAt: START });
       const before = writes(t);
       await expect(t.rpc("bots.v2.moveToTop", input)).rejects.toMatchObject({ code: "conflict" });
@@ -3874,7 +3913,7 @@ describe("nested conversations", () => {
 
     it("Move to top changes nothing for a conversation that came first since", async () => {
       const t = await withEditor();
-      const input = toTop(t, await t.view(), "thr_second");
+      const input = toTop(await t.view(), "thr_second");
       await t.rpc("bots.v2.moveToTop", input);
       const before = writes(t);
       await t.rpc("bots.v2.moveToTop", input);
@@ -3885,7 +3924,7 @@ describe("nested conversations", () => {
       const t = await withEditor();
       await t.mark("thr_sibling");
       await t.mark("thr_second");
-      await t.rpc("bots.v2.moveToTop", toTop(t, await t.view(), "thr_second"));
+      await t.rpc("bots.v2.moveToTop", toTop(await t.view(), "thr_second"));
       const level = (await t.order()).filter(
         (member) => t.place(member).parentThreadId === "thr_parent",
       );
@@ -3909,7 +3948,7 @@ describe("nested conversations", () => {
         "bots.v2.moveThreads",
         t.moveInput(view, ["thr_spare"], "inside", "thr_last"),
       );
-      const top = t.rpc("bots.v2.moveToTop", toTop(t, view, "thr_second"));
+      const top = t.rpc("bots.v2.moveToTop", toTop(view, "thr_second"));
       await new Promise((resolve) => setTimeout(resolve, 20));
       const order = await t.order();
       expect(order.indexOf("thr_second")).toBeGreaterThan(order.indexOf("thr_child"));
@@ -4091,10 +4130,10 @@ describe("how long the history is kept", () => {
   it.each([
     ["as set", { retentionDays: 30 }, 29, 1],
     ["as set", { retentionDays: 30 }, 31, 0],
-    ["by default", {}, RETENTION_DAYS_DEFAULT - 1, 1],
-    ["by default", {}, RETENTION_DAYS_DEFAULT + 1, 0],
+    ["for good by default", {}, 4000, 1],
     ["for good with 0", { retentionDays: 0 }, 4000, 1],
     ["for good with a number that says nothing", { retentionDays: -5 }, 4000, 1],
+    ["for good with a part of a day", { retentionDays: 0.01 }, 4000, 1],
   ])("%s: %o after %i days leaves %i", async (_name, settings, days, left) => {
     const t = setup(settings as Record<string, number>);
     const bot = await t.create("Main");
@@ -4102,6 +4141,42 @@ describe("how long the history is kept", () => {
     await t.harness.behavior.runSchedule(UPKEEP_SCHEDULE);
     const { events } = await t.rpc<{ events: unknown[] }>("bots.v1.events", { botId: bot.id });
     expect(events).toHaveLength(left);
+  });
+
+  async function oldEvents(count: number) {
+    const t = setup({ retentionDays: 30 });
+    const bot = await t.create("Main");
+    const db = t.bb.storage.database();
+    db.prepare(
+      `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+       INSERT INTO bot_events (owner_id, at, bot_id, kind, actor_kind)
+       SELECT owner_id, ?, id, 'old', 'owner' FROM n, bots WHERE id = ?`,
+    ).run(count, START, bot.id);
+    const left = () =>
+      (db.prepare("SELECT COUNT(*) AS n FROM bot_events").get() as { n: number }).n;
+    t.advance(31 * DAY);
+    return { ...t, left };
+  }
+
+  it("goes through more than one batch in one run", async () => {
+    const t = await oldEvents(2 * RETENTION_BATCH + 1);
+    await t.harness.behavior.runSchedule(UPKEEP_SCHEDULE);
+    expect(t.left()).toBe(0);
+  });
+
+  it("gives the rest to the next run once its time is up, letting others run between batches", async () => {
+    const t = await oldEvents(3 * RETENTION_BATCH);
+    const between = new Promise<void>((resolve) =>
+      setImmediate(() => {
+        t.advance(RETENTION_BUDGET_MS);
+        resolve();
+      }),
+    );
+    await t.harness.behavior.runSchedule(UPKEEP_SCHEDULE);
+    await between;
+    expect(t.left()).toBe(RETENTION_BATCH + 1);
+    await t.harness.behavior.runSchedule(UPKEEP_SCHEDULE);
+    expect(t.left()).toBe(0);
   });
 });
 
@@ -4151,7 +4226,7 @@ describe("finding a bot among many", () => {
 
   it("works in the command too", async () => {
     const t = await team();
-    const { stdout } = await t.harness.behavior.runCli(["list", "--find", "landing", "--json"]);
+    const { stdout } = await t.harness.behavior.runCli(["find", "landing", "--json"]);
     expect(JSON.parse(stdout)).toMatchObject({
       bots: [
         { id: t.writer.id, conversations: 0 },
@@ -4159,18 +4234,34 @@ describe("finding a bot among many", () => {
       ],
       total: 2,
     });
-    const all = await t.harness.behavior.runCli(["list", "--json"]);
-    expect((JSON.parse(all.stdout) as { bots: unknown[] }).bots[0]).toMatchObject({
+    const any = await t.harness.behavior.runCli(["find", "--json"]);
+    expect(JSON.parse(any.stdout)).toMatchObject({ total: 3 });
+  });
+
+  it("lists every bot in the command as it did before find came", async () => {
+    const t = await team();
+    for (let n = 0; n <= CLI_ROWS_MAX; n += 1) await t.create(`Extra ${n}`);
+    const { stdout } = await t.harness.behavior.runCli(["list", "--json"]);
+    const all = JSON.parse(stdout) as unknown[];
+    expect(all).toHaveLength(CLI_ROWS_MAX + 4);
+    expect(all[0]).toEqual({
       id: t.main.id,
+      name: "Main",
+      role: "",
+      capabilities: [],
+      hidden: false,
       conversations: 1,
     });
+    const text = await t.harness.behavior.runCli(["find", "Extra"]);
+    expect(text.stdout.split("\n")).toHaveLength(CLI_ROWS_MAX + 1);
+    expect(text.stdout).toContain(strings.moreInList(1));
   });
 });
 
 describe("what the bots page and the sidebar read", () => {
   it("the preview shows what the bot's agents are told, word for word", async () => {
     const t = await threeBots();
-    const { text } = await t.rpc<{ text: string }>("bots.v1.instructions", { botId: t.a.id });
+    const { text } = await t.rpc<{ text: string }>("bots.v2.instructions", { botId: t.a.id });
     expect(text).toBe((await t.configure("thr_a")).instructions);
     expect(text).toContain("Beta");
   });
@@ -4182,7 +4273,7 @@ describe("what the bots page and the sidebar read", () => {
     await t.assign("thr_c2", t.c.id);
     await t.rpc("bots.v1.setCompleted", { threadId: "thr_c", completed: true });
     const keys = [t.a.id, t.b.id, t.c.id, empty.id, "bot_gone"];
-    expect(await t.rpc("bots.v1.mains", { keys })).toEqual({
+    expect(await t.rpc("bots.v2.mains", { keys })).toEqual({
       [t.a.id]: "thr_a",
       [t.b.id]: null,
       [t.c.id]: "thr_c2",
@@ -4194,19 +4285,256 @@ describe("what the bots page and the sidebar read", () => {
       [t.b.id, null],
       [t.c.id, "thr_c2"],
     ])
-      expect(await t.rpc("bots.v1.main", { botId })).toEqual({ threadId });
+      expect(await t.rpc("bots.v2.main", { botId })).toEqual({ threadId });
   });
 
   it("gives a conversation's place in its bot, and null for one of no bot", async () => {
     const t = await threeBots();
-    expect(await t.rpc("bots.v1.forThreads", { keys: ["thr_a", "thr_free"] })).toEqual({
+    expect(await t.rpc("bots.v2.forThreads", { keys: ["thr_a", "thr_free"] })).toEqual({
       thr_a: {
         botId: t.a.id,
         startedFromBot: false,
         completed: false,
         position: expect.any(Number),
+        assignment: expect.any(String),
       },
       thr_free: null,
     });
+  });
+});
+
+describe.each([
+  ["released", sidebar8f7db7d],
+  ["of PR #17", sidebar5cf684b],
+])("the 1ma-sidebar %s against this server", (_name, panel) => {
+  type Method = { input: z.ZodType; output: z.ZodType };
+  const methods = Object.entries(panel as Record<string, Method>);
+
+  async function withBot() {
+    const t = setup();
+    const bot = await t.create("Main");
+    for (const id of ["thr_m", "thr_m2", "thr_free"])
+      t.threads.set(id, makeThreadResponse({ id, status: "idle" }));
+    await t.assign("thr_m2", bot.id);
+    await t.assign("thr_m", bot.id);
+    const row = async (id: string) => {
+      const { members, rows } = await t.view();
+      return { ...seenThread(members, rows, id)!, shownDone: false };
+    };
+    const inputs: Record<string, () => Promise<unknown>> = {
+      "bots.v1.list": async () => ({}),
+      "bots.v1.get": async () => ({ botId: bot.id }),
+      "bots.v2.main": async () => ({ botId: bot.id }),
+      "bots.v1.startThread": async () => ({ botId: bot.id, request: { input: [] } }),
+      "bots.v1.setHidden": async () => ({ botId: bot.id, hidden: false }),
+      "bots.v1.setCompleted": async () => ({ threadId: "thr_m2", completed: true }),
+      "bots.v1.assign": async () => ({ threadId: "thr_free", botId: bot.id }),
+      "bots.v2.assign": async () => ({ threadId: "thr_free", botId: bot.id, seen: null }),
+      "bots.v2.moveThreads": async () => ({
+        botId: bot.id,
+        sources: [await row("thr_m2")],
+        target: { ...(await row("thr_m")), placement: "before" },
+        levelShown: true,
+      }),
+    };
+    return { ...t, bot, inputs };
+  }
+
+  it("reads and changes a bot with a conversation in the shape it knows", async () => {
+    const t = await withBot();
+    for (const [method, { input, output }] of methods) {
+      const answer = await t.rpc(method, input.parse(await t.inputs[method]!()));
+      expect(output.safeParse(answer).error).toBeUndefined();
+    }
+    const { bots } = panel["bots.v1.list"].output.parse(await t.rpc("bots.v1.list"));
+    expect(bots.map(({ id, threads }) => [id, threads.map(({ threadId }) => threadId)])).toEqual([
+      [t.bot.id, expect.arrayContaining(["thr_m", "thr_m2", "thr_free"])],
+    ]);
+  });
+
+  it("is told to read again after every change while it shows the bots", async () => {
+    const t = await withBot();
+    const stop = t.harness.behavior.experimental_watchRpc("bots.v1.list", { input: {} });
+    await Promise.resolve();
+    t.harness.experimental_rpcInvalidations.splice(0);
+    await t.rpc("bots.v1.setHidden", { botId: t.bot.id, hidden: true });
+    expect(t.harness.experimental_rpcInvalidations).toContain(null);
+    stop();
+  });
+});
+
+describe("a change made while a request reads bb", () => {
+  async function twoBots() {
+    const t = setup({ hourlyLetters: 1 });
+    const sender = await t.create("Sender");
+    const recipient = await t.create("Recipient");
+    await t.assign("thr_s", sender.id);
+    await t.assign("thr_r", recipient.id);
+    return { ...t, sender, recipient };
+  }
+
+  it.each([true, false])(
+    "Done %s is refused when the bot is removed meanwhile",
+    async (completed) => {
+      const t = setup();
+      const bot = await t.create("Bot");
+      await t.assign("thr_target", bot.id);
+      t.bbCalls.after = async (call, ids) => {
+        if (call !== "list" || !ids.includes("thr_target")) return;
+        t.bbCalls.after = undefined;
+        await t.rpc("bots.v1.remove", { botId: bot.id });
+      };
+      await expect(
+        t.rpc("bots.v1.setCompleted", { threadId: "thr_target", completed }),
+      ).rejects.toMatchObject({ code: "conflict" });
+    },
+  );
+
+  it("a letter to a name that comes to mean another bot is not sent", async () => {
+    const t = await twoBots();
+    const other = await t.create("Other");
+    await t.assign("thr_o", other.id);
+    t.bbCalls.after = async (call, ids) => {
+      if (call !== "list" || !ids.includes("thr_r")) return;
+      t.bbCalls.after = undefined;
+      await t.rpc("bots.v1.update", {
+        botId: t.recipient.id,
+        expectedRevision: t.recipient.revision,
+        name: "Former",
+      });
+      await t.rpc("bots.v1.update", {
+        botId: other.id,
+        expectedRevision: other.revision,
+        name: "Recipient",
+      });
+    };
+    await expect(t.letter("thr_s", "Recipient")).rejects.toThrow(
+      agentText.addresseeChanged("Recipient"),
+    );
+    expect(t.harness.sdk.callsTo("threads.send")).toEqual([]);
+    await t.letter("thr_s", "Recipient");
+    expect(t.harness.sdk.callsTo("threads.send")).toMatchObject([[{ threadId: "thr_o" }]]);
+  });
+
+  it("a page after the order changed asks to read from the beginning", async () => {
+    const t = setup();
+    const bot = await t.create("Bot");
+    for (const id of ["thr_1", "thr_2", "thr_3"]) await t.assign(id, bot.id);
+    const page = (after?: unknown) =>
+      t.rpc<{ threads: BotThread[]; next: unknown }>("bots.v2.threads", {
+        botId: bot.id,
+        limit: 1,
+        ...(after === undefined ? {} : { after }),
+      });
+    const first = await page();
+    expect((await page(first.next)).threads).toHaveLength(1);
+    await t.assign("thr_4", bot.id);
+    await expect(page(first.next)).rejects.toMatchObject({ code: "conflict" });
+  });
+
+  it("a newer Hide stays when a catch-up shows the bot for older work", async () => {
+    const t = setup();
+    const bot = await t.create("Bot");
+    const hide = (hidden: boolean) => t.rpc("bots.v1.setHidden", { botId: bot.id, hidden });
+    await t.assign("thr_target", bot.id);
+    await hide(true);
+    t.advance(1000);
+    t.recordTurn("thr_target", "user", null);
+    t.threads.set(
+      "thr_target",
+      makeThreadResponse({ id: "thr_target", updatedAt: START + 1002 }),
+    );
+    t.bbCalls.after = async (call, ids) => {
+      if (call !== "list" || !ids.includes("thr_target")) return;
+      t.bbCalls.after = undefined;
+      t.advance(1000);
+      await hide(false);
+      await hide(true);
+    };
+    await t.harness.behavior.runSchedule(UPKEEP_SCHEDULE);
+    const { bots } = await t.rpc<{ bots: BotSummary[] }>("bots.v1.list");
+    expect(bots[0]!.hidden).toBe(true);
+  });
+
+  it("a sender removed while its letter is sent gets no log entry back", async () => {
+    const t = await twoBots();
+    let entered!: () => void;
+    const sending = new Promise<void>((resolve) => (entered = resolve));
+    let refuse!: (error: Error) => void;
+    t.harness.sdk.stub("threads.send", () => {
+      entered();
+      return new Promise<never>((_, reject) => (refuse = reject));
+    });
+    const sent = expect(t.letter("thr_s", t.recipient.id, "thr_r")).rejects.toThrow("refused");
+    await sending;
+    await t.rpc("bots.v1.remove", { botId: t.sender.id });
+    refuse(new Error("refused"));
+    await sent;
+    expect(
+      t.bb.storage.database().prepare("SELECT kind FROM bot_events WHERE bot_id = ?").all(t.sender.id),
+    ).toEqual([]);
+  });
+
+  it("removing the addressee leaves the sender's hourly limit spent", async () => {
+    const t = await twoBots();
+    const other = await t.create("Other");
+    await t.assign("thr_o", other.id);
+    await t.letter("thr_s", t.recipient.id, "thr_r");
+    await t.rpc("bots.v1.remove", { botId: t.recipient.id });
+    await expect(t.letter("thr_s", other.id, "thr_o")).rejects.toThrow(/last hour/);
+  });
+
+  it("a history kept for a part of a day leaves the hourly limit spent", async () => {
+    const t = setup({ retentionDays: 0.01, hourlyLetters: 1 });
+    const sender = await t.create("Sender");
+    const recipient = await t.create("Recipient");
+    await t.assign("thr_s", sender.id);
+    await t.assign("thr_r", recipient.id);
+    await t.letter("thr_s", recipient.id, "thr_r");
+    t.advance(16 * 60 * 1000);
+    await t.harness.behavior.runSchedule(UPKEEP_SCHEDULE);
+    await expect(t.letter("thr_s", recipient.id, "thr_r")).rejects.toThrow(/last hour/);
+  });
+
+  it("an old letter still in bb's queue keeps its exchange past the history kept", async () => {
+    const t = setup({ chainLetters: 1, retentionDays: 30 });
+    const sender = await t.create("Sender");
+    const recipient = await t.create("Recipient");
+    await t.assign("thr_s", sender.id);
+    await t.assign("thr_r", recipient.id);
+    await t.assign("thr_other", sender.id);
+    t.delivery.immediate = false;
+    await t.letter("thr_s", recipient.id, "thr_r");
+    t.advance(31 * DAY);
+    await t.harness.behavior.runSchedule(UPKEEP_SCHEDULE);
+    expect(t.delivery.queued).toHaveLength(1);
+    await t.deliver(t.delivery.queued[0]!);
+    await expect(t.letter("thr_r", sender.id, "thr_other")).rejects.toThrow(/exchange/);
+  });
+
+  it.each([
+    ["joins the bot through every link", true],
+    ["stops at a link the owner took out of the bot", false],
+  ])("a continuation of a continuation made meanwhile %s", async (_name, joins) => {
+    const t = setup();
+    const bot = await t.create("Bot");
+    await t.assign("thr_a", bot.id);
+    const put = (id: string, sourceThreadId: string | null, createdAt: number) =>
+      void t.threads.set(id, makeThreadResponse({ id, sourceThreadId, createdAt }));
+    put("thr_c", "thr_b", START + 2000);
+    for (let n = 0; n < 200; n += 1) put(`thr_plain${n}`, null, START - 1000);
+    put("thr_b", "thr_a", START + 1000);
+    put("thr_a", null, START - 1000);
+    if (!joins) {
+      await t.assign("thr_b", bot.id);
+      await t.assign("thr_b", null);
+    }
+    t.advance(3000);
+    await t.harness.behavior.runSchedule(UPKEEP_SCHEDULE);
+    const botOf = async (threadId: string) =>
+      (await t.rpc<{ botId: string } | null>("bots.v1.forThread", { threadId }))?.botId ?? null;
+    expect([await botOf("thr_b"), await botOf("thr_c")]).toEqual(
+      joins ? [bot.id, bot.id] : [null, null],
+    );
   });
 });

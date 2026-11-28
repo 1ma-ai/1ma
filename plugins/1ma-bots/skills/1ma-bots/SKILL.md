@@ -33,8 +33,8 @@ Then save concise instructions with `bot_update_identity` (pass
 ## Other bots
 
 - Your instructions list the first bots you can write to. Find any other by
-  name, role or work area with `bot_find({ query })`; `bb 1ma-bots list`, with
-  `--find <text>` too, shows all bots.
+  name, role or work area with `bot_find({ query })` or `bb 1ma-bots find <text>`;
+  `bb 1ma-bots list` shows all bots.
 - `bot_message({ to, text, threadId? })` queues a letter in the recipient's
   conversation. Write only when the work needs that bot, and say exactly
   what you need back.

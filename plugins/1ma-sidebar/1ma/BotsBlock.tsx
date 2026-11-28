@@ -128,12 +128,12 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
   const readMembers = useRpcMutation({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.forThreads",
+    method: "bots.v2.forThreads",
   });
   const readThreads = useRpcMutation({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.threads",
+    method: "bots.v2.threads",
   });
   const navigate = useBbNavigate();
   // A dropped conversation is scrolled into view once the bot shows it.
@@ -433,7 +433,7 @@ export function useMainThread(
   const { data, isFetching, refetch } = useRpcKeyedQuery({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.mains",
+    method: "bots.v2.mains",
     keys: [bot.id],
   });
   const rows = [...open, ...done];
@@ -791,7 +791,7 @@ function NewBotConversation({
   const detail = useRpcQuery({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.get",
+    method: "bots.v2.get",
     input: { botId: bot.id },
     enabled: open,
   });

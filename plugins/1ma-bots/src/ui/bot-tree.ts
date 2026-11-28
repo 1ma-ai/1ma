@@ -10,7 +10,7 @@ import type { Members, TreeRows } from "./seen.js";
 export function useMembers(threadIds: readonly string[]): Members {
   const { data } = useRpcKeyedQuery({
     contract: botsRpc,
-    method: "bots.v1.forThreads",
+    method: "bots.v2.forThreads",
     keys: threadIds,
   });
   return useMemo(

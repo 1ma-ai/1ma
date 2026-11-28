@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { BotsError } from "./errors.js";
 import { HOUR_MS } from "./limits.js";
 import type { BotStore } from "./store.js";
+import { agentText } from "../strings.js";
 
 export interface LetterLimits {
   chainLetters: number;
@@ -34,6 +35,8 @@ export function routeLetter(
   args: {
     fromThreadId: string;
     to: string;
+    /** The bot `to` named when the sender's call came. */
+    toBotId: string;
     toThreadId: string | null;
     now: number;
     /** The owner's request that started the sender's current turn, if it was the owner's. */
@@ -47,7 +50,9 @@ export function routeLetter(
     if (fromBotId === null) {
       throw new BotsError("forbidden", "Only a bot's conversation can write to another bot");
     }
-    const toBotId = resolveBot(store, args.to);
+    const { toBotId, toThreadId } = args;
+    if (resolveBot(store, args.to) !== toBotId)
+      throw new BotsError("conflict", agentText.addresseeChanged(args.to));
     if (toBotId === fromBotId) throw new BotsError("invalid", "A bot does not write to itself");
     if (!store.canReach(fromBotId, toBotId)) {
       throw new BotsError(
@@ -55,7 +60,6 @@ export function routeLetter(
         "This bot may not write to that bot. The owner chooses whom a bot may write to on its page.",
       );
     }
-    const { toThreadId } = args;
     if (toThreadId === null) {
       throw new BotsError("not_found", "The recipient bot has no conversation yet");
     }
@@ -63,11 +67,12 @@ export function routeLetter(
       throw new BotsError("invalid", "That conversation does not belong to the recipient bot");
     }
 
+    dropSpend(store, args.now);
     const sentLastHour = db
-      .prepare<[string, string, number], { n: number }>(
-        "SELECT COUNT(*) AS n FROM letters WHERE owner_id = ? AND from_bot = ? AND sent_at > ?",
+      .prepare<[string, string], { n: number }>(
+        "SELECT COUNT(*) AS n FROM letter_spend WHERE owner_id = ? AND bot_id = ?",
       )
-      .get(owner, fromBotId, args.now - HOUR_MS)!.n;
+      .get(owner, fromBotId)!.n;
     if (sentLastHour >= limits.hourlyLetters) {
       throw new BotsError(
         "forbidden",
@@ -101,16 +106,19 @@ export function routeLetter(
       );
     }
     setChain(store, args.fromThreadId, chainId);
-    db.prepare(
-      `INSERT INTO letters (owner_id, chain_id, from_bot, from_thread, to_bot, to_thread, sent_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(owner, chainId, fromBotId, args.fromThreadId, toBotId, toThreadId, args.now);
+    // The letter's row also records its spend (trigger letters_spend).
+    const { lastInsertRowid: letterId } = db
+      .prepare(
+        `INSERT INTO letters (owner_id, chain_id, from_bot, from_thread, to_bot, to_thread, sent_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(owner, chainId, fromBotId, args.fromThreadId, toBotId, toThreadId, args.now);
     // The recipient joins this exchange only when the letter is accepted
     // into a turn (acceptDelivery), not while it waits in the queue.
     const token = randomUUID();
     db.prepare(
-      "INSERT INTO pending_letters (owner_id, token, chain_id, to_thread, created_at) VALUES (?, ?, ?, ?, ?)",
-    ).run(owner, token, chainId, toThreadId, args.now);
+      "INSERT INTO pending_letters (owner_id, token, chain_id, to_thread, created_at, letter_id) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(owner, token, chainId, toThreadId, args.now, letterId);
     return {
       chainId,
       token,
@@ -120,6 +128,14 @@ export function routeLetter(
       toThreadId,
     };
   });
+}
+
+// The hourly limit counts what was sent, whatever becomes of the letters and of
+// the bots they went to.
+export function dropSpend(store: BotStore, now: number): void {
+  store.database
+    .prepare("DELETE FROM letter_spend WHERE owner_id = ? AND at <= ?")
+    .run(store.owner, now - HOUR_MS);
 }
 
 interface Chain {
@@ -138,18 +154,52 @@ function chainOf(store: BotStore, threadId: string): Chain | undefined {
 }
 
 function setChain(store: BotStore, threadId: string, chainId: string): void {
+  const before = chainOf(store, threadId);
   store.database
     .prepare(
       `INSERT INTO thread_chains (owner_id, thread_id, chain_id) VALUES (?, ?, ?)
        ON CONFLICT(thread_id) DO UPDATE SET chain_id = excluded.chain_id`,
     )
     .run(store.owner, threadId, chainId);
+  if (before !== undefined) store.dropUnusedChains([{ chain_id: before.id }]);
 }
 
 const LETTER_TOKEN = /<<<letter ([0-9a-f-]{36})\b/gu;
 
 export function letterTokens(texts: readonly string[]): string[] {
   return texts.flatMap((text) => [...text.matchAll(LETTER_TOKEN)].map((match) => match[1]!));
+}
+
+export interface WaitingLetter {
+  token: string;
+  threadId: string;
+  createdAt: number;
+}
+
+// A page of the letters bb has not been seen to take.
+export function waitingLetters(store: BotStore, after: string, limit: number): WaitingLetter[] {
+  return store.database
+    .prepare<[string, string, number], WaitingLetter>(
+      `SELECT token, to_thread AS threadId, created_at AS createdAt FROM pending_letters
+       WHERE owner_id = ? AND token > ? ORDER BY token LIMIT ?`,
+    )
+    .all(store.owner, after, limit);
+}
+
+function takeWaiting(
+  store: BotStore,
+  threadId: string,
+  tokens: readonly string[],
+): { chain_id: string }[] {
+  const take = store.database.prepare<[string, string, string], { chain_id: string }>(
+    "DELETE FROM pending_letters WHERE owner_id = ? AND token = ? AND to_thread = ? RETURNING chain_id",
+  );
+  return tokens.flatMap((token) => take.all(store.owner, token, threadId));
+}
+
+// Letters bb will never deliver.
+export function cancelLetters(store: BotStore, threadId: string, tokens: readonly string[]): void {
+  store.transaction(() => store.dropUnusedChains(takeWaiting(store, threadId, tokens)));
 }
 
 // A turn that takes up letters belongs to the longest of their exchanges;
@@ -163,29 +213,19 @@ export function acceptDelivery(
   if (tokens.length === 0) return false;
   return store.transaction(() => {
     const { database: db, owner } = store;
-    const chains: Chain[] = [];
-    for (const token of tokens) {
-      const pending = db
-        .prepare<[string, string, string], { chain_id: string }>(
-          "SELECT chain_id FROM pending_letters WHERE owner_id = ? AND token = ? AND to_thread = ?",
-        )
-        .get(owner, token, threadId);
-      if (!pending) continue;
-      db.prepare("DELETE FROM pending_letters WHERE owner_id = ? AND token = ?").run(owner, token);
-      const chain = db
-        .prepare<[string, string], Chain>(
-          "SELECT id, letters FROM chains WHERE owner_id = ? AND id = ?",
-        )
-        .get(owner, pending.chain_id);
-      if (chain) chains.push(chain);
-    }
-    if (chains.length === 0) return false;
+    const taken = takeWaiting(store, threadId, tokens);
+    if (taken.length === 0) return false;
+    const chain = db.prepare<[string, string], Chain>(
+      "SELECT id, letters FROM chains WHERE owner_id = ? AND id = ?",
+    );
+    const chains = taken.map(({ chain_id }) => chain.get(owner, chain_id)!);
     if (joinsRunningTurn) {
       const running = chainOf(store, threadId);
       if (running) chains.push(running);
     }
     const longest = chains.reduce((a, b) => (b.letters > a.letters ? b : a));
     setChain(store, threadId, longest.id);
+    store.dropUnusedChains(taken);
     return true;
   });
 }
@@ -203,8 +243,8 @@ export function startOwnerExchange(
   store.transaction(() => {
     const { database: db, owner } = store;
     const anchored = db
-      .prepare<[string, string], { owner_turn: number | null }>(
-        "SELECT owner_turn FROM thread_chains WHERE owner_id = ? AND thread_id = ?",
+      .prepare<[string, string], { chain_id: string; owner_turn: number | null }>(
+        "SELECT chain_id, owner_turn FROM thread_chains WHERE owner_id = ? AND thread_id = ?",
       )
       .get(owner, threadId);
     if (anchored?.owner_turn === ownerTurn) return;
@@ -218,5 +258,6 @@ export function startOwnerExchange(
       `INSERT INTO thread_chains (owner_id, thread_id, chain_id, owner_turn) VALUES (?, ?, ?, ?)
        ON CONFLICT(thread_id) DO UPDATE SET chain_id = excluded.chain_id, owner_turn = excluded.owner_turn`,
     ).run(owner, threadId, chainId, ownerTurn);
+    if (anchored !== undefined) store.dropUnusedChains([anchored]);
   });
 }

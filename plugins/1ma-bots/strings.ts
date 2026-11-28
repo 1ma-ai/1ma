@@ -71,7 +71,7 @@ export const strings = {
     continueInBot: "Continue in a bot conversation",
   },
   completed: (count: number) => `Done: ${count}`,
-  moreInList: (count: number) => `${count} more; narrow the list with --find <text>`,
+  moreInList: (count: number) => `${count} more; narrow it down with find <text>`,
   settings: {
     autoCompleteHours: "Mark idle bot conversations done after (hours)",
     autoCompleteHoursDescription:
@@ -83,7 +83,7 @@ export const strings = {
     hourlyLettersDescription: "The most letters one bot may send to other bots in an hour.",
     retentionDays: "Keep bot letters and activity for (days)",
     retentionDaysDescription:
-      "Older records of letters between bots and of bot activity are deleted. 0 keeps them forever. Conversations themselves are never deleted.",
+      "Older records of delivered letters between bots and of bot activity are deleted. Whole days; 0 keeps everything. Conversations themselves are never deleted.",
   },
 } as const;
 
@@ -140,6 +140,9 @@ export const agentText = {
     "Only a top-level conversation that is not archived can be assigned to a bot; its child conversations follow it.",
   needsOwner:
     "This conversation is waiting for the owner (a question or an error), so it cannot be marked done.",
+  addresseeChanged: (to: string) =>
+    `${to} names another bot by now, so nothing was sent. Find the bot again with bot_find.`,
+  orderChanged: "The order of these conversations changed. Read them again from the beginning.",
   keepsChanging: "Something keeps happening in the bots' conversations. Try again in a moment.",
   broughtBack: "This conversation was brought back meanwhile, so it was not marked done.",
   reassigned: "This conversation was assigned anew meanwhile, so nothing was changed.",

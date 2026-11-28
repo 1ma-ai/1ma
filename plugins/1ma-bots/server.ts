@@ -1,3 +1,4 @@
+import { setImmediate } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import {
   cliCommand,
@@ -14,6 +15,7 @@ import {
   botRoleSchema,
   botsRpc,
   chatDefaultsSchema,
+  RELEASED_READS,
   tags,
   type Actor,
   type Assignment,
@@ -21,15 +23,28 @@ import {
   type BotDetail,
   type BotSummary,
   type ChatDefaults,
+  type CreateBotInput,
+  type Cursor,
   type MoveThreadsInput,
   type MoveToTopInput,
   type SeenRow,
   type SeenThread,
+  type UpdateBotInput,
 } from "./src/contract.js";
 import { branchOf, keepsOpen } from "./src/branch.js";
 import { BotsError } from "./src/errors.js";
 import { botInstructions } from "./src/instructions.js";
-import { acceptDelivery, letterTokens, resolveBot, routeLetter } from "./src/letters.js";
+import {
+  acceptDelivery,
+  cancelLetters,
+  dropSpend,
+  letterTokens,
+  resolveBot,
+  routeLetter,
+  waitingLetters,
+  type LetterLimits,
+  type WaitingLetter,
+} from "./src/letters.js";
 import {
   CHAIN_LETTERS_DEFAULT,
   CLI_ROWS_MAX,
@@ -41,6 +56,8 @@ import {
   LETTER_MAX,
   MEMORY_MAX,
   PEERS_LISTED_MAX,
+  RETENTION_BATCH,
+  RETENTION_BUDGET_MS,
   RETENTION_DAYS_DEFAULT,
   THREAD_IDS_MAX,
 } from "./src/limits.js";
@@ -147,9 +164,11 @@ function defaultsFrom(request: Record<string, unknown>): ChatDefaults {
 export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now): void {
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
-  const store = new BotStore(db, now, INSTALLATION_OWNER, (tags) =>
-    bb.rpc.experimental_invalidate(tags),
-  );
+  let releasedWatches = 0;
+  const store = new BotStore(db, now, INSTALLATION_OWNER, (tags) => {
+    if (releasedWatches > 0) bb.rpc.experimental_invalidateAll();
+    else bb.rpc.experimental_invalidate(tags);
+  });
 
   const settings = bb.settings.define({
     autoCompleteHours: {
@@ -426,13 +445,16 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   const mainThreads = async (botIds: readonly string[], reads: Reads = new Set()) => {
     for (const botId of botIds) reads.add(tags.conversations(botId));
     const mains = new Map<string, { threadId: string; open: boolean }>();
-    let unread = botIds.map((botId) => ({ botId, after: null as number | null }));
+    let unread = botIds.map((botId) => ({ botId, after: null as Cursor | null }));
     while (unread.length > 0) {
       const limit = Math.max(1, Math.floor(THREAD_IDS_MAX / unread.length));
-      const read = unread.map(({ botId, after }) => ({
-        botId,
-        ...store.threads(botId, { from: "first", after, limit }),
-      }));
+      const read = unread.map(({ botId, after }) => {
+        // In another order by now: read from its beginning.
+        const isCurrent = after === null || after.order === store.orderRevision(botId);
+        if (!isCurrent) mains.delete(botId);
+        const page = { from: "first" as const, after: isCurrent ? after : null, limit };
+        return { botId, ...store.threads(botId, page) };
+      });
       const rows = await shownRows(
         read.flatMap((page) => page.threads.map((t) => t.threadId)),
         reads,
@@ -484,7 +506,9 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   // The bot's first conversation under this one in its tree, or at the top.
   const firstUnder = async (botId: string, parentThreadId: string | null, reads: Reads) => {
     reads.add(tags.conversations(botId));
-    for (let after: number | null = null; ;) {
+    for (let after: Cursor | null = null; ;) {
+      // In another order by now: read from its beginning.
+      if (after !== null && after.order !== store.orderRevision(botId)) after = null;
       const { threads, next } = store.threads(botId, { from: "first", after, limit: THREAD_IDS_MAX });
       const page = threads.map((member) => member.threadId);
       const branches = await branchesOf([...(await shownRows(page, reads)).keys()], reads);
@@ -590,6 +614,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         first: await firstUnder(botId, thread.branch[1]?.threadId ?? null, reads),
       }),
       ({ standing, first }) => {
+        store.get(botId);
         if (
           !isDrawnAsSeen(standing, botId, thread) ||
           standing.rows.get(thread.threadId)!.archivedAt !== null
@@ -728,25 +753,27 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       threadId: z.string().optional(),
     }),
     execute: async (input, ctx) => {
-      const values = await settings.get();
-      const limits = {
-        chainLetters: positiveCount(CHAIN_LETTERS_DEFAULT).parse(values.chainLetters),
-        hourlyLetters: positiveCount(HOURLY_LETTERS_DEFAULT).parse(values.hourlyLetters),
-      };
       const agent = { kind: "agent" as const, id: ctx.threadId };
+      let limits: LetterLimits;
       let route: ReturnType<typeof routeLetter>;
       try {
+        const toBotId = resolveBot(store, input.to);
+        const values = await settings.get();
+        limits = {
+          chainLetters: positiveCount(CHAIN_LETTERS_DEFAULT).parse(values.chainLetters),
+          hourlyLetters: positiveCount(HOURLY_LETTERS_DEFAULT).parse(values.hourlyLetters),
+        };
         const ownerTurn = await ownerTurnOf(ctx.threadId);
         const routeTo = (toThreadId: string | null) =>
           routeLetter(
             store,
-            { fromThreadId: ctx.threadId, to: input.to, toThreadId, now: now(), ownerTurn },
+            { fromThreadId: ctx.threadId, to: input.to, toBotId, toThreadId, now: now(), ownerTurn },
             limits,
           );
         route = input.threadId
           ? routeTo(input.threadId)
           : await decide(
-              (reads) => mainThread(resolveBot(store, input.to), reads),
+              (reads) => mainThread(toBotId, reads),
               (main) => routeTo(main?.threadId ?? null),
             );
       } catch (error) {
@@ -821,14 +848,13 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   // send() confirms immediate delivery; message.dispatched confirms a queued
   // letter, including “Send now”. The dispatch hook runs before bb's waits.
   // Claiming the token once keeps a repeat from showing a bot hidden again.
-  const accepted = (args: { threadId: string; texts: readonly string[] }) => {
-    const botId = store.botOfThread(args.threadId);
-    if (botId === null) return;
+  const accepted = (args: { threadId: string; texts: readonly string[] }, at = now()) => {
     const tokens = letterTokens(args.texts);
     if (tokens.length === 0) return;
     store.transaction(() => {
-      if (acceptDelivery(store, args.threadId, tokens, false))
-        store.setHidden(botId, false, { kind: "system", id: null });
+      if (!acceptDelivery(store, args.threadId, tokens, false)) return;
+      const botId = store.botOfThread(args.threadId);
+      if (botId !== null && (store.hiddenAt(botId) ?? at) <= at) showForWork(args.threadId);
     });
   };
 
@@ -989,11 +1015,14 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       MessageDispatchHookContext["thread"],
       "id" | "sourceThreadId" | "visibility" | "originKind" | "originPluginId"
     >,
+    // Asked again at the write; since when the conversation is the bot's then.
+    joinedAt: () => number | null = now,
   ) => {
     const { sourceThreadId } = thread;
     if (
       sourceThreadId === null ||
       store.botOfThread(sourceThreadId) === null ||
+      joinedAt() === null ||
       store.hasAssignmentDecision(thread.id) ||
       thread.visibility !== "visible" ||
       (thread.originKind === "fork" && thread.originPluginId === bb.pluginId)
@@ -1001,7 +1030,10 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       return;
     await decide(
       (reads) => membersAbove(sourceThreadId, reads),
-      (branch) => store.bindContinuation(thread.id, sourceThreadId, branch, false),
+      (branch) => {
+        const at = joinedAt();
+        if (at !== null) store.bindContinuation(thread.id, sourceThreadId, branch, false, at);
+      },
       Infinity,
     );
   };
@@ -1018,6 +1050,9 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   });
   bb.events.on("message.dispatched", ({ entry }) =>
     accepted({ threadId: entry.threadId, texts: textsOf(entry.content) }),
+  );
+  bb.events.on("message.cancelled", ({ entry }) =>
+    cancelLetters(store, entry.threadId, letterTokens(textsOf(entry.content))),
   );
   bb.events.on("thread.idle", ({ thread }) => reopenIfTurnStarted(thread.id));
   bb.events.on("thread.active", ({ thread }) => {
@@ -1109,23 +1144,113 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     return pending.some((interaction) => interaction.createdAt > since);
   };
 
+  // When bb took a waiting letter into a turn.
+  const takenAt = async ({ threadId, token, createdAt }: WaitingLetter): Promise<number | null> => {
+    for (let beforeSeq: string | undefined; ;) {
+      const rows = await bb.sdk.threads.events.list({
+        threadId,
+        types: ["client/turn/requested"],
+        order: "desc",
+        limit: String(EVENTS_MAX),
+        beforeSeq,
+      });
+      for (const row of rows) {
+        if (row.createdAt < createdAt) return null;
+        if (row.type !== "client/turn/requested") continue;
+        if (letterTokens(textsOf(row.data.input)).includes(token)) return row.createdAt;
+      }
+      if (rows.length < EVENTS_MAX) return null;
+      beforeSeq = String(rows.at(-1)!.seq);
+    }
+  };
+
+  // bb tells of a letter its queue gave to a turn and of one the owner removed
+  // from the queue, but not while the plugin is not running, and of nothing else.
+  // The queue leaves out what it is handing over right now, so a letter is gone
+  // when it is neither there nor taken for an hour.
+  let missingSince = new Map<string, number>();
+  const reconcileLetters = async () => {
+    let page = waitingLetters(store, "", THREAD_IDS_MAX);
+    if (page.length === 0) return;
+    const queued = new Set(
+      (await bb.sdk.threads.queue.list()).flatMap((row) => letterTokens(textsOf(row.content))),
+    );
+    const missing = new Map<string, number>();
+    for (; page.length > 0; page = waitingLetters(store, page.at(-1)!.token, THREAD_IDS_MAX))
+      for (const letter of page) {
+        const { token, threadId } = letter;
+        if (queued.has(token)) continue;
+        if (await isDeleted(threadId)) {
+          store.forgetThread(threadId);
+          continue;
+        }
+        const at = await takenAt(letter);
+        const since = missingSince.get(token) ?? now();
+        if (at !== null) accepted({ threadId, texts: [`<<<letter ${token}`] }, at);
+        else if (now() - since >= HOUR_MS) cancelLetters(store, threadId, [token]);
+        else missing.set(token, since);
+      }
+    missingSince = missing;
+  };
+
+  const forgetDeleted = async (threadIds: readonly string[], rows: ReadonlyMap<string, ThreadRow>) => {
+    for (const threadId of threadIds)
+      if (!rows.has(threadId) && (await isDeleted(threadId))) store.forgetThread(threadId);
+  };
+
+  // Continuations, each after the one it continues: bb lists them in no order a
+  // chain of them could be followed in.
+  const reconcileContinuations = async (signal?: AbortSignal) => {
+    const continuations = new Map<string, ThreadRow & { sourceThreadId: string }>();
+    for (let offset = 0; ; offset += THREAD_IDS_MAX) {
+      if (signal?.aborted) return;
+      const rows = await bb.sdk.threads.list({ archived: false, limit: THREAD_IDS_MAX, offset });
+      for (const row of rows)
+        if (row.sourceThreadId !== null)
+          continuations.set(row.id, { ...row, sourceThreadId: row.sourceThreadId });
+      if (rows.length < THREAD_IDS_MAX) break;
+    }
+    const settled = new Set<string>();
+    for (const last of continuations.values()) {
+      const chain = [];
+      for (
+        let row: typeof last | undefined = last;
+        row !== undefined && !settled.has(row.id);
+        row = continuations.get(row.sourceThreadId)
+      ) {
+        settled.add(row.id);
+        chain.push(row);
+      }
+      for (const row of chain.toReversed())
+        await inheritBot(row, () => {
+          const sourceJoinedAt = store.boundAt(row.sourceThreadId);
+          return sourceJoinedAt !== null && row.createdAt >= sourceJoinedAt ? row.createdAt : null;
+        });
+    }
+  };
+
   // What the events above would have done, for those sent while the plugin was
   // not running.
   const reconcile = async (signal?: AbortSignal) => {
     for (const page of memberPages()) {
       if (signal?.aborted) return;
       const rows = await rowsOfMembers(page);
-      for (const { threadId } of page)
-        if (!rows.has(threadId) && (await isDeleted(threadId))) store.forgetThread(threadId);
+      await forgetDeleted(
+        page.map((member) => member.threadId),
+        rows,
+      );
       const there = page.flatMap((member) => {
         const row = rows.get(member.threadId);
         return row === undefined ? [] : [{ ...member, row }];
       });
-      for (const { threadId, hiddenAt, row } of there)
+      for (const { threadId, botId, assignment, hiddenAt, row } of there)
         if (
           hiddenAt !== null &&
           row.updatedAt > hiddenAt &&
-          (await workedSince(threadId, hiddenAt))
+          (await workedSince(threadId, hiddenAt)) &&
+          // Hidden again, or moved to another bot, after that work: so it stays.
+          store.hiddenAt(botId) === hiddenAt &&
+          isDeepStrictEqual(store.assignmentOf(threadId), { botId, assignment })
         )
           showForWork(threadId);
       const done = there.flatMap(({ completedAt, row }) =>
@@ -1139,15 +1264,21 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
           else if (thread.updatedAt > completedAt) await reopenIfTurnStarted(thread.id);
         }
     }
-    for (let offset = 0; !signal?.aborted; offset += THREAD_IDS_MAX) {
-      const rows = await bb.sdk.threads.list({ archived: false, limit: THREAD_IDS_MAX, offset });
-      for (const row of rows) {
-        if (row.sourceThreadId === null) continue;
-        const joinedAt = store.boundAt(row.sourceThreadId);
-        if (joinedAt !== null && row.createdAt >= joinedAt) await inheritBot(row);
-      }
-      if (rows.length < THREAD_IDS_MAX) return;
+    for (
+      let page = store.strayLinks("", THREAD_IDS_MAX);
+      page.length > 0;
+      page = store.strayLinks(page.at(-1)!, THREAD_IDS_MAX)
+    ) {
+      if (signal?.aborted) return;
+      await forgetDeleted(page, await rowsOf(page, { includeHidden: true }));
     }
+    await reconcileLetters();
+    await reconcileContinuations(signal);
+  };
+
+  const dropHistory = async (before: number) => {
+    const until = now() + RETENTION_BUDGET_MS;
+    while (store.dropHistory(before, RETENTION_BATCH) && now() < until) await setImmediate();
   };
 
   bb.background.service(RECONCILE_SERVICE, {
@@ -1160,10 +1291,12 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   bb.background.schedule(UPKEEP_SCHEDULE, "47 * * * *", async () => {
     const days = z
       .number()
-      .min(0)
+      .int()
+      .min(1)
       .catch(0)
       .parse((await settings.get()).retentionDays);
-    if (days > 0) store.dropHistory(now() - days * DAY_MS);
+    if (days > 0) await dropHistory(now() - days * DAY_MS);
+    dropSpend(store, now());
     await reconcile();
   });
 
@@ -1173,8 +1306,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
   // conversation did not move.
   const assign = ({ threadId, botId, place }: AssignInput, seen: Assignment | null, actor: Actor) =>
     decide(
-      async () =>
-        botId === null ? null : await bb.sdk.threads.get({ threadId }).catch(() => null),
+      async (reads) => {
+        if (botId === null) return null;
+        reads.add(tags.thread(threadId));
+        return await bb.sdk.threads.get({ threadId }).catch(() => null);
+      },
       (thread) => {
         if (!isDeepStrictEqual(store.assignmentOf(threadId), seen))
           throw new BotsError("conflict", agentText.reassigned);
@@ -1251,18 +1387,41 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     return { threadId: thread.id };
   };
 
+  const create = (input: CreateBotInput, actor: Actor) =>
+    store.transaction(() => {
+      const created = store.create(input);
+      store.record({ botId: created.id, kind: "bot.created", actor });
+      return created;
+    });
+
+  const update = (input: UpdateBotInput, actor: Actor) => {
+    if (input.memory !== undefined) checkMemorySize(input.memory);
+    return store.transaction(() => {
+      const updated = store.update(input);
+      store.record({
+        botId: input.botId,
+        kind: "bot.updated",
+        actor,
+        detail: { fields: changedFields(input) },
+      });
+      return updated;
+    });
+  };
+
   bb.rpc.register(botsRpc, {
-    "bots.v1.list": () => ({ bots: store.list() }),
+    "bots.v1.list": () => ({ bots: store.released() }),
     "bots.v1.forThread": ({ threadId }) => {
       const botId = store.botOfThread(threadId);
       if (botId === null) return null;
       return { botId, capabilities: store.get(botId).capabilities };
     },
-    "bots.v1.forThreads": ({ keys }) => {
+    "bots.v1.get": ({ botId }) => store.releasedDetail(botId),
+    "bots.v2.list": () => ({ bots: store.list() }),
+    "bots.v2.forThreads": ({ keys }) => {
       const members = store.members(keys);
       return Object.fromEntries(keys.map((key) => [key, members.get(key) ?? null]));
     },
-    "bots.v1.threads": ({ botId, from, after, limit }) => {
+    "bots.v2.threads": ({ botId, from, after, limit }) => {
       store.get(botId);
       return store.threads(botId, {
         from: from ?? "first",
@@ -1270,27 +1429,12 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         limit: limit ?? THREAD_IDS_MAX,
       });
     },
-    "bots.v1.get": ({ botId }) => store.get(botId),
-    "bots.v1.instructions": ({ botId }) => ({ text: instructionsOf(store.get(botId)) }),
-    "bots.v1.create": (input, ctx) =>
-      store.transaction(() => {
-        const created = store.create(input);
-        store.record({ botId: created.id, kind: "bot.created", actor: actorOf(ctx) });
-        return created;
-      }),
-    "bots.v1.update": (input, ctx) => {
-      if (input.memory !== undefined) checkMemorySize(input.memory);
-      return store.transaction(() => {
-        const updated = store.update(input);
-        store.record({
-          botId: input.botId,
-          kind: "bot.updated",
-          actor: actorOf(ctx),
-          detail: { fields: changedFields(input) },
-        });
-        return updated;
-      });
-    },
+    "bots.v2.get": ({ botId }) => store.get(botId),
+    "bots.v2.instructions": ({ botId }) => ({ text: instructionsOf(store.get(botId)) }),
+    "bots.v1.create": (input, ctx) => store.releasedDetail(create(input, actorOf(ctx)).id),
+    "bots.v1.update": (input, ctx) => store.releasedDetail(update(input, actorOf(ctx)).id),
+    "bots.v2.create": (input, ctx) => create(input, actorOf(ctx)),
+    "bots.v2.update": (input, ctx) => update(input, actorOf(ctx)),
     "bots.v1.remove": ({ botId }) => {
       store.remove(botId);
       return { ok: true as const };
@@ -1299,7 +1443,7 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       store.setHidden(botId, hidden, actorOf(ctx));
       return { ok: true as const };
     },
-    "bots.v1.mains": async ({ keys }) => {
+    "bots.v2.mains": async ({ keys }) => {
       const mains = await mainThreads(keys);
       return Object.fromEntries(
         keys.map((key) => {
@@ -1377,6 +1521,31 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
     },
   });
 
+  // Reads without tags are refreshed only together with all the others.
+  for (const method of RELEASED_READS)
+    bb.rpc.experimental_whileWatched(method, async (_read, signal) => {
+      releasedWatches += 1;
+      bb.rpc.experimental_invalidateAll();
+      await untilAborted(signal);
+      releasedWatches -= 1;
+    });
+
+  const facts = (bots: readonly BotSummary[]) => {
+    const counts = store.conversationCounts();
+    return bots.map(({ id, name, role, capabilities, hidden }) => ({
+      id,
+      name,
+      role,
+      capabilities,
+      hidden,
+      conversations: counts.get(id) ?? 0,
+    }));
+  };
+  const lines = (bots: ReturnType<typeof facts>) =>
+    bots.map((bot) =>
+      [bot.id, bot.name, bot.role, bot.capabilities.join(","), bot.conversations].join("\t"),
+    );
+
   bb.cli.register(
     defineCli({
       name: bb.pluginId,
@@ -1385,35 +1554,31 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
         "Public facts about 1ma bots: id, name, role, work areas and number of conversations. Bots write to each other with their bot_message tool.",
       commands: {
         list: cliCommand({
-          summary: "List bots",
-          options: {
-            find: {
-              type: "string",
-              description: "Only bots with this text in their name, role or work areas",
-            },
-            json: { type: "boolean", description: "Emit machine-readable JSON" },
-          },
+          summary: "List all bots",
+          options: { json: { type: "boolean", description: "Emit machine-readable JSON" } },
           run(input) {
-            const found = matching(store.list(), input.options.find ?? "");
-            const counts = store.conversationCounts();
-            const bots = found.slice(0, CLI_ROWS_MAX).map((bot) => ({
-              id: bot.id,
-              name: bot.name,
-              role: bot.role,
-              capabilities: bot.capabilities,
-              hidden: bot.hidden,
-              conversations: counts.get(bot.id) ?? 0,
-            }));
+            const bots = facts(store.list());
+            return {
+              exitCode: 0,
+              stdout: input.options.json ? JSON.stringify(bots) : lines(bots).join("\n"),
+            };
+          },
+        }),
+        find: cliCommand({
+          summary: `Find bots by name, role or work area; at most ${CLI_ROWS_MAX}`,
+          positionals: [
+            { name: "text", description: "Text in the name, role or work areas; any when left out" },
+          ],
+          options: { json: { type: "boolean", description: "Emit machine-readable JSON" } },
+          run(input) {
+            const found = matching(store.list(), input.positionals.text ?? "");
+            const bots = facts(found.slice(0, CLI_ROWS_MAX));
             if (input.options.json)
               return { exitCode: 0, stdout: JSON.stringify({ bots, total: found.length }) };
             return {
               exitCode: 0,
               stdout: [
-                ...bots.map((bot) =>
-                  [bot.id, bot.name, bot.role, bot.capabilities.join(","), bot.conversations].join(
-                    "\t",
-                  ),
-                ),
+                ...lines(bots),
                 ...(found.length > bots.length
                   ? [strings.moreInList(found.length - bots.length)]
                   : []),
