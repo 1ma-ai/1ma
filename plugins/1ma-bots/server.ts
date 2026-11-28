@@ -1157,22 +1157,12 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
 
   // When bb took a waiting letter into a turn.
   const takenAt = async ({ threadId, token, createdAt }: WaitingLetter): Promise<number | null> => {
-    for (let beforeSeq: string | undefined; ;) {
-      const rows = await bb.sdk.threads.events.list({
-        threadId,
-        types: ["client/turn/requested"],
-        order: "desc",
-        limit: String(EVENTS_MAX),
-        beforeSeq,
-      });
-      for (const row of rows) {
-        if (row.createdAt < createdAt) return null;
-        if (row.type !== "client/turn/requested") continue;
-        if (letterTokens(textsOf(row.data.input)).includes(token)) return row.createdAt;
-      }
-      if (rows.length < EVENTS_MAX) return null;
-      beforeSeq = String(rows.at(-1)!.seq);
+    for await (const row of eventsOf(threadId, ["client/turn/requested"])) {
+      if (row.createdAt < createdAt) return null;
+      if (row.type !== "client/turn/requested") continue;
+      if (letterTokens(textsOf(row.data.input)).includes(token)) return row.createdAt;
     }
+    return null;
   };
 
   // bb tells of a letter its queue gave to a turn and of one the owner removed
@@ -1195,7 +1185,18 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
           store.forgetThread(threadId);
           continue;
         }
-        const at = await takenAt(letter);
+        let at: number | null;
+        try {
+          at = await takenAt(letter);
+        } catch (error) {
+          // A request of this conversation alone is more than bb answers: the
+          // letter stays as it is until a later look.
+          if (!isTooLarge(error)) throw error;
+          bb.log.warn(`letter ${token} not looked up in ${threadId}: ${messageOf(error)}`);
+          const since = missingSince.get(token);
+          if (since !== undefined) missing.set(token, since);
+          continue;
+        }
         const since = missingSince.get(token) ?? now();
         if (at !== null) accepted({ threadId, texts: [`<<<letter ${token}`] }, at);
         else if (now() - since >= HOUR_MS) cancelLetters(store, threadId, [token]);
@@ -1286,8 +1287,11 @@ export default function botsPlugin(bb: BbPluginApi, now: () => number = Date.now
       if (signal?.aborted) return;
       await forgetDeleted(page, await rowsOf(page, { includeHidden: true }));
     }
-    await reconcileLetters();
-    await reconcileContinuations(signal);
+    try {
+      await reconcileLetters();
+    } finally {
+      await reconcileContinuations(signal);
+    }
   };
 
   const dropHistory = async (before: number) => {

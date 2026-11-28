@@ -144,6 +144,13 @@ function setup(settings: Record<string, number> = {}) {
       }),
     });
   };
+  // bb takes a queued letter into a turn while the plugin does not run.
+  const deliverUnseen = (letter: SentLetter) => {
+    inQueue.delete(letter);
+    recordTurn(letter.threadId, "agent", letter.senderThreadId ?? null, "start", {
+      input: letter.input.map((block) => ({ ...block, mentions: [] })),
+    });
+  };
   let clock = START;
   let nextThread = 100;
   const threads = new Map<string, ReturnType<typeof makeThreadResponse>>();
@@ -420,6 +427,7 @@ function setup(settings: Record<string, number> = {}) {
     settle,
     delivery,
     deliver,
+    deliverUnseen,
     harness,
     rpc,
     create,
@@ -4511,6 +4519,41 @@ describe("a change made while a request reads bb", () => {
     await t.deliver(t.delivery.queued[0]!);
     await expect(t.letter("thr_r", sender.id, "thr_other")).rejects.toThrow(/exchange/);
   });
+
+  // bb answers no page of events that are together over 8 MiB.
+  it.each([
+    ["many long messages", 90, 100_000],
+    ["one message longer than any answer of bb", 1, 9 * 1024 * 1024],
+  ])(
+    "a conversation with %s, newer than its letter taken meanwhile, holds up neither the other letters nor the continuations",
+    async (_name, count, length) => {
+      const t = setup({ chainLetters: 1 });
+      const sender = await t.create("Sender");
+      const recipient = await t.create("Recipient");
+      await t.assign("thr_s", sender.id);
+      await t.assign("thr_other", sender.id);
+      await t.assign("thr_long", recipient.id);
+      await t.assign("thr_r", recipient.id);
+      t.delivery.immediate = false;
+      await t.letter("thr_s", recipient.id, "thr_long");
+      await t.letter("thr_other", recipient.id, "thr_r");
+      for (const letter of t.delivery.queued) t.deliverUnseen(letter);
+      const input = [{ type: "text", text: "x".repeat(length), mentions: [] }];
+      for (let i = 0; i < count; i += 1)
+        t.recordTurn("thr_long", "user", null, "start", { input });
+      t.advance(10_000);
+      t.threads.set(
+        "thr_next",
+        makeThreadResponse({ id: "thr_next", sourceThreadId: "thr_r", createdAt: START + 5000 }),
+      );
+      await t.harness.behavior.runSchedule(UPKEEP_SCHEDULE);
+      await expect(t.letter("thr_r", sender.id, "thr_s")).rejects.toThrow(/exchange/);
+      const next = await t.rpc<{ botId: string } | null>("bots.v1.forThread", {
+        threadId: "thr_next",
+      });
+      expect(next?.botId).toBe(recipient.id);
+    },
+  );
 
   it.each([
     ["joins the bot through every link", true],
