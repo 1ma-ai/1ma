@@ -1,7 +1,10 @@
 import { agentText } from "../strings.js";
 import type { BotDetail, BotSummary } from "./contract.js";
 
-export function botInstructions(bot: BotDetail, others: readonly BotSummary[]): string {
+export function botInstructions(
+  bot: BotDetail,
+  peers: { listed: readonly BotSummary[]; total: number },
+): string {
   const parts = [
     agentText.header(bot.name, bot.role),
     agentText.guidance,
@@ -10,14 +13,14 @@ export function botInstructions(bot: BotDetail, others: readonly BotSummary[]): 
     agentText.memoryTitle(bot.memory.length),
     bot.memory.trim() === "" ? agentText.emptyMemory : bot.memory.trim(),
   ];
-  const peers = others.filter(
-    (other) =>
-      other.id !== bot.id && !other.hidden && (bot.reach === null || bot.reach.includes(other.id)),
-  );
-  if (peers.length > 0) {
+  const unlisted = peers.total - peers.listed.length;
+  if (peers.total > 0) {
     parts.push(
       agentText.othersTitle,
-      peers.map((other) => agentText.other(other.name, other.id, other.role)).join("\n"),
+      [
+        ...peers.listed.map((other) => agentText.other(other.name, other.id, other.role)),
+        ...(unlisted > 0 ? [agentText.othersUnlisted(unlisted)] : []),
+      ].join("\n"),
     );
   }
   return parts.join("\n\n");

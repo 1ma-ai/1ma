@@ -12,7 +12,9 @@ Give recurring work a named AI coworker: a bot with its own instructions, memory
 
 ## How it works
 
-Bot state lives in the plugin's own database on the 1ma server, never in project files. A conversation started from a bot belongs to the bot from its first turn. In a bot's conversations 1ma adds the bot's instructions, memory and the bots it may write to, and gives the agent four tools: `bot_read`, `bot_memory_update`, `bot_update_identity` and `bot_message`.
+Bot state lives in the plugin's own database on the 1ma server, never in project files. A conversation started from a bot belongs to the bot from its first turn. In a bot's conversations 1ma adds the bot's instructions, memory and the first bots it may write to, and gives the agent five tools: `bot_read`, `bot_memory_update`, `bot_update_identity`, `bot_find` and `bot_message`.
+
+What happened while the plugin was off is caught up with at the next start: deleted conversations, continued ones, questions, failures and new work. Removing a bot deletes its letters, exchanges and activity log; its conversations stay.
 
 Other plugins ask `bots.v1.forThread` which bot a conversation belongs to and which work areas it has. The plugin works on its own: without a bots sidebar the regular 1ma panel stays as it is, and without plugins that read work areas the labels simply do nothing.
 
@@ -21,6 +23,7 @@ Other plugins ask `bots.v1.forThread` which bot a conversation belongs to and wh
 - **Mark idle bot conversations done after (hours)**: 0, off by default.
 - **Letters per exchange between bots**: 6 by default. Your own message in a conversation starts a new exchange.
 - **Letters per bot per hour**: 20 by default.
+- **Keep bot letters and activity for (days)**: 30 by default. Older records of bot activity and of who wrote to whom, and exchanges that ended, are deleted; 0 keeps everything. Conversations with the letters in them, memory and instructions are never deleted, and an exchange a conversation is still in stays.
 
 ## Requirements
 

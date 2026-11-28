@@ -6,20 +6,23 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { strings } from "../../strings.js";
 import { botsRpc, type Assignment, type BotSummary } from "../contract.js";
-import { assignmentOf } from "./seen.js";
+import { useMembers } from "./bot-tree.js";
+import { assignmentOf, type Members } from "./seen.js";
 
 const NO_BOT = "none";
 
 interface AssignData {
   bots: readonly BotSummary[];
+  members: Members;
   assign(threadId: string, botId: string | null, seen: Assignment | null): Promise<unknown>;
 }
 
-function useAssignData(): AssignData {
-  const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
+function useAssignData({ threadIds }: { threadIds: readonly string[] }): AssignData {
+  const list = useRpcQuery({ contract: botsRpc, method: "bots.v2.list", input: {} });
   const assign = useRpcMutation({ contract: botsRpc, method: "bots.v2.assign" });
   return {
     bots: list.data?.bots ?? [],
+    members: useMembers(threadIds),
     assign: (threadId, botId, seen) => assign.mutate({ threadId, botId, place: "last", seen }),
   };
 }
@@ -36,7 +39,7 @@ export const assignToBotAction: PluginThreadActionRegistration<AssignData> = {
     if (data.bots.length === 0 || thread.parentThreadId !== null || thread.archivedAt !== null) {
       return null;
     }
-    const seen = assignmentOf(data.bots, thread.id);
+    const seen = assignmentOf(data.members, thread.id);
     const current = seen?.botId ?? null;
     return {
       label: strings.threadBot.choose,

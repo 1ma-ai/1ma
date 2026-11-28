@@ -7,7 +7,8 @@ import {
   useState,
   type MouseEventHandler,
 } from "react";
-import { botDrop } from "../../1ma/thread-drop.js";
+import { useBotDrop } from "../../1ma/BotDrops.js";
+import { splitBotCollisions, splitBotOver } from "../../1ma/thread-drop.js";
 import { useSetAtom } from "jotai";
 import { toast } from "sonner";
 import {
@@ -1612,17 +1613,22 @@ export function useSectionThreadDnd({
       dragThreadIds,
     };
   });
+  // 1ma: a bot under the pointer takes the drag from the list.
+  const botDrop = useBotDrop();
   const [dragHandlers] = useState(() => {
-    // 1ma: over a bot the list shows none of its own drop places.
-    const detectCollisions: CollisionDetection = (args) =>
-      botDrop.over(args.pointerCoordinates)
-        ? []
-        : latestDragHandlers.current.collisionDetection(args);
+    const detectCollisions: CollisionDetection = (args) => {
+      const { bot, list } = splitBotCollisions(args);
+      return bot.length > 0
+        ? bot
+        : latestDragHandlers.current.collisionDetection(list);
+    };
     return {
       collisionDetection: detectCollisions,
       onDragEnd: (event: DragEndEvent) => {
+        const { bot, list } = splitBotOver(event);
+        botDrop.over(bot);
         botDrop.end();
-        latestDragHandlers.current.handleDragEnd(event);
+        latestDragHandlers.current.handleDragEnd(list);
       },
       onDragStart: (event: DragStartEvent) => {
         latestDragHandlers.current.handleDragStart(event);
@@ -1633,9 +1639,12 @@ export function useSectionThreadDnd({
         );
       },
       onDragMove: (event: DragMoveEvent) =>
-        latestDragHandlers.current.handleDragMove(event),
-      onDragOver: (event: DragOverEvent) =>
-        latestDragHandlers.current.handleDragOver(event),
+        latestDragHandlers.current.handleDragMove(splitBotOver(event).list),
+      onDragOver: (event: DragOverEvent) => {
+        const { bot, list } = splitBotOver(event);
+        botDrop.over(bot);
+        latestDragHandlers.current.handleDragOver(list);
+      },
       onDragCancel: () => {
         botDrop.cancel();
         latestDragHandlers.current.handleDragCancel();

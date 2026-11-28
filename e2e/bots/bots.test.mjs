@@ -5,12 +5,16 @@ import {
   BOTS,
   screenshotDir,
   completedOf,
+  conversations,
   diagnose,
   exchangeOf,
   createBot,
   fleet,
+  hiddenOf,
+  pluginDirs,
   projects,
   regularThread,
+  releasedDirs,
   rename,
   rpc,
   say,
@@ -248,6 +252,59 @@ describe("1ma-bots on a real server", () => {
       "after dispatch Bruno's next letter continues Alice's exchange",
     );
     assert.equal(exchangeOf(brunoThread).chain?.id, alicesExchange.id);
+  });
+
+  it("catches up with what happened while it was disabled", async () => {
+    const bot = await createBot("Sleeper");
+    const worked = await startConversation(bot, "[stub:reply worked]", projects.alpha, {
+      providerId: "acp-omp",
+    });
+    const quiet = await startConversation(bot, "[stub:reply quiet]");
+    const deleted = await startConversation(bot, "[stub:reply deleted]");
+    for (const id of [worked, quiet, deleted]) {
+      await waitTurns(id, 1);
+      await waitStatus(id, "idle");
+    }
+    for (const threadId of [worked, quiet])
+      await rpc("bots.v1.setCompleted", { threadId, completed: true });
+    await rpc("bots.v1.setHidden", { botId: bot.id, hidden: true });
+    server.bb(["plugin", "disable", BOTS]);
+    let fork;
+    try {
+      await say(worked, "[stub:reply while-disabled]");
+      await waitTurns(worked, 2);
+      await waitStatus(worked, "idle");
+      fork = await server.api("POST", "/threads/fork", {
+        sourceThreadId: worked,
+        title: "Continued while disabled",
+        input: [{ type: "text", text: "[stub:reply continued]", mentions: [] }],
+      });
+      await waitTurns(fork.id, 1);
+      await rename(quiet, "Renamed while disabled");
+      server.bb(["thread", "delete", deleted, "--yes"]);
+    } finally {
+      server.bb(["plugin", "enable", BOTS]);
+    }
+    const state = async () => ({
+      hidden: (await rpc("bots.v1.get", { botId: bot.id })).hidden,
+      conversations: (await conversations(bot.id))
+        .map(({ threadId, completed }) => [threadId, completed])
+        .toSorted(),
+    });
+    const expected = {
+      hidden: false,
+      conversations: [
+        [worked, false],
+        [quiet, true],
+        [fork.id, false],
+      ].toSorted(),
+    };
+    await waitFor(
+      "the bot to show what happened",
+      60 * SECOND,
+      async () => JSON.stringify(await state()) === JSON.stringify(expected),
+    ).catch(() => undefined);
+    assert.deepEqual(await state(), expected);
   });
 });
 
@@ -524,8 +581,8 @@ describe("1ma-sidebar with the bots block", () => {
         "the drag changes the saved bot order",
         30 * SECOND,
         async () =>
-          (await rpc("bots.v1.get", { botId: fixture.visible.id })).threads[0].threadId ===
-            fixture.v1 && (await order())[0] === fixture.v1,
+          (await conversations(fixture.visible.id))[0].threadId === fixture.v1 &&
+          (await order())[0] === fixture.v1,
       );
       await drag(
         "inside",
@@ -599,7 +656,7 @@ describe("1ma-sidebar with the bots block", () => {
       await waitTurns(id, 1);
       await waitStatus(id, "idle");
     }
-    const members = async () => (await rpc("bots.v1.get", { botId: bot.id })).threads;
+    const members = () => conversations(bot.id);
     const [open1, open2, done1, done2] = (await members()).map((member) => member.threadId);
     const parents = () =>
       Promise.all(
@@ -722,11 +779,7 @@ describe("1ma-sidebar with the bots block", () => {
         .evaluateAll((links) => links.map((link) => link.getAttribute("data-sidebar-thread-id")));
       assert.equal(ids[0], fixture.plain, "the dropped conversation is the bot's first");
       assert.equal(await threadLink(page, fixture.plain).count(), 1, "it left its project");
-      const { bots } = await rpc("bots.v1.list", {});
-      assert.equal(
-        bots.find((bot) => bot.id === fixture.visible.id).threads[0].threadId,
-        fixture.plain,
-      );
+      assert.equal((await conversations(fixture.visible.id))[0].threadId, fixture.plain);
       assert.deepEqual(problems, []);
     } finally {
       await context.close();
@@ -866,6 +919,108 @@ describe("1ma-sidebar with the bots block", () => {
     } finally {
       await context.close();
       server.bb(["plugin", "enable", BOTS]);
+    }
+  });
+});
+
+// The Linux release installs the plugins one at a time, so either one can run
+// beside the other's released version, and Bots can be put back after an
+// update. bb keeps a plugin's data when it is installed from another folder.
+describe("released and new plugins installed one at a time", () => {
+  const fixture = {};
+  let browser;
+  const sidebarOf = async (theme = "light") => {
+    const opened = await openApp(browser, theme);
+    await waitDrawn(opened.page, threadLink(opened.page, fixture.plain), "plain-thread");
+    return opened;
+  };
+
+  before(async () => {
+    fixture.bot = await createBot("Rollout Bot", { role: "Steady" });
+    fixture.first = await startConversation(fixture.bot, "[stub:reply first]", projects.alpha);
+    fixture.plain = regularThread(projects.alpha, "Rollout plain");
+    await Promise.all([fixture.first, fixture.plain].map((id) => waitTurns(id, 1)));
+    browser = await launch();
+  });
+
+  after(async () => {
+    await browser?.close();
+  });
+
+  it("keeps working and leaves conversations in their projects with the released Bots put back", async () => {
+    server.installPlugin(releasedDirs().bots);
+    assert.equal(
+      (await rpc("bots.v1.forThread", { threadId: fixture.first }))?.botId,
+      fixture.bot.id,
+    );
+    fixture.second = await startConversation(fixture.bot, "[stub:reply second]", projects.alpha);
+    await waitTurns(fixture.second, 1);
+    await rpc("bots.v1.setHidden", { botId: fixture.bot.id, hidden: true });
+    const { context, page } = await sidebarOf();
+    try {
+      await waitDrawn(
+        page,
+        page.getByText("Bots are unavailable right now.", { exact: false }),
+        "bots-unavailable",
+      );
+      await threadLink(page, fixture.second).waitFor({ timeout: 30 * SECOND });
+      const layout = await groupsOf(page, ["Alpha"], [fixture.first, fixture.second]);
+      assert.deepEqual(layout.groupOf, { [fixture.first]: "Alpha", [fixture.second]: "Alpha" });
+      assert.equal(await page.locator("[data-bot-id]").count(), 0);
+      await screenshot(page, "rollout-new-sidebar-released-bots");
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("shows in the released sidebar what the new Bots keeps, and follows its changes", async () => {
+    server.installPlugin(releasedDirs().sidebar);
+    server.installPlugin(pluginDirs.bots);
+    const kept = hiddenOf(fixture.bot.id);
+    assert.equal(kept.hidden, true);
+    assert.equal(typeof kept.hiddenAt, "number", "the database kept when the released Bots hid it");
+    const { context, page, problems } = await sidebarOf();
+    const bot = page.locator(`[data-bot-id="${fixture.bot.id}"]`);
+    try {
+      await page.locator("[data-1ma-hidden-bots]").waitFor();
+      assert.equal(await bot.count(), 0, "the bot hidden by the released Bots stays hidden");
+      await rpc("bots.v1.setHidden", { botId: fixture.bot.id, hidden: false });
+      await expandBot(page, "Rollout Bot");
+      await waitDrawn(page, threadLink(bot, fixture.second), "released-sidebar-bot");
+      await threadLink(bot, fixture.first).waitFor();
+      await rpc("bots.v1.assign", { threadId: fixture.plain, botId: fixture.bot.id });
+      await waitDrawn(page, threadLink(bot, fixture.plain), "released-sidebar-assigned");
+      await threadLink(bot, fixture.first).click();
+      await page.waitForURL(new RegExp(fixture.first));
+      await screenshot(page, "rollout-released-sidebar-new-bots");
+      assert.deepEqual(problems, []);
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("draws the block again once both are new", async () => {
+    server.installPlugin(pluginDirs.sidebar);
+    const { context, page, problems } = await sidebarOf();
+    const bot = page.locator(`[data-bot-id="${fixture.bot.id}"]`);
+    try {
+      await expandBot(page, "Rollout Bot");
+      await waitDrawn(page, threadLink(bot, fixture.plain), "new-sidebar-bot");
+      assert.deepEqual(
+        await counts(page, {
+          first: [`[data-bot-id="${fixture.bot.id}"]`, fixture.first],
+          second: [`[data-bot-id="${fixture.bot.id}"]`, fixture.second],
+          plain: [`[data-bot-id="${fixture.bot.id}"]`, fixture.plain],
+        }),
+        { first: 1, second: 1, plain: 1 },
+      );
+      assert.equal(
+        await page.getByText("Bots are unavailable right now.", { exact: false }).count(),
+        0,
+      );
+      assert.deepEqual(problems, []);
+    } finally {
+      await context.close();
     }
   });
 });

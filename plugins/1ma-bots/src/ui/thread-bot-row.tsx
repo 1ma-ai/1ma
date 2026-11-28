@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   experimental_DetailRow as DetailRow,
+  experimental_useRpcKeyedQuery as useRpcKeyedQuery,
   experimental_useRpcMutation as useRpcMutation,
   experimental_useRpcQuery as useRpcQuery,
   useBbNavigate,
@@ -8,7 +9,6 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { botInstructions } from "../instructions.js";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,13 +18,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { strings } from "../../strings.js";
 import { botsRpc, type BotSummary } from "../contract.js";
-import { assignmentOf, findBot } from "./seen.js";
+import { BotAvatar } from "./bot-pages.js";
 
-function InstructionPreview({ bot, bots }: { bot: BotSummary; bots: readonly BotSummary[] }) {
+function InstructionPreview({ bot }: { bot: BotSummary }) {
   const [open, setOpen] = useState(false);
-  const detail = useRpcQuery({
+  const instructions = useRpcQuery({
     contract: botsRpc,
-    method: "bots.v1.get",
+    method: "bots.v2.instructions",
     input: { botId: bot.id },
     enabled: open,
   });
@@ -38,11 +38,7 @@ function InstructionPreview({ bot, bots }: { bot: BotSummary; bots: readonly Bot
       <DialogContent aria-describedby={undefined} className="sm:max-w-2xl">
         <DialogTitle>{strings.threadBot.instructionsFrom(bot.name)}</DialogTitle>
         <div className="max-h-[60dvh] overflow-y-auto whitespace-pre-wrap break-words text-sm">
-          {detail.error
-            ? strings.unavailable
-            : detail.data
-              ? botInstructions(detail.data, bots)
-              : strings.loading}
+          {instructions.error ? strings.unavailable : (instructions.data?.text ?? strings.loading)}
         </div>
       </DialogContent>
     </Dialog>
@@ -51,13 +47,18 @@ function InstructionPreview({ bot, bots }: { bot: BotSummary; bots: readonly Bot
 
 export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
   const navigate = useBbNavigate();
-  const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
+  const list = useRpcQuery({ contract: botsRpc, method: "bots.v2.list", input: {} });
   const assign = useRpcMutation({ contract: botsRpc, method: "bots.v2.assign" });
   const continueInBot = useRpcMutation({ contract: botsRpc, method: "bots.v2.continueInBot" });
+  const member = useRpcKeyedQuery({
+    contract: botsRpc,
+    method: "bots.v2.forThreads",
+    keys: [threadId],
+  }).data?.[threadId];
   const bots = list.data?.bots ?? [];
-  if (bots.length === 0) return null;
-  const current = findBot(bots, threadId);
-  const seen = assignmentOf(bots, threadId);
+  if (bots.length === 0 || member === undefined) return null;
+  const current = bots.find((bot) => bot.id === member?.botId);
+  const seen = member && { botId: member.botId, assignment: member.assignment };
   return (
     <DetailRow label={strings.threadBot.title} icon="Bot" align="start">
       <div className="flex min-w-0 flex-col items-start gap-1">
@@ -66,8 +67,8 @@ export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
             <Button variant="ghost" size="sm" className="h-auto px-1 py-0.5">
               {current ? (
                 <span className="flex items-center gap-1.5">
-                  <img src={current.bot.avatar} width={16} height={16} alt="" />
-                  {current.bot.name}
+                  <BotAvatar appearance={current.appearance} size={16} />
+                  {current.name}
                 </span>
               ) : (
                 <span className="text-muted-foreground">{strings.threadBot.choose}</span>
@@ -78,10 +79,10 @@ export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
             {bots.map((bot) => (
               <DropdownMenuItem
                 key={bot.id}
-                disabled={bot.id === current?.bot.id}
+                disabled={bot.id === current?.id}
                 onSelect={() => void assign.mutate({ threadId, botId: bot.id, seen })}
               >
-                <img src={bot.avatar} width={16} height={16} alt="" />
+                <BotAvatar appearance={bot.appearance} size={16} />
                 {bot.name}
               </DropdownMenuItem>
             ))}
@@ -97,8 +98,8 @@ export function ThreadBotRow({ threadId }: ExperimentalThreadInfoProps) {
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
-        {current && <InstructionPreview key={current.bot.id} bot={current.bot} bots={bots} />}
-        {current && seen && !current.thread.startedFromBot ? (
+        {current && <InstructionPreview key={current.id} bot={current} />}
+        {current && seen && member?.startedFromBot === false ? (
           <>
             <p className="text-xs text-muted-foreground">{strings.threadBot.notStartedFromBot}</p>
             <Button

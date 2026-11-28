@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { useSectionThreadDnd } from "../app/dnd/useSectionThreadDnd.js";
 import { makeSidebarThread } from "../app/model/fixtures.js";
 import type { ProjectThreadItem } from "../app/model/project-thread-groups.js";
-import type { SeenRow } from "./bots-rpc.js";
+import type { SeenRow } from "./bots/contract.js";
 
 type DndArgs = Parameters<typeof useSectionThreadDnd>[0];
 
@@ -79,15 +79,22 @@ function renderTree(answer: () => { ok: true } = () => ({ ok: true }), threads =
         id: "bot_m",
         name: "Marketer",
         role: "",
-        avatar: "",
+        appearance: { shape: "circle", face: "calm", color: "#7c6cf0" },
+        capabilities: [],
         hidden: false,
-        threads: MEMBERS.map((threadId) => ({
-          threadId,
-          startedFromBot: true,
-          completed: threadId === "done",
-          assignment: `joined_${threadId}`,
-        })),
       },
+      members: Object.fromEntries(
+        MEMBERS.map((threadId, position) => [
+          threadId,
+          {
+            botId: "bot_m",
+            startedFromBot: true,
+            completed: threadId === "done",
+            position,
+            assignment: `joined_${threadId}`,
+          },
+        ]),
+      ),
       threads,
       compareThreads: () => 0,
       parentOf: (threadId: string) => PARENTS[threadId] ?? null,

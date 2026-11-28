@@ -2,8 +2,7 @@
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
-import type { BotDetail, BotSummary, BotThread } from "./src/contract.js";
-import { avatarDataUrl } from "./src/avatar.js";
+import { botsRpc, type BotDetail, type BotMember, type BotSummary } from "./src/contract.js";
 import { parseCapabilities, parseRoute } from "./src/ui/bot-pages.js";
 import { strings } from "./strings.js";
 
@@ -11,28 +10,43 @@ afterEach(cleanup);
 
 const appearance = { shape: "circle", face: "calm", color: "#7c6cf0" } as const;
 
-function bot(id: string, name: string, threads: BotSummary["threads"]): BotSummary {
-  return {
-    id,
-    name,
-    role: "",
-    appearance,
-    avatar: avatarDataUrl(appearance),
-    capabilities: [],
-    hidden: false,
-    reach: null,
-    threads,
-  };
+function bot(id: string, name: string): BotSummary {
+  return { id, name, role: "", appearance, capabilities: [], hidden: false };
 }
 
-const chat = (threadId: string, completed = false, startedFromBot = true): BotThread => ({
-  threadId,
-  startedFromBot,
-  completed,
-  assignment: `joined_${threadId}`,
-});
+function membersOf(
+  botId: string,
+  threadIds: readonly string[],
+  done: readonly string[] = [],
+  startedFromBot = true,
+): Map<string, BotMember> {
+  return new Map(
+    threadIds.map((threadId, position) => [
+      threadId,
+      {
+        botId,
+        position,
+        startedFromBot,
+        completed: done.includes(threadId),
+        assignment: `joined_${threadId}`,
+      },
+    ]),
+  );
+}
 
-async function threadRow(threadId: string, bots: BotSummary[], detail?: BotDetail) {
+const membersFor = (members: ReadonlyMap<string, BotMember>, input: unknown) =>
+  Object.fromEntries(
+    botsRpc["bots.v2.forThreads"].input
+      .parse(input)
+      .keys.map((key) => [key, members.get(key) ?? null]),
+  );
+
+async function threadRow(
+  threadId: string,
+  bots: BotSummary[],
+  members: ReadonlyMap<string, BotMember>,
+  text = "",
+) {
   const app = await loadPluginApp(() => import("./app.js"));
   const registration = app.threadInfoRows.find((row) => row.id === "thread-bot")!;
   return renderSlot(
@@ -41,8 +55,11 @@ async function threadRow(threadId: string, bots: BotSummary[], detail?: BotDetai
     {
       pluginId: "1ma-bots",
       rpc: {
-        "bots.v1.list": () => ({ bots }),
-        "bots.v1.get": () => detail,
+        "bots.v2.list": () => ({ bots }),
+        "bots.v2.forThreads": (input) => membersFor(members, input),
+        "bots.v2.instructions": (input) => ({
+          text: `${botsRpc["bots.v2.instructions"].input.parse(input).botId}: ${text}`,
+        }),
         "bots.v2.continueInBot": () => ({ threadId: "thr_continued" }),
         "bots.v2.assign": () => ({ botId: null, startedFromBot: false }),
       },
@@ -52,9 +69,11 @@ async function threadRow(threadId: string, bots: BotSummary[], detail?: BotDetai
 
 describe("the thread's bot row", () => {
   it("warns that a conversation bound later lacks other plugins' bot tools and offers to continue", async () => {
-    const view = await threadRow("thr_old", [
-      bot("bot_a", "Marketer", [chat("thr_old", false, false)]),
-    ]);
+    const view = await threadRow(
+      "thr_old",
+      [bot("bot_a", "Marketer")],
+      membersOf("bot_a", ["thr_old"], [], false),
+    );
     await screen.findByText(strings.threadBot.notStartedFromBot);
     fireEvent.click(screen.getByRole("button", { name: strings.threadBot.continueInBot }));
     await waitFor(() =>
@@ -77,10 +96,11 @@ describe("the thread's bot row", () => {
     ["Editor", "bot_b"],
     [strings.threadBot.none, null],
   ])("names the assignment it shows when it assigns to %s", async (choice, botId) => {
-    const view = await threadRow("thr_a", [
-      bot("bot_a", "Marketer", [chat("thr_a")]),
-      bot("bot_b", "Editor", []),
-    ]);
+    const view = await threadRow(
+      "thr_a",
+      [bot("bot_a", "Marketer"), bot("bot_b", "Editor")],
+      membersOf("bot_a", ["thr_a"]),
+    );
     fireEvent.keyDown(await screen.findByRole("button", { name: "Marketer" }), { key: "Enter" });
     fireEvent.click(await screen.findByRole("menuitem", { name: choice }));
     await waitFor(() =>
@@ -93,30 +113,22 @@ describe("the thread's bot row", () => {
     );
   });
 
-  it("previews the instructions, memory and reachable peers contributed by this bot", async () => {
-    const current = bot("bot_a", "Marketer", [chat("thr_a")]);
-    const peer = bot("bot_b", "Analyst", []);
-    const hidden = { ...bot("bot_c", "Hidden peer", []), hidden: true };
-    await threadRow("thr_a", [current, peer, hidden], {
-      ...current,
-      instructions: "Write a short brief.",
-      memory: "Use the approved glossary.",
-      revision: 1,
-      defaults: null,
-      memorySha256: "",
-    });
+  it("previews the instructions this bot's agents get", async () => {
+    await threadRow(
+      "thr_a",
+      [bot("bot_a", "Marketer"), bot("bot_b", "Analyst")],
+      new Map([...membersOf("bot_a", ["thr_a"]), ...membersOf("bot_b", ["thr_b"])]),
+      "Write a short brief.",
+    );
     fireEvent.click(await screen.findByRole("button", { name: strings.threadBot.preview }));
     const dialog = await screen.findByRole("dialog", {
       name: strings.threadBot.instructionsFrom("Marketer"),
     });
-    await waitFor(() => expect(dialog.textContent).toContain("Write a short brief."));
-    expect(dialog.textContent).toContain("Use the approved glossary.");
-    expect(dialog.textContent).toContain("Analyst");
-    expect(dialog.textContent).not.toContain("Hidden peer");
+    await waitFor(() => expect(dialog.textContent).toContain("bot_a: Write a short brief."));
   });
 
   it("says nothing more for a conversation started from the bot", async () => {
-    await threadRow("thr_new", [bot("bot_a", "Marketer", [chat("thr_new")])]);
+    await threadRow("thr_new", [bot("bot_a", "Marketer")], membersOf("bot_a", ["thr_new"]));
     await screen.findByText("Marketer");
     expect(screen.queryByText(strings.threadBot.notStartedFromBot)).toBeNull();
   });
@@ -143,8 +155,10 @@ describe("the bot page", () => {
   it("keeps unsaved edits when the bot changes elsewhere and says so", async () => {
     const app = await loadPluginApp(() => import("./app.js"));
     const panel = app.navPanels.find((item) => item.id === "bots")!;
-    let detail = {
-      ...bot("bot_1", "Marketer", []),
+    let detail: BotDetail = {
+      ...bot("bot_1", "Marketer"),
+      reach: null,
+      conversations: 0,
       instructions: "Write posts.",
       memory: "",
       memorySha256: "",
@@ -154,8 +168,8 @@ describe("the bot page", () => {
     const view = renderSlot(panel, { subPath: "bot_1" } as never, {
       pluginId: "1ma-bots",
       rpc: {
-        "bots.v1.get": () => detail,
-        "bots.v1.list": () => ({ bots: [] }),
+        "bots.v2.get": () => detail,
+        "bots.v2.list": () => ({ bots: [] }),
         "bots.v1.events": () => ({ events: [] }),
       },
     });
@@ -177,10 +191,8 @@ describe("Assign to bot in a thread's menu", () => {
     const { assignToBotAction } = await import("./src/ui/assign-action.js");
     const assign = vi.fn();
     const data = {
-      bots: [
-        bot("bot_a", "Marketer", [chat("thr_1", false, false)]),
-        bot("bot_b", "Accountant", []),
-      ],
+      bots: [bot("bot_a", "Marketer"), bot("bot_b", "Accountant")],
+      members: membersOf("bot_a", ["thr_1"], [], false),
       assign,
     };
     const item = assignToBotAction.item({ thread, data } as never)!;
@@ -207,7 +219,7 @@ describe("Assign to bot in a thread's menu", () => {
     const app = await loadPluginApp(() => import("./app.js"));
     const action = app.threadActions.find(({ id }) => id === "assign-to-bot")!;
     function Probe() {
-      const data = action.useData!({} as never);
+      const data = action.useData!({ threadIds: ["thr_1"] } as never);
       const item = action.item({ thread, data } as never);
       return (
         <button onClick={() => void item?.run({ value: "none" } as never)}>{item?.label}</button>
@@ -216,7 +228,8 @@ describe("Assign to bot in a thread's menu", () => {
     const view = renderSlot({ component: Probe as never }, {} as never, {
       pluginId: "1ma-bots",
       rpc: {
-        "bots.v1.list": () => ({ bots: [bot("bot_a", "Marketer", [chat("thr_1")])] }),
+        "bots.v2.list": () => ({ bots: [bot("bot_a", "Marketer")] }),
+        "bots.v2.forThreads": (input) => membersFor(membersOf("bot_a", ["thr_1"]), input),
         "bots.v2.assign": () => ({ botId: null, startedFromBot: false }),
       },
     });
@@ -238,7 +251,11 @@ describe("Assign to bot in a thread's menu", () => {
 
   it("is absent for child conversations and when there are no bots", async () => {
     const { assignToBotAction } = await import("./src/ui/assign-action.js");
-    const data = { bots: [bot("bot_a", "Marketer", [])], assign: async () => undefined };
+    const data = {
+      bots: [bot("bot_a", "Marketer")],
+      members: new Map(),
+      assign: async () => undefined,
+    };
     expect(
       assignToBotAction.item({
         thread: { id: "c", parentThreadId: "p", archivedAt: null },
@@ -251,13 +268,7 @@ describe("Assign to bot in a thread's menu", () => {
 
 describe("bot conversation menu", () => {
   const thread = { id: "thr_b", parentThreadId: null, archivedAt: null };
-  const bots = [
-    bot(
-      "bot_a",
-      "Editor",
-      ["thr_a", "thr_b", "thr_c"].map((threadId) => chat(threadId, threadId === "thr_b")),
-    ),
-  ];
+  const members = membersOf("bot_a", ["thr_a", "thr_b", "thr_c"], ["thr_b"]);
   const row = (id: string, parentThreadId: string | null = null, state = {}) => ({
     id,
     parentThreadId,
@@ -268,16 +279,21 @@ describe("bot conversation menu", () => {
     queuedWork: "none",
     ...state,
   });
+  const rowsOf = (threads: ReturnType<typeof row>[]) =>
+    new Map(threads.map((thread) => [thread.id, thread]));
   async function moveToTop(
     threads: ReturnType<typeof row>[],
     threadId = thread.id,
-    of: readonly BotSummary[] = bots,
+    of: ReadonlyMap<string, BotMember> = members,
   ) {
     const app = await loadPluginApp(() => import("./app.js"));
     const move = { mutate: vi.fn() };
     const item = app.threadActions
       .find((action) => action.id === "move-to-top")!
-      .item({ thread: { ...thread, id: threadId }, data: { bots: of, move, threads } } as never);
+      .item({
+        thread: { ...thread, id: threadId },
+        data: { members: of, move, rows: rowsOf(threads) },
+      } as never);
     return { item, move };
   }
   const seen = (threadId: string, above: string[] = [], done: string[] = []) => ({
@@ -308,9 +324,8 @@ describe("bot conversation menu", () => {
     );
   });
   it("offers Move to top among the conversations under the same parent", async () => {
-    const threads = ["thr_a", "thr_b", "thr_c"].map((threadId) => chat(threadId));
     const tree = [row("thr_a"), row("thr_b", "thr_a"), row("thr_c", "thr_a")];
-    const open = [bot("bot_a", "Editor", threads)];
+    const open = membersOf("bot_a", ["thr_a", "thr_b", "thr_c"]);
     expect((await moveToTop(tree, "thr_b", open)).item).toBeNull();
     const { item, move } = await moveToTop(tree, "thr_c", open);
     await item!.run({} as never);
@@ -321,8 +336,7 @@ describe("bot conversation menu", () => {
     const tree = [row("thr_a"), row("thr_b"), row("thr_c")];
     // thr_b is the only done one and stands first in Done.
     expect((await moveToTop(tree, "thr_b")).item).toBeNull();
-    const threads = ["thr_b", "thr_a", "thr_c"].map((id) => chat(id, id !== "thr_a"));
-    const doneFirst = [bot("bot_a", "Editor", threads)];
+    const doneFirst = membersOf("bot_a", ["thr_b", "thr_a", "thr_c"], ["thr_b", "thr_c"]);
     expect((await moveToTop(tree, "thr_a", doneFirst)).item).toBeNull();
     const { item, move } = await moveToTop(tree, "thr_c", doneFirst);
     await item!.run({} as never);
@@ -348,8 +362,7 @@ describe("bot conversation menu", () => {
     "does not count a conversation the list does not show (%o) as the top",
     async (state) => {
       const tree = [row("thr_a", null, state), row("thr_b", "thr_a"), row("thr_c")];
-      const threads = ["thr_a", "thr_b", "thr_c"].map((threadId) => chat(threadId));
-      const open = [bot("bot_a", "Editor", threads)];
+      const open = membersOf("bot_a", ["thr_a", "thr_b", "thr_c"]);
       expect((await moveToTop(tree, "thr_b", open)).item).toBeNull();
       const { item, move } = await moveToTop(tree, "thr_c", open);
       await item!.run({} as never);
@@ -362,7 +375,7 @@ describe("bot conversation menu", () => {
     const mutate = vi.fn();
     const action = toggle.item({
       thread,
-      data: { bots, threads: [row("thr_b")], setCompleted: { mutate } },
+      data: { members, rows: rowsOf([row("thr_b")]), setCompleted: { mutate } },
     } as never)!;
     expect(action.label).toBe(strings.threadBot.markNotDone);
     await action.run({} as never);
@@ -374,7 +387,7 @@ describe("bot conversation menu", () => {
     expect(
       toggle.item({
         thread: { ...thread, id: "thr_project" },
-        data: { bots, threads: [] },
+        data: { members, rows: rowsOf([row("thr_b")]) },
       } as never),
     ).toBeNull();
   });
@@ -382,19 +395,18 @@ describe("bot conversation menu", () => {
     const app = await loadPluginApp(() => import("./app.js"));
     const toggle = app.threadActions.find((action) => action.id === "toggle-done")!;
     const mutate = vi.fn();
-    const guestOwner = bot("bot_g", "Guest", [chat("thr_guest")]);
     const item = (id: string) =>
       toggle.item({
         thread: { id, archivedAt: null },
         data: {
-          bots: [...bots, guestOwner],
-          threads: [
+          members: new Map([...members, ...membersOf("bot_g", ["thr_guest"])]),
+          rows: rowsOf([
             row("thr_b"),
             row("thr_c", "thr_spawned"),
             row("thr_spawned", "thr_b"),
             row("thr_guest", "thr_b"),
             row("thr_a"),
-          ],
+          ]),
           setCompleted: { mutate },
         },
       } as never)!;
@@ -411,10 +423,10 @@ describe("bot conversation menu", () => {
   it("says Done for a conversation brought back under an archived done one", async () => {
     const app = await loadPluginApp(() => import("./app.js"));
     const toggle = app.threadActions.find((action) => action.id === "toggle-done")!;
-    const threads = [row("thr_b", null, { isArchived: true }), row("thr_c", "thr_b")];
+    const rows = rowsOf([row("thr_b", null, { isArchived: true }), row("thr_c", "thr_b")]);
     const item = toggle.item({
       thread: { ...thread, id: "thr_c" },
-      data: { bots, threads, setCompleted: { mutate: vi.fn() } },
+      data: { members, rows, setCompleted: { mutate: vi.fn() } },
     } as never)!;
     expect(item.label).toBe(strings.threadBot.markDone);
   });

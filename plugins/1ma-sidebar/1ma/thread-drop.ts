@@ -1,10 +1,16 @@
-import { useSyncExternalStore } from "react";
+import {
+  getScrollableAncestors,
+  pointerWithin,
+  type Collision,
+  type CollisionDetection,
+  type DragOverEvent,
+  type UniqueIdentifier,
+} from "@dnd-kit/core";
 
 // A thread dragged in the list can be dropped on a bot: on its face it
 // becomes the bot's first conversation, on the rest of its row the last, as
-// in Bots Sidebar. The list's own drag (dnd-kit in the copied thread list)
-// reports the pointer here; the bots block marks its rows as targets and
-// does the assignment.
+// in Bots Sidebar. The bot's row and face are drop places of whichever list
+// the drag started in (BotDropTargets), and the bots block does the assignment.
 
 export interface BotDropTarget {
   botId: string;
@@ -18,92 +24,113 @@ export interface BotDropHandler {
   drop(threadIds: readonly string[], target: BotDropTarget): void;
 }
 
-export const BOT_DROP_TARGET_ATTRIBUTE = "data-1ma-bot-drop";
-export const BOT_DROP_FIRST_ATTRIBUTE = "data-1ma-bot-drop-first";
+const DROP_ID = /^1ma-bot-drop:(first|last):(.+)$/u;
 
-let dragged: readonly string[] = [];
-let current: BotDropTarget | null = null;
-let handler: BotDropHandler | null = null;
-const listeners = new Set<() => void>();
-
-function set(next: BotDropTarget | null) {
-  if (next?.botId === current?.botId && next?.place === current?.place) return;
-  current = next;
-  for (const listener of listeners) listener();
+export function getBotDropId({ botId, place }: BotDropTarget): string {
+  return `1ma-bot-drop:${place}:${botId}`;
 }
 
-function targetAt(point: { x: number; y: number }): BotDropTarget | null {
-  for (const element of document.elementsFromPoint(point.x, point.y)) {
-    const row = element.closest(`[${BOT_DROP_TARGET_ATTRIBUTE}]`);
-    if (row === null) continue;
-    const botId = row.getAttribute(BOT_DROP_TARGET_ATTRIBUTE);
-    if (botId === null || botId === "") return null;
-    // The face sits under the row's click target and takes no pointer
-    // events, so it is found by where it is drawn, not by hit testing.
-    const face = row.querySelector(`[${BOT_DROP_FIRST_ATTRIBUTE}]`)?.getBoundingClientRect();
-    const onFace =
-      face !== undefined &&
-      point.x >= face.left &&
-      point.x <= face.right &&
-      point.y >= face.top &&
-      point.y <= face.bottom;
-    return { botId, place: onFace ? "first" : "last" };
+export function parseBotDropId(id: UniqueIdentifier | undefined): BotDropTarget | null {
+  const match = DROP_ID.exec(String(id));
+  return match ? { place: match[1] as BotDropTarget["place"], botId: match[2]! } : null;
+}
+
+type CollisionArgs = Parameters<CollisionDetection>[0];
+
+// A row scrolled out of the list's view is no place to drop on.
+function isInView(element: HTMLElement | null, point: { x: number; y: number }): boolean {
+  return getScrollableAncestors(element).every((ancestor) => {
+    const view = ancestor.getBoundingClientRect();
+    return (
+      point.x >= view.left && point.x <= view.right && point.y >= view.top && point.y <= view.bottom
+    );
+  });
+}
+
+// The bot under the pointer, its face before the row the face is on, and what
+// is left for the list itself.
+export function splitBotCollisions(args: CollisionArgs): {
+  bot: Collision[];
+  list: CollisionArgs;
+} {
+  const places: typeof args.droppableContainers = [];
+  const others: typeof args.droppableContainers = [];
+  for (const place of args.droppableContainers) {
+    (parseBotDropId(place.id) === null ? others : places).push(place);
   }
-  return null;
+  const point = args.pointerCoordinates;
+  const hits =
+    point === null
+      ? []
+      : pointerWithin({ ...args, droppableContainers: places }).filter(({ id }) =>
+          isInView(places.find((place) => place.id === id)!.node.current, point),
+        );
+  const hit = hits.find(({ id }) => parseBotDropId(id)?.place === "first") ?? hits[0];
+  return {
+    bot: hit === undefined ? [] : [hit],
+    list: { ...args, droppableContainers: others },
+  };
 }
 
-export const botDrop = {
-  // Called when a drag starts with the threads it carries; a drag that
-  // carries no plain threads (an environment group) never targets a bot.
-  start(threadIds: readonly string[]) {
-    dragged = handler === null ? [] : handler.accept(threadIds);
-    set(null);
-  },
-  // Called with every pointer move; true while the pointer is over a bot,
-  // so the list shows none of its own drop places then.
-  over(point: { x: number; y: number } | null): boolean {
-    set(dragged.length === 0 || point === null ? null : targetAt(point));
-    return current !== null;
-  },
-  end() {
-    const target = current;
-    const threadIds = dragged;
-    dragged = [];
-    set(null);
-    if (target !== null && handler !== null && threadIds.length > 0)
-      handler.drop(threadIds, target);
-  },
-  cancel() {
-    dragged = [];
-    set(null);
-  },
-  register(next: BotDropHandler): () => void {
-    handler = next;
-    return () => {
-      if (handler === next) handler = null;
-    };
-  },
-};
-
-function subscribe(listener: () => void) {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
+// Over a bot the list shows none of its own drop places.
+export function splitBotOver<Event extends Pick<DragOverEvent, "over" | "collisions">>(
+  event: Event,
+): { bot: BotDropTarget | null; list: Event } {
+  const bot = parseBotDropId(event.over?.id);
+  return { bot, list: bot === null ? event : { ...event, over: null, collisions: null } };
 }
 
-// Where a drag would land on this bot right now, or null.
-export function useBotDropTarget(botId: string): BotDropTarget["place"] | null {
-  return useSyncExternalStore(
-    subscribe,
-    () => (current?.botId === botId ? current.place : null),
-    () => null,
-  );
-}
+export function createBotDrop() {
+  let dragged: readonly string[] = [];
+  let current: BotDropTarget | null = null;
+  let handler: BotDropHandler | null = null;
+  const places = new Map<string, { target: BotDropTarget; element: HTMLElement }>();
+  const listeners = new Set<() => void>();
 
-// How many conversations the current drag would move to a bot.
-export function useBotDropCount(): number {
-  return useSyncExternalStore(
-    subscribe,
-    () => dragged.length,
-    () => 0,
-  );
+  const set = (threadIds: readonly string[], target: BotDropTarget | null) => {
+    dragged = threadIds;
+    current = target;
+    for (const listener of listeners) listener();
+  };
+
+  return {
+    // Called when a drag starts with the threads it carries; a drag that
+    // carries no plain threads (an environment group) never targets a bot.
+    start(threadIds: readonly string[]) {
+      set(handler === null ? [] : handler.accept(threadIds), null);
+    },
+    over(target: BotDropTarget | null) {
+      if (target?.botId === current?.botId && target?.place === current?.place) return;
+      set(dragged, target);
+    },
+    end() {
+      const target = current;
+      const threadIds = dragged;
+      set([], null);
+      if (target !== null && handler !== null && threadIds.length > 0)
+        handler.drop(threadIds, target);
+    },
+    cancel() {
+      set([], null);
+    },
+    register(next: BotDropHandler): () => void {
+      handler = next;
+      return () => {
+        if (handler === next) handler = null;
+      };
+    },
+    // Where a bot's row and face are drawn.
+    setPlace(target: BotDropTarget, element: HTMLElement | null) {
+      if (element === null) places.delete(getBotDropId(target));
+      else places.set(getBotDropId(target), { target, element });
+    },
+    places: () => [...places.values()],
+    target: () => current,
+    dragged: () => dragged,
+    subscribe(listener: () => void): () => void {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
 }
+export type BotDrop = ReturnType<typeof createBotDrop>;

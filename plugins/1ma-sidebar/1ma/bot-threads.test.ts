@@ -1,19 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { botBranches, threadsShownUnderBots } from "./bot-threads.js";
 
-const bot = (threadIds: string[], hidden = false, id = "bot_1") => ({
-  id,
-  name: "Bot",
-  role: "",
-  avatar: "",
-  hidden,
-  threads: threadIds.map((threadId) => ({
-    threadId,
-    startedFromBot: true,
-    completed: false,
-    assignment: "",
-  })),
-});
+const bot = (hidden = false, id = "bot_1") => ({ id, hidden });
+
+const members = (threadIds: string[], botId = "bot_1") =>
+  Object.fromEntries(
+    threadIds.map((threadId, position) => [
+      threadId,
+      { botId, startedFromBot: true, completed: false, position, assignment: "" },
+    ]),
+  );
 
 const row = (id: string, parentThreadId: string | null, state = {}) => ({
   id,
@@ -26,20 +22,23 @@ const row = (id: string, parentThreadId: string | null, state = {}) => ({
 describe("conversations shown under bots", () => {
   it("takes a bot's conversations with all their descendants", () => {
     const threads = [row("a", null), row("a1", "a"), row("a11", "a1"), row("b", null)];
-    expect([...threadsShownUnderBots([bot(["a"])], threads)].sort()).toEqual(["a", "a1", "a11"]);
+    expect([...threadsShownUnderBots([bot()], members(["a"]), threads)].sort()).toEqual([
+      "a",
+      "a1",
+      "a11",
+    ]);
   });
 
   it("leaves a hidden bot's conversations and survives a parent cycle", () => {
     const threads = [row("x", "y"), row("y", "x")];
-    expect(threadsShownUnderBots([bot(["x"], true)], threads).size).toBe(0);
-    expect([...threadsShownUnderBots([bot(["x"])], threads)].sort()).toEqual(["x", "y"]);
+    expect(threadsShownUnderBots([bot(true)], members(["x"]), threads).size).toBe(0);
+    expect([...threadsShownUnderBots([bot()], members(["x"]), threads)].sort()).toEqual(["x", "y"]);
   });
 
   it("a hidden bot's conversation inside another bot's chat stays in its project", () => {
     const threads = [row("a", null), row("h", "a"), row("h1", "h")];
-    expect([...threadsShownUnderBots([bot(["a"]), bot(["h"], true, "bot_2")], threads)]).toEqual([
-      "a",
-    ]);
+    const both = { ...members(["a"]), ...members(["h"], "bot_2") };
+    expect([...threadsShownUnderBots([bot(), bot(true, "bot_2")], both, threads)]).toEqual(["a"]);
   });
 });
 
@@ -53,7 +52,10 @@ describe("a conversation's branch in its bot", () => {
       row("b", "a2"),
       row("b1", "b"),
     ];
-    const branches = botBranches([bot(["a", "a2"]), bot(["b"], false, "bot_2")], threads);
+    const branches = botBranches(
+      { plain: null, ...members(["a", "a2"]), ...members(["b"], "bot_2") },
+      threads,
+    );
     expect(Object.fromEntries(branches)).toEqual({
       a: { botId: "bot_1", threadIds: ["a"] },
       spawned: { botId: "bot_1", threadIds: ["spawned", "a"] },
@@ -72,7 +74,7 @@ describe("a conversation's branch in its bot", () => {
         row("a2", "between"),
         row("spawned", "a2"),
       ];
-      const branches = botBranches([bot(["a", "between", "a2"])], threads);
+      const branches = botBranches(members(["a", "between", "a2"]), threads);
       expect(branches.get("a2")).toEqual({ botId: "bot_1", threadIds: ["a2"] });
       expect(branches.get("spawned")).toEqual({ botId: "bot_1", threadIds: ["spawned", "a2"] });
       expect(branches.get("between")).toEqual(

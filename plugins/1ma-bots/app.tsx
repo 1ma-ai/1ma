@@ -3,14 +3,13 @@ import {
   experimental_THREAD_ACTION_GROUPS,
   experimental_THREAD_INFO_ROW_GROUPS,
   experimental_useRpcMutation as useRpcMutation,
-  experimental_useRpcQuery as useRpcQuery,
-  experimental_useSidebarThreads as useSidebarThreads,
 } from "@get-bb/plugin-sdk/app";
 import { strings } from "./strings.js";
 import { BotsPanel, PANEL_PATH } from "./src/ui/bot-pages.js";
 import { assignToBotAction } from "./src/ui/assign-action.js";
 import { botsRpc } from "./src/contract.js";
-import { findBot, seenThread, topMove } from "./src/ui/seen.js";
+import { useBotTree } from "./src/ui/bot-tree.js";
+import { seenThread, topMove } from "./src/ui/seen.js";
 import { ThreadBotRow } from "./src/ui/thread-bot-row.js";
 
 export default definePluginApp((app) => {
@@ -33,16 +32,13 @@ export default definePluginApp((app) => {
     icon: "ArrowUp",
     group: experimental_THREAD_ACTION_GROUPS.organize,
     order: 61,
-    useData() {
-      const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
+    useData({ threadIds }) {
       const move = useRpcMutation({ contract: botsRpc, method: "bots.v2.moveToTop" });
-      const { threads } = useSidebarThreads();
-      return { bots: list.data?.bots ?? [], move, threads };
+      return { ...useBotTree(threadIds), move };
     },
     item({ thread, data }) {
-      const member = findBot(data.bots, thread.id);
-      if (!member || thread.archivedAt !== null) return null;
-      const top = topMove(member.bot, data.bots, data.threads, thread.id);
+      if (thread.archivedAt !== null) return null;
+      const top = topMove(data.members, data.rows, thread.id);
       if (top === null) return null;
       return {
         label: strings.threadBot.moveToTop,
@@ -59,15 +55,13 @@ export default definePluginApp((app) => {
     icon: "Check",
     group: experimental_THREAD_ACTION_GROUPS.organize,
     order: 62,
-    useData() {
-      const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
+    useData({ threadIds }) {
       const setCompleted = useRpcMutation({ contract: botsRpc, method: "bots.v2.setCompleted" });
-      const { threads } = useSidebarThreads();
-      return { bots: list.data?.bots ?? [], setCompleted, threads };
+      return { ...useBotTree(threadIds), setCompleted };
     },
     item({ thread, data }) {
-      const member = findBot(data.bots, thread.id);
-      const seen = seenThread(data.bots, data.threads, thread.id);
+      const member = data.members.get(thread.id);
+      const seen = seenThread(data.members, data.rows, thread.id);
       if (!member || seen === null || thread.archivedAt !== null) return null;
       const done = seen.branch.some((mark) => mark.completed);
       return {
@@ -75,7 +69,7 @@ export default definePluginApp((app) => {
         icon: "Check",
         run: async () => {
           await data.setCompleted.mutate({
-            botId: member.bot.id,
+            botId: member.botId,
             thread: seen,
             completed: !done,
           });

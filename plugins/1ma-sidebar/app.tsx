@@ -4,6 +4,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { CompactViewportOverrideProvider } from "@/components/ui/hooks/use-compact-viewport";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { BotDropProvider } from "./1ma/BotDrops.js";
 import { PreferencesSync } from "./app/preferences/PreferencesSync.js";
 import { ProjectList } from "./app/list/ProjectList.js";
 import { useSidebarThreadReveal } from "./app/list/useSidebarThreadReveal.js";
@@ -21,10 +22,12 @@ function ThreadList({
       <TooltipProvider>
         <PreferencesSync />
         <ThreadSelectionProvider activeThreadId={activeThreadId}>
-          <ProjectList
-            activeThreadId={activeThreadId}
-            onProjectSelect={onNavigate}
-          />
+          <BotDropProvider>
+            <ProjectList
+              activeThreadId={activeThreadId}
+              onProjectSelect={onNavigate}
+            />
+          </BotDropProvider>
         </ThreadSelectionProvider>
       </TooltipProvider>
     </CompactViewportOverrideProvider>

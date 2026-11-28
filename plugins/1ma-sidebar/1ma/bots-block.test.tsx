@@ -1,20 +1,28 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
-import { useMemo, useState } from "react";
+import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 // jsdom draws nothing, so it has no scrollIntoView; the block calls it after a drop.
 Element.prototype.scrollIntoView = vi.fn();
 vi.mock("sonner", () => ({ toast: toasts }));
+// The list's drags end in this one; the provider makes it with the list.
+const captured = vi.hoisted(() => ({ drop: undefined as unknown }));
+vi.mock("./thread-drop.js", async (importOriginal) => {
+  const module = await importOriginal<typeof ThreadDrop>();
+  return { ...module, createBotDrop: () => (captured.drop = module.createBotDrop()) };
+});
 import type { ExperimentalSidebarNavigationItem } from "@get-bb/plugin-sdk/app";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { makePluginProject, makeSidebarThread } from "../app/model/fixtures.js";
 import { resetPreferencesSyncForTest } from "../app/preferences/preferences-sync.js";
 import { defaultPreferences } from "../shared/preferences.js";
-import type { SidebarBot } from "./bots-rpc.js";
-import { botDrop } from "./thread-drop.js";
+import { avatarDataUrl } from "./bots/avatar.js";
+import type { BotMember, BotSummary, BotThread } from "./bots/contract.js";
 import { strings } from "./strings.js";
+import type * as ThreadDrop from "./thread-drop.js";
+import type { BotDrop, BotDropTarget } from "./thread-drop.js";
 
 const app = await loadPluginApp(() => import("../app"));
 const { useBotConversations, useMainThread } = await import("./BotsBlock.js");
@@ -44,30 +52,80 @@ const BOTS_PANEL = {
   shortcut: null,
 } as unknown as ExperimentalSidebarNavigationItem;
 
+// A bot with its conversations in order.
+interface Bot extends BotSummary {
+  threads: Omit<BotThread, "position">[];
+}
+
 const chat = (
   threadId: string,
   completed = false,
   startedFromBot = true,
-): SidebarBot["threads"][number] => ({
+): Bot["threads"][number] => ({
   threadId,
   startedFromBot,
   completed,
   assignment: `joined_${threadId}`,
 });
 
-function marketer(hidden = false): SidebarBot {
+function marketer(hidden = false): Bot {
   return {
     id: "bot_m",
     name: "Marketer",
     role: "Landing pages",
-    avatar: "data:image/svg+xml;utf8,<svg/>",
+    appearance: { shape: "circle", face: "calm", color: "#7c6cf0" },
+    capabilities: [],
     hidden,
     threads: [chat("thr_bot")],
   };
 }
 
+const eachKey = <Value,>(input: unknown, read: (key: string) => Value): Record<string, Value> =>
+  Object.fromEntries((input as { keys: string[] }).keys.map((key) => [key, read(key)]));
+
+// 1ma-bots' reads of these bots.
+function readsOf(bots: () => { bots: Bot[] } | Promise<{ bots: Bot[] }>) {
+  return {
+    "bots.v2.list": async () => ({
+      bots: (await bots()).bots.map(({ id, name, role, appearance, capabilities, hidden }) => ({
+        id,
+        name,
+        role,
+        appearance,
+        capabilities,
+        hidden,
+      })),
+    }),
+    "bots.v2.forThreads": async (input: unknown) => {
+      const members = new Map<string, BotMember>();
+      for (const bot of (await bots()).bots) {
+        for (const [position, { threadId, ...member }] of bot.threads.entries()) {
+          members.set(threadId, { botId: bot.id, ...member, position });
+        }
+      }
+      return eachKey(input, (threadId) => members.get(threadId) ?? null);
+    },
+    "bots.v2.threads": async (input: unknown) => {
+      const { botId, from } = input as { botId: string; from: BotDropTarget["place"] };
+      const bot = (await bots()).bots.find(({ id }) => id === botId)!;
+      const threads = bot.threads.map((thread, position) => ({ ...thread, position }));
+      return { threads: threads.slice(...(from === "first" ? [0, 1] : [-1])), next: null };
+    },
+  };
+}
+
+function drag(threadIds: string[], target: BotDropTarget | null) {
+  const drop = captured.drop as BotDrop;
+  drop.start(threadIds);
+  drop.over(target);
+  return drop;
+}
+
+const on = (place: BotDropTarget["place"]): BotDropTarget => ({ botId: "bot_m", place });
+
 function render(options: {
-  bots?: () => { bots: SidebarBot[] } | Promise<{ bots: SidebarBot[] }>;
+  bots?: () => { bots: Bot[] } | Promise<{ bots: Bot[] }>;
+  reads?: Partial<ReturnType<typeof readsOf>>;
   botsInstalled?: boolean;
   settings?: Record<string, boolean>;
   setPreference?: (input: unknown) => unknown;
@@ -95,8 +153,11 @@ function render(options: {
           preferences: { ...defaultPreferences(), ...options.preferences },
         }),
         setPreference: options.setPreference ?? ((input: unknown) => input),
-        "bots.v1.list": options.bots ?? (() => ({ bots: [] })),
+        ...readsOf(options.bots ?? (() => ({ bots: [] }))),
+        ...options.reads,
         "bots.v2.main": options.main ?? (() => ({ threadId: null })),
+        "bots.v2.mains": (input: unknown) =>
+          eachKey(input, () => options.main?.().threadId ?? null),
         "bots.v1.setHidden": options.setHidden ?? (() => ({ ok: true })),
         "bots.v2.assign": options.assign ?? (() => ({ botId: "bot_m", startedFromBot: false })),
       },
@@ -142,7 +203,7 @@ describe("the bots block", () => {
   });
 
   it("is not drawn until the first bot exists, and appears with it", async () => {
-    let bots: SidebarBot[] = [];
+    let bots: Bot[] = [];
     const view = render({ bots: () => ({ bots }) });
     await screen.findByText("Creatives");
     expect(document.querySelector("[data-1ma-bots-block]")).toBeNull();
@@ -159,7 +220,7 @@ describe("the bots block", () => {
   });
 
   it("collapsed, it still says when the bots cannot be read", async () => {
-    let bots: SidebarBot[] = [marketer()];
+    let bots: Bot[] = [marketer()];
     let fail = false;
     const view = render({
       preferences: { collapsedBots: ["bots"] },
@@ -184,10 +245,61 @@ describe("the bots block", () => {
     expect(screen.queryByText("Marketer")).toBeNull();
   });
 
+  it("says the bots are unavailable while 1ma-bots is older than bots.v2, and shows them once it is updated", async () => {
+    let updated = false;
+    const view = render({
+      bots: () => {
+        if (!updated)
+          throw Object.assign(new Error('plugin "1ma-bots" has no rpc method "bots.v2.list"'), {
+            code: "unknown_method",
+          });
+        return { bots: [marketer()] };
+      },
+    });
+    await screen.findByText(strings.unavailable);
+    expect(threadIdsInList()).toEqual(expect.arrayContaining(["thr_bot", "thr_plain"]));
+    updated = true;
+    await view.behavior.experimental_invalidateRpc(null, "1ma-bots");
+    await screen.findByText("Marketer");
+    expect(screen.queryByText(strings.unavailable)).toBeNull();
+    expect(threadIdsIn(botElement("bot_m"))).toEqual(["thr_bot", "thr_bot_child"]);
+  });
+
   it("draws nothing while it is not yet known whether there is a bot", async () => {
     render({ bots: () => new Promise<never>(() => undefined) });
     await screen.findByText("Creatives");
     expect(document.querySelector("[data-1ma-bots-block]")).toBeNull();
+  });
+
+  it("draws nothing while it is not yet known which conversations are the bots'", async () => {
+    render({
+      bots: () => ({ bots: [marketer()] }),
+      reads: { "bots.v2.forThreads": () => new Promise<never>(() => undefined) },
+    });
+    await screen.findByText("Creatives");
+    expect(document.querySelector("[data-1ma-bots-block]")).toBeNull();
+  });
+
+  it("when the bots' conversations cannot be read, it says so and the projects show them", async () => {
+    render({
+      bots: () => ({ bots: [marketer()] }),
+      reads: {
+        "bots.v2.forThreads": () => {
+          throw new Error("1ma-bots is reloading");
+        },
+      },
+    });
+    await screen.findByText(strings.unavailable);
+    await screen.findByText("Creatives");
+  });
+
+  it("draws the bot's own image", async () => {
+    const appearance = { shape: "pill", face: "happy", color: "#e07a2c" } as const;
+    render({ bots: () => ({ bots: [{ ...marketer(), appearance }] }) });
+    await screen.findByText("Marketer");
+    expect(botElement("bot_m").querySelector("img")?.getAttribute("src")).toBe(
+      avatarDataUrl(appearance),
+    );
   });
 
   it("with only hidden bots it stays, so they can be shown again", async () => {
@@ -247,36 +359,20 @@ describe("Codex review of stage 2: a bot with only done conversations", () => {
 
 describe("a done conversation that is working again", () => {
   it("shows with the open conversations while it runs", async () => {
-    const running = THREADS.map((thread) =>
-      thread.id === "thr_bot" ? { ...thread, status: "active" as const } : thread,
-    );
-    renderSlot(
-      registration,
-      {
-        activeThreadId: null,
-        activeProjectId: null,
-        isCompactViewport: false,
-        onNavigate: vi.fn(),
-        searchQuery: "",
-      },
-      {
-        sidebarThreads: { projects: PROJECTS, sections: [], threads: running },
-        sidebarNavigation: { items: [BOTS_PANEL] },
-        rpc: {
-          listPreferences: () => ({ preferences: defaultPreferences() }),
-          setPreference: (input: unknown) => input,
-          "bots.v2.main": () => ({ threadId: "thr_bot" }),
-          "bots.v1.list": () => ({
-            bots: [
-              {
-                ...marketer(),
-                threads: [chat("thr_bot", true)],
-              },
-            ],
-          }),
-        },
-      },
-    );
+    render({
+      threads: THREADS.map((thread) =>
+        thread.id === "thr_bot" ? { ...thread, status: "active" as const } : thread,
+      ),
+      main: () => ({ threadId: "thr_bot" }),
+      bots: () => ({
+        bots: [
+          {
+            ...marketer(),
+            threads: [chat("thr_bot", true)],
+          },
+        ],
+      }),
+    });
     await screen.findByText("Marketer");
     expect(threadIdsIn(botElement("bot_m"))).toEqual(["thr_bot", "thr_bot_child"]);
     expect(screen.queryByText(strings.done(1))).toBeNull();
@@ -335,7 +431,7 @@ describe("a click on a bot", () => {
       return <button onClick={() => setStatus("active")}>{thread?.id ?? "none"}</button>;
     }
     renderSlot({ component: Probe as never }, {} as never, {
-      rpc: { "bots.v2.main": () => ({ threadId: main }) },
+      rpc: { "bots.v2.mains": (input: unknown) => eachKey(input, () => main) },
     });
     const button = await screen.findByText("thr_bot");
     main = "thr_plain";
@@ -358,11 +454,11 @@ describe("a click on a bot", () => {
     }
     renderSlot({ component: Probe as never }, {} as never, {
       rpc: {
-        "bots.v2.main": async () => {
+        "bots.v2.mains": async () => {
           reads += 1;
-          if (reads > 1) return { threadId: "thr_plain" };
+          if (reads > 1) return { bot_m: "thr_plain" };
           await new Promise<void>((resolve) => (answerFirst = resolve));
-          return { threadId: "thr_bot" };
+          return { bot_m: "thr_bot" };
         },
       },
     });
@@ -391,7 +487,7 @@ describe("nested conversations of a bot", () => {
     nested("thr_main"),
   ];
   const memberOrder = ["thr_second", "thr_main", "thr_parent", "thr_first"];
-  const withDone = (done: string[], order = memberOrder): SidebarBot => ({
+  const withDone = (done: string[], order = memberOrder): Bot => ({
     ...marketer(),
     threads: order.map((threadId) => chat(threadId, done.includes(threadId))),
   });
@@ -488,9 +584,14 @@ describe("nested conversations of a bot", () => {
       nested("thr_foreign"),
     ];
     const bot = withDone(["thr_parent"], [...memberOrder, "thr_alone"]);
+    const members = Object.fromEntries(
+      bot.threads.map(({ threadId, ...thread }, position) => [
+        threadId,
+        { botId: bot.id, ...thread, position },
+      ]),
+    );
     function Probe() {
-      const bots = useMemo(() => [bot], []);
-      const { seenOf } = useBotConversations(bots).of(bot);
+      const { seenOf } = useBotConversations(members, threads).of(bot);
       return <p data-testid="seen">{JSON.stringify(Object.fromEntries(seenOf))}</p>;
     }
     renderSlot({ component: Probe as never }, {} as never, {
@@ -700,19 +801,9 @@ describe("dragging conversations onto a bot", () => {
       },
     });
     await screen.findByText("Marketer");
-    const row = botElement("bot_m");
-    const face = row.querySelector("[data-1ma-bot-avatar]")!;
-    face.getBoundingClientRect = () => new DOMRect(0, 0, 32, 32);
-    // As in the browser, hit testing finds the row's click target, not the face.
-    const target = row.querySelector("button")!;
-    document.elementsFromPoint = () => [target];
-    botDrop.start(["thr_plain", "thr_other"]);
-    expect(botDrop.over({ x: 10, y: 10 })).toBe(true);
-    botDrop.end();
+    drag(["thr_plain", "thr_other"], on("first")).end();
     await waitFor(() => expect(calls).toHaveLength(2));
-    botDrop.start(["thr_last"]);
-    botDrop.over({ x: 100, y: 10 });
-    botDrop.end();
+    drag(["thr_last"], on("last")).end();
     await waitFor(() => expect(calls).toHaveLength(3));
     expect(calls).toEqual([
       { threadId: "thr_other", botId: "bot_m", place: "first", seen: null },
@@ -736,10 +827,7 @@ describe("dragging conversations onto a bot", () => {
       },
     });
     await screen.findByText("Editor");
-    document.elementsFromPoint = () => [botElement("bot_e").querySelector("button")!];
-    botDrop.start(["thr_bot", "thr_plain"]);
-    botDrop.over({ x: 100, y: 10 });
-    botDrop.end();
+    drag(["thr_bot", "thr_plain"], { botId: "bot_e", place: "last" }).end();
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls).toEqual([
       {
@@ -760,15 +848,61 @@ describe("dragging conversations onto a bot", () => {
   it("shows where the drop lands while the pointer is over the bot", async () => {
     render({ bots: () => ({ bots: [marketer()] }) });
     await screen.findByText("Marketer");
-    const row = botElement("bot_m");
+    const drop = drag(["thr_plain"], on("first"));
+    expect(await screen.findByText(strings.dropFirst(1))).toBeTruthy();
+    drop.cancel();
+    await waitFor(() => expect(screen.queryByText(strings.dropFirst(1))).toBeNull());
+  });
+
+  it("a hidden bot takes no drop", async () => {
+    render({ bots: () => ({ bots: [marketer(true), { ...marketer(), id: "bot_e" }] }) });
+    fireEvent.click(await screen.findByText(strings.hiddenBots(1)));
+    await waitFor(() => expect(screen.getAllByText("Marketer")).toHaveLength(2));
+    const places = (captured.drop as BotDrop).places().map(({ target }) => target);
+    expect(places).toHaveLength(2);
+    expect(places.every(({ botId }) => botId === "bot_e")).toBe(true);
+  });
+
+  it("takes a conversation dragged from a project with the mouse", async () => {
+    const calls: unknown[] = [];
+    render({
+      bots: () => ({ bots: [marketer()] }),
+      assign: (input) => {
+        calls.push(input);
+        return { botId: "bot_m", startedFromBot: false };
+      },
+    });
+    const plain = await screen.findByText("Plain chat");
+    const row = botElement("bot_m").querySelector("[data-1ma-bot-row]")!;
+    row.getBoundingClientRect = () => new DOMRect(0, 0, 200, 32);
     row.querySelector("[data-1ma-bot-avatar]")!.getBoundingClientRect = () =>
       new DOMRect(0, 0, 32, 32);
-    document.elementsFromPoint = () => [row.querySelector("button")!];
-    botDrop.start(["thr_plain"]);
-    botDrop.over({ x: 10, y: 10 });
-    expect(await screen.findByText(strings.dropFirst(1))).toBeTruthy();
-    botDrop.cancel();
-    await waitFor(() => expect(screen.queryByText(strings.dropFirst(1))).toBeNull());
+    const move = async (clientX: number, clientY: number) => {
+      await act(async () => void fireEvent.mouseMove(document, { clientX, clientY }));
+    };
+    const pick = async () => {
+      fireEvent.mouseDown(plain, { button: 0, clientX: 5, clientY: 300 });
+      await move(5, 280);
+    };
+    await pick();
+    await move(10, 10);
+    await screen.findByText(strings.dropFirst(1));
+    await move(100, 10);
+    await screen.findByText(strings.dropLast(1));
+    await move(100, 100);
+    await waitFor(() => expect(screen.queryByText(strings.dropLast(1))).toBeNull());
+    fireEvent.mouseUp(document);
+    await move(5, 300);
+    expect(calls).toEqual([]);
+    await pick();
+    await move(10, 10);
+    await screen.findByText(strings.dropFirst(1));
+    fireEvent.mouseUp(document);
+    await waitFor(() =>
+      expect(calls).toEqual([
+        { threadId: "thr_plain", botId: "bot_m", place: "first", seen: null },
+      ]),
+    );
   });
 });
 
@@ -783,11 +917,7 @@ describe("dragging a selection that holds a sub-thread onto a bot", () => {
       },
     });
     await screen.findByText("Marketer");
-    const row = botElement("bot_m");
-    document.elementsFromPoint = () => [row.querySelector("button")!];
-    botDrop.start(["thr_bot", "thr_bot_child", "thr_plain"]);
-    botDrop.over({ x: 100, y: 10 });
-    botDrop.end();
+    drag(["thr_bot", "thr_bot_child", "thr_plain"], on("last")).end();
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls).toEqual([
       { threadId: "thr_bot", botId: "bot_m", place: "last", seen: null },
@@ -798,7 +928,7 @@ describe("dragging a selection that holds a sub-thread onto a bot", () => {
 
 // A server for the drop tests: it keeps the bot's order the way 1ma-bots
 // binds a conversation (moved out, then put first or last), and shows it in
-// bots.v1.list.
+// the bots it reads.
 function dropServer(options: {
   saveThenLose?: number;
   refuse?: number;
@@ -862,15 +992,12 @@ function dropServer(options: {
   };
 }
 
-async function dropTwo(threadIds = ["thr_bot", "thr_plain"], x = 100) {
+async function dropTwo(
+  threadIds = ["thr_bot", "thr_plain"],
+  place: BotDropTarget["place"] = "last",
+) {
   await screen.findByText("Marketer");
-  const row = botElement("bot_m");
-  row.querySelector("[data-1ma-bot-avatar]")!.getBoundingClientRect = () =>
-    new DOMRect(0, 0, 32, 32);
-  document.elementsFromPoint = () => [row.querySelector("button")!];
-  botDrop.start(threadIds);
-  botDrop.over({ x, y: 10 });
-  botDrop.end();
+  drag(threadIds, on(place)).end();
 }
 
 describe("Codex review of f6aa64f: a drop that fails partway", () => {
@@ -929,7 +1056,7 @@ describe("Codex review of 98142c5: a drop that reorders a bot's own conversation
     toasts.success.mockClear();
     const server = dropServer({ refuse: 1, owned: ["keep", "thr_bot", "thr_plain"] });
     render({ bots: server.bots, assign: server.assign });
-    await dropTwo(["thr_bot", "thr_plain"], 10);
+    await dropTwo(["thr_bot", "thr_plain"], "first");
     await waitFor(() => expect(toasts.error).toHaveBeenCalled());
     expect(toasts.success).not.toHaveBeenCalled();
     expect(toasts.error.mock.calls[0]![0]).toBe(strings.assignFailed("Marketer"));
@@ -941,7 +1068,7 @@ describe("Codex review of 98142c5: a drop that reorders a bot's own conversation
     toasts.success.mockClear();
     const server = dropServer({ saveThenLose: 2, owned: ["keep", "thr_bot", "thr_plain"] });
     render({ bots: server.bots, assign: server.assign });
-    await dropTwo(["thr_bot", "thr_plain"], 10);
+    await dropTwo(["thr_bot", "thr_plain"], "first");
     await waitFor(() => expect(toasts.success).toHaveBeenCalled());
     expect(toasts.success.mock.calls[0]![0]).toBe(strings.assigned("Marketer", 2));
     expect(server.owned).toEqual(["thr_bot", "thr_plain", "keep"]);
@@ -984,7 +1111,7 @@ describe("Codex review of 7be99a2: another conversation placed on the bot before
       othersAssign: { threadId: "thr_other", place: "first" },
     });
     render({ bots: server.bots, assign: server.assign });
-    await dropTwo(["thr_bot", "thr_plain"], 10);
+    await dropTwo(["thr_bot", "thr_plain"], "first");
     await waitFor(() => expect(toasts.error).toHaveBeenCalled());
     expect(toasts.error.mock.calls[0]![0]).toBe(strings.unconfirmedAssigned("Marketer", 1, 2));
     expect(toasts.success).not.toHaveBeenCalled();
@@ -1002,7 +1129,7 @@ describe("Codex review of afe5c1f: a refusal is an answer, a lost connection is 
       othersAssign: { threadId: "thr_plain", place: "last" },
     });
     render({ bots: server.bots, assign: server.assign });
-    await dropTwo(["thr_plain"], 10);
+    await dropTwo(["thr_plain"], "first");
     await waitFor(() => expect(toasts.error).toHaveBeenCalled());
     const [title, options] = toasts.error.mock.calls[0]!;
     expect(title).toBe(strings.assignFailed("Marketer"));
@@ -1036,7 +1163,7 @@ describe("Codex review of 7c540b3: a partial refusal says what moved, not where 
       othersAssign: { threadId: "thr_plain", place: "last" },
     });
     render({ bots: server.bots, assign: server.assign });
-    await dropTwo(["thr_plain", "thr_bot"], 10);
+    await dropTwo(["thr_plain", "thr_bot"], "first");
     await waitFor(() => expect(toasts.error).toHaveBeenCalled());
     const [title, options] = toasts.error.mock.calls[0]!;
     expect(title).toBe(strings.partlyAssigned("Marketer", 1, 2));

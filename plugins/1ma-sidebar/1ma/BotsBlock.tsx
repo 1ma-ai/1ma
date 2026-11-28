@@ -5,6 +5,7 @@ import {
   experimental_PluginRpcCallError as PluginRpcCallError,
   experimental_resolveThreadStatus as resolveThreadStatus,
   experimental_ThreadStatusGlyph as ThreadStatusGlyph,
+  experimental_useRpcKeyedQuery as useRpcKeyedQuery,
   experimental_useRpcMutation as useRpcMutation,
   experimental_useRpcQuery as useRpcQuery,
   experimental_useSidebarNavigation as useSidebarNavigation,
@@ -52,18 +53,14 @@ import { sidebarThreadLifecyclesAtom } from "../app/preferences/atoms.js";
 import { createSyncedPreferenceAtom } from "../app/preferences/synced-preference-atom.js";
 import { SidebarChildToggleChevron } from "../app/rows/SidebarChildToggleChevron.js";
 import { SidebarControlButton, SidebarRowControls } from "../app/rows/SidebarRowControls.js";
-import { BOTS_PLUGIN_ID, botsRpc, type SeenRow, type SidebarBot } from "./bots-rpc.js";
-import { botBranches } from "./bot-threads.js";
+import { useBotDrop, useBotDropCount, useBotDropPlace, useBotDropTarget } from "./BotDrops.js";
+import { avatarDataUrl } from "./bots/avatar.js";
+import { keepsOpen } from "./bots/branch.js";
+import { botsRpc, type BotSummary, type SeenRow } from "./bots/contract.js";
+import { botBranches, type Members } from "./bot-threads.js";
 import { strings } from "./strings.js";
-import { useSidebarBots } from "./use-bots.js";
-import {
-  BOT_DROP_FIRST_ATTRIBUTE,
-  BOT_DROP_TARGET_ATTRIBUTE,
-  botDrop,
-  useBotDropCount,
-  useBotDropTarget,
-  type BotDropHandler,
-} from "./thread-drop.js";
+import type { BotDropHandler } from "./thread-drop.js";
+import { BOTS_PLUGIN_ID, useSidebarBots } from "./use-bots.js";
 import { toast } from "sonner";
 import { getMutationErrorMessage } from "../app/ui/mutation-errors.js";
 
@@ -102,7 +99,10 @@ function isRefusal(error: unknown): boolean {
 }
 
 export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBlockProps) {
-  const state = useSidebarBots();
+  const lifecycles = useAtomValue(sidebarThreadLifecyclesAtom);
+  const { threads } = useSidebarThreads({ experimental_lifecycles: lifecycles });
+  const state = useSidebarBots(threads);
+  const botDrop = useBotDrop();
   const navigation = useSidebarNavigation();
   const [collapsed, setCollapsed] = useAtom(collapsedBotsAtom);
   const toggle = (key: string) =>
@@ -112,7 +112,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
   const [showHidden, setShowHidden] = useState(false);
   const visible = useMemo(() => state.bots.filter((bot) => !bot.hidden), [state.bots]);
   const hidden = useMemo(() => state.bots.filter((bot) => bot.hidden), [state.bots]);
-  const conversations = useBotConversations(state.bots);
+  const conversations = useBotConversations(state.members, threads);
   const setHidden = useRpcMutation({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
@@ -123,12 +123,17 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
     pluginId: BOTS_PLUGIN_ID,
     method: "bots.v2.assign",
   });
-  // A fresh read of the bots, to learn where conversations ended up when an
-  // assignment's answer was lost.
-  const reread = useRpcMutation({
+  // Fresh reads, to learn where a conversation ended up when an assignment's
+  // answer was lost.
+  const readMembers = useRpcMutation({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.list",
+    method: "bots.v2.forThreads",
+  });
+  const readThreads = useRpcMutation({
+    contract: botsRpc,
+    pluginId: BOTS_PLUGIN_ID,
+    method: "bots.v2.threads",
   });
   const navigate = useBbNavigate();
   // A dropped conversation is scrolled into view once the bot shows it.
@@ -145,23 +150,15 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
         if (bot === undefined) return;
         // Assigning in reverse keeps a dragged selection in its order at the top.
         const ordered = target.place === "first" ? [...threadIds].reverse() : threadIds;
-        const had = new Set(bot.threads.map((item) => item.threadId));
-        const seen = new Map(
-          state.bots.flatMap(({ id: botId, threads }) =>
-            threads.map(({ threadId, assignment }) => [threadId, { botId, assignment }] as const),
-          ),
-        );
+        const { members } = state;
         void (async () => {
           const confirmed: string[] = [];
           let failure: unknown = null;
           for (const threadId of ordered) {
+            const member = members[threadId];
+            const seen = member ? { botId: member.botId, assignment: member.assignment } : null;
             try {
-              await assign.mutate({
-                threadId,
-                botId: bot.id,
-                place: target.place,
-                seen: seen.get(threadId) ?? null,
-              });
+              await assign.mutate({ threadId, botId: bot.id, place: target.place, seen });
               confirmed.push(threadId);
             } catch (error) {
               failure = error;
@@ -172,7 +169,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
           // were confirmed and the ones after it were never sent. A refusal
           // is a definite answer, since bots.v2.assign refuses only before it
           // writes. Any other failure may have been saved or may still be
-          // saved, so the bot is read again and only what the read shows is
+          // saved, so its place is read again and only what the read shows is
           // counted: a conversation from elsewhere that the bot now has, or
           // one it already had that stands where it was put. Anything else
           // stays unknown rather than reported as left in place.
@@ -183,12 +180,11 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
           if (doubtful !== undefined) {
             known = false;
             try {
-              const { bots } = await reread.mutate({});
-              const order =
-                bots.find((item) => item.id === bot.id)?.threads.map((item) => item.threadId) ?? [];
-              const there = had.has(doubtful)
-                ? (target.place === "first" ? order[0] : order.at(-1)) === doubtful
-                : order.includes(doubtful);
+              const there =
+                members[doubtful]?.botId === bot.id
+                  ? (await readThreads.mutate({ botId: bot.id, from: target.place, limit: 1 }))
+                      .threads[0]?.threadId === doubtful
+                  : (await readMembers.mutate({ keys: [doubtful] }))[doubtful]?.botId === bot.id;
               if (there) {
                 moved = [...confirmed, doubtful];
                 known = true;
@@ -241,7 +237,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
         accept: (threadIds) => onDrop.current.accept(threadIds),
         drop: (threadIds, target) => onDrop.current.drop(threadIds, target),
       }),
-    [],
+    [botDrop],
   );
   useEffect(() => {
     const pending = reveal.current;
@@ -301,6 +297,7 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
               <BotRow
                 key={bot.id}
                 bot={bot}
+                members={state.members}
                 conversations={conversations.of(bot)}
                 collapsed={collapsed.includes(bot.id)}
                 onToggle={() => toggle(bot.id)}
@@ -343,16 +340,6 @@ export function BotsBlock({ selectedThreadId, onProjectSelect, ...tree }: BotsBl
   );
 }
 
-// 1ma-bots clears the done mark of a conversation that works again or waits
-// for the owner; until then it already shows with the open ones.
-function keepsOpen(thread: PluginSidebarThread): boolean {
-  return (
-    ["starting", "active", "stopping", "error"].includes(thread.status) ||
-    thread.hasPendingInteraction ||
-    thread.queuedWork === "failed"
-  );
-}
-
 interface BotConversations {
   // Every conversation with its sub-threads. Done covers the whole branch,
   // unless something in the branch keeps it open.
@@ -365,39 +352,41 @@ interface BotConversations {
   seenOf: ReadonlyMap<string, SeenRow>;
 }
 
-export function useBotConversations(bots: readonly SidebarBot[]) {
-  const lifecycles = useAtomValue(sidebarThreadLifecyclesAtom);
-  const { threads } = useSidebarThreads({ experimental_lifecycles: lifecycles });
+export function useBotConversations(members: Members, threads: readonly PluginSidebarThread[]) {
   return useMemo(() => {
     const byId = new Map(threads.map((thread) => [thread.id, thread]));
-    const branches = botBranches(bots, threads);
+    const branches = botBranches(members, threads);
     const branchOf = (threadId: string) => branches.get(threadId)?.threadIds ?? [];
     const parentOf = (threadId: string) => branchOf(threadId)[1] ?? null;
+    const positionOf = (threadId: string) =>
+      members[threadId]?.position ?? Number.POSITIVE_INFINITY;
+    const compare: ThreadComparator = (left, right) => {
+      const [first, second] = [positionOf(left.id), positionOf(right.id)];
+      return first === second ? right.createdAt - left.createdAt : first - second;
+    };
+    const shownBy = new Map<string, PluginSidebarThread[]>();
+    for (const thread of threads) {
+      const botId = branches.get(thread.id)?.botId;
+      if (botId === undefined || thread.isHidden) continue;
+      const shown = shownBy.get(botId) ?? [];
+      shownBy.set(botId, shown);
+      shown.push(thread);
+    }
     const byBot = new Map<string, BotConversations>();
-    for (const bot of bots) {
-      const order = new Map(bot.threads.map((thread, index) => [thread.threadId, index]));
-      const places = new Map(bot.threads.map((thread) => [thread.threadId, thread]));
-      const shown = threads.filter(
-        (thread) => !thread.isHidden && branches.get(thread.id)?.botId === bot.id,
-      );
+    for (const [botId, shown] of shownBy) {
       const kept = new Set(
         shown
           .filter((thread) => !thread.isArchived && keepsOpen(thread))
           .flatMap((thread) => branchOf(thread.id)),
       );
       const marked = new Set(
-        bot.threads
-          .filter((item) => item.completed && !kept.has(item.threadId))
-          .map((item) => item.threadId),
+        shown.map(({ id }) => id).filter((id) => members[id]?.completed && !kept.has(id)),
       );
       const done = shown.filter((thread) =>
         branchOf(thread.id).some((threadId) => marked.has(threadId)),
       );
       const doneIds = new Set(done.map((thread) => thread.id));
       const open = shown.filter((thread) => !doneIds.has(thread.id));
-      const compare: ThreadComparator = (left, right) =>
-        (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
-          (order.get(right.id) ?? Number.MAX_SAFE_INTEGER) || right.createdAt - left.createdAt;
       const seenOf = new Map<string, SeenRow>();
       for (const { id, parentThreadId } of shown) {
         seenOf.set(id, {
@@ -405,13 +394,13 @@ export function useBotConversations(bots: readonly SidebarBot[]) {
           parentThreadId,
           branch: branchOf(id).map((threadId) => ({
             threadId,
-            assignment: places.get(threadId)?.assignment ?? null,
-            completed: places.get(threadId)?.completed ?? false,
+            assignment: members[threadId]?.assignment ?? null,
+            completed: members[threadId]?.completed ?? false,
           })),
           shownDone: doneIds.has(id),
         });
       }
-      byBot.set(bot.id, {
+      byBot.set(botId, {
         open,
         done,
         doneCount: done.filter(({ id }) => !doneIds.has(parentOf(id) ?? "")).length,
@@ -429,45 +418,46 @@ export function useBotConversations(bots: readonly SidebarBot[]) {
       seenOf: new Map(),
     };
     return {
-      of: (bot: SidebarBot) => byBot.get(bot.id) ?? empty,
+      of: (bot: BotSummary) => byBot.get(bot.id) ?? empty,
       parentOf: (threadId: string) => byId.get(threadId)?.parentThreadId ?? null,
     };
-  }, [bots, threads]);
+  }, [members, threads]);
 }
 
 // 1ma-bots alone knows which conversation is main. A status in the tree can
 // change it, so it is read again when the bot's rows do.
 export function useMainThread(
-  bot: SidebarBot,
+  bot: BotSummary,
   { open, done }: Pick<BotConversations, "open" | "done">,
 ): PluginSidebarThread | null {
-  const { data, isLoading, refetch } = useRpcQuery({
+  const { data, isFetching, refetch } = useRpcKeyedQuery({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v2.main",
-    input: { botId: bot.id },
+    method: "bots.v2.mains",
+    keys: [bot.id],
   });
   const rows = [...open, ...done];
   const state = rows.map((thread) =>
     [thread.id, thread.parentThreadId, thread.isArchived, keepsOpen(thread)].join(":"),
   );
   const seen = state.sort().join();
-  // Asking again during the first reading would only join it.
+  // Asking again during a reading would only join it.
   const asked = useRef(seen);
   useEffect(() => {
-    if (isLoading || asked.current === seen) return;
+    if (isFetching || asked.current === seen) return;
     asked.current = seen;
     void refetch();
-  }, [isLoading, refetch, seen]);
-  return rows.find((thread) => thread.id === data?.threadId) ?? null;
+  }, [isFetching, refetch, seen]);
+  return rows.find((thread) => thread.id === data?.[bot.id]) ?? null;
 }
 
 // The bot's state at a glance, drawn on its image: the glyph bb draws for its
 // main conversation (the one a click opens) on the corner, a dot for each
 // other conversation that is working (two and a plus past three, the count in
 // the tooltip), and a red mark for an unread error elsewhere.
-function BotAvatar({ bot, conversations }: { bot: SidebarBot; conversations: BotConversations }) {
+function BotAvatar({ bot, conversations }: { bot: BotSummary; conversations: BotConversations }) {
   const { open } = conversations;
+  const face = useBotDropPlace(bot, "first");
   const main = useMainThread(bot, conversations);
   const mainThreads = useMemo(() => (main === null ? NO_THREADS : [main]), [main]);
   const hasDraft = useThreadsHaveDraft(mainThreads);
@@ -506,14 +496,14 @@ function BotAvatar({ bot, conversations }: { bot: SidebarBot; conversations: Bot
   const showMain = !quiet && (status.indicator !== "none" || status.rowStatus !== null);
   return (
     <span
+      ref={face}
       className="relative shrink-0"
       data-1ma-bot-avatar=""
-      {...{ [BOT_DROP_FIRST_ATTRIBUTE]: "" }}
       role="img"
       aria-label={label === "" ? bot.name : `${bot.name}: ${label}`}
       title={label === "" ? undefined : label}
     >
-      <img src={bot.avatar} alt="" className="size-8 rounded-full" />
+      <img src={avatarDataUrl(bot.appearance)} alt="" className="size-8 rounded-full" />
       {unreadError ? (
         <span
           data-1ma-bot-unread-error=""
@@ -560,6 +550,7 @@ const ONE_ACTION_INSET = {
 // stock new-thread icon and menu. Its conversations sit under the guide line.
 function BotRow({
   bot,
+  members,
   conversations,
   collapsed,
   onToggle,
@@ -569,7 +560,8 @@ function BotRow({
   onProjectSelect,
   tree,
 }: {
-  bot: SidebarBot;
+  bot: BotSummary;
+  members: Members;
   conversations: BotConversations;
   collapsed: boolean;
   onToggle: () => void;
@@ -593,6 +585,7 @@ function BotRow({
   // only a row to bring it back.
   const hasChildren = !bot.hidden && (open.length > 0 || doneCount > 0);
   const isCollapsed = collapsed && hasChildren;
+  const row = useBotDropPlace(bot, "last");
   const dropPlace = useBotDropTarget(bot.id);
   const dropCount = useBotDropCount();
 
@@ -622,6 +615,7 @@ function BotRow({
     }
   };
   const treeProps = {
+    members,
     compareThreads: compare,
     parentOf,
     seenOf,
@@ -633,10 +627,10 @@ function BotRow({
   return (
     <div className="relative space-y-0.5" data-bot-id={bot.id}>
       <div
+        ref={row}
         data-sidebar-rename-row=""
         data-1ma-bot-row=""
         data-1ma-bot-hidden={bot.hidden ? "" : undefined}
-        {...{ [BOT_DROP_TARGET_ATTRIBUTE]: bot.hidden ? "" : bot.id }}
         data-1ma-drop-place={dropPlace ?? undefined}
         className={cn(
           SIDEBAR_HOVER_ACTIONS_ROW_CLASS,
@@ -784,7 +778,7 @@ function NewBotConversation({
   open,
   onOpenChange,
 }: {
-  bot: SidebarBot;
+  bot: BotSummary;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -797,7 +791,7 @@ function NewBotConversation({
   const detail = useRpcQuery({
     contract: botsRpc,
     pluginId: BOTS_PLUGIN_ID,
-    method: "bots.v1.get",
+    method: "bots.v2.get",
     input: { botId: bot.id },
     enabled: open,
   });

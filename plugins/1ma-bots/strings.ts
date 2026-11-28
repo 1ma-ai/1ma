@@ -71,6 +71,7 @@ export const strings = {
     continueInBot: "Continue in a bot conversation",
   },
   completed: (count: number) => `Done: ${count}`,
+  moreInList: (count: number) => `${count} more; narrow it down with find <text>`,
   settings: {
     autoCompleteHours: "Mark idle bot conversations done after (hours)",
     autoCompleteHoursDescription:
@@ -80,6 +81,9 @@ export const strings = {
       "An exchange ends at this many letters; the bot then asks the owner. Your own message in a conversation starts a new exchange.",
     hourlyLetters: "Letters per bot per hour",
     hourlyLettersDescription: "The most letters one bot may send to other bots in an hour.",
+    retentionDays: "Keep bot letters and activity for (days)",
+    retentionDaysDescription:
+      "Older records of delivered letters between bots and of bot activity are deleted. Whole days; 0 keeps everything. Conversations themselves are never deleted.",
   },
 } as const;
 
@@ -101,7 +105,9 @@ export const agentText = {
     role === ""
       ? `- ${JSON.stringify(name)} (${id})`
       : `- ${JSON.stringify(name)} (${id}), role ${JSON.stringify(role)}`,
+  othersUnlisted: (count: number) => `- ${count} more; look them up with bot_find`,
   tools: {
+    find: "Find the bots this bot may write to by a part of their name, role or work areas. Returns the first matches and how many there are.",
     memoryRead:
       "Read this bot's memory with its sha256, character count and limit. Read before overwriting.",
     memoryUpdate: `Change this bot's memory. append adds one single-line fact (duplicates are ignored); forget removes one exact fact line; overwrite replaces the whole memory and needs expectedSha256 from bot_read. Memory holds at most ${MEMORY_MAX} characters: when full, read, condense and overwrite.`,
@@ -134,6 +140,9 @@ export const agentText = {
     "Only a top-level conversation that is not archived can be assigned to a bot; its child conversations follow it.",
   needsOwner:
     "This conversation is waiting for the owner (a question or an error), so it cannot be marked done.",
+  addresseeChanged: (to: string) =>
+    `${to} names another bot by now, so nothing was sent. Find the bot again with bot_find.`,
+  orderChanged: "The order of these conversations changed. Read them again from the beginning.",
   keepsChanging: "Something keeps happening in the bots' conversations. Try again in a moment.",
   broughtBack: "This conversation was brought back meanwhile, so it was not marked done.",
   reassigned: "This conversation was assigned anew meanwhile, so nothing was changed.",

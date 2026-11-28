@@ -37,7 +37,7 @@ export function parseRoute(subPath: string): Route {
   return second === "chat" ? { page: "chat", botId: first } : { page: "edit", botId: first };
 }
 
-function BotAvatar({ appearance, size = 32 }: { appearance: Appearance; size?: number }) {
+export function BotAvatar({ appearance, size = 32 }: { appearance: Appearance; size?: number }) {
   return (
     <img src={avatarDataUrl(appearance)} width={size} height={size} alt="" className="shrink-0" />
   );
@@ -158,8 +158,8 @@ export function BotEditor({ bot }: { bot: BotDetail | null }) {
     setError(null);
   };
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const create = useRpcMutation({ contract: botsRpc, method: "bots.v1.create" });
-  const update = useRpcMutation({ contract: botsRpc, method: "bots.v1.update" });
+  const create = useRpcMutation({ contract: botsRpc, method: "bots.v2.create" });
+  const update = useRpcMutation({ contract: botsRpc, method: "bots.v2.update" });
   const remove = useRpcMutation({ contract: botsRpc, method: "bots.v1.remove" });
   const pending = create.isPending || update.isPending || remove.isPending;
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
@@ -387,7 +387,7 @@ function ReachField({
   reach: string[] | null;
   onChange: (reach: string[] | null) => void;
 }) {
-  const list = useRpcQuery({ contract: botsRpc, method: "bots.v1.list", input: {} });
+  const list = useRpcQuery({ contract: botsRpc, method: "bots.v2.list", input: {} });
   const others = (list.data?.bots ?? []).filter((other) => other.id !== botId);
   if (others.length === 0) return null;
   return (
@@ -418,7 +418,7 @@ function ReachField({
                   )
                 }
               />
-              <img src={other.avatar} width={16} height={16} alt="" />
+              <BotAvatar appearance={other.appearance} size={16} />
               {other.name}
             </label>
           ))}
@@ -470,7 +470,7 @@ export function BotChat({ bot }: { bot: BotDetail }) {
         defaultProjectId={bot.defaults?.projectId ?? undefined}
         defaultProviderId={bot.defaults?.providerId}
         defaultModel={bot.defaults?.model}
-        initialPrompt={bot.threads.length === 0 ? strings.firstPrompt(bot.name) : undefined}
+        initialPrompt={bot.conversations === 0 ? strings.firstPrompt(bot.name) : undefined}
         placeholder={strings.composerPlaceholder(bot.name)}
         onSubmit={async (request) => {
           const { threadId } = await start.mutate({ botId: bot.id, request: { ...request } });
@@ -482,7 +482,7 @@ export function BotChat({ bot }: { bot: BotDetail }) {
 }
 
 function BotRoute({ botId, chat }: { botId: string; chat: boolean }) {
-  const query = useRpcQuery({ contract: botsRpc, method: "bots.v1.get", input: { botId } });
+  const query = useRpcQuery({ contract: botsRpc, method: "bots.v2.get", input: { botId } });
   if (query.error) return <p className="text-sm text-muted-foreground">{strings.unavailable}</p>;
   if (!query.data) return <p className="text-sm text-muted-foreground">{strings.loading}</p>;
   return chat ? <BotChat bot={query.data} /> : <BotEditor key={query.data.id} bot={query.data} />;
@@ -492,7 +492,7 @@ export function BotsPanel({ subPath }: PluginNavPanelProps) {
   const route = parseRoute(subPath);
   const list = useRpcQuery({
     contract: botsRpc,
-    method: "bots.v1.list",
+    method: "bots.v2.list",
     input: {},
     enabled: route.page === "list",
   });
