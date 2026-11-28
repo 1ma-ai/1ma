@@ -17,6 +17,8 @@ on:
       - "plugins/1ma-theme/**"
       - "plugins/1ma-server-switcher/**"
       - "plugins/1ma-auto-updates/**"
+      - "plugins/1ma-bots/**"
+      - "plugins/1ma-sidebar/**"
       - "package.json"
       - "pnpm-workspace.yaml"
       - "pnpm-lock.yaml"
@@ -66,6 +68,8 @@ jobs:
             plugins/1ma-theme/**
             plugins/1ma-server-switcher/**
             plugins/1ma-auto-updates/**
+            plugins/1ma-bots/**
+            plugins/1ma-sidebar/**
             package.json
             pnpm-workspace.yaml
             pnpm-lock.yaml
