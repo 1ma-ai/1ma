@@ -51,7 +51,6 @@ export const PLUGIN_HOST_DIRECTORIES = ["host-data", "bridge-data"];
 // them from its bridge data in 1ma's data folder.
 const PI_LEGACY_SESSIONS = path.join(".bb", "pi-bridge-sessions");
 export const PI_SESSIONS = "plugins/provider-pi/bridge-data/sessions";
-const MAX_LINKS = 40;
 // Copying these would leave stale duplicates: the database points at the
 // originals, and 1ma removes them there when their threads are archived.
 export const LEFT_IN_PLACE = [
@@ -266,51 +265,88 @@ function samePath(a, b) {
   }
 }
 
-function within(child, parent) {
-  const relative = path.relative(parent, child);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+function existingAncestor(place) {
+  for (let dir = place; ; dir = path.dirname(dir)) {
+    const stats = statSync(dir, { bigint: true, throwIfNoEntry: false });
+    if (stats) return { dir, stats, tail: path.relative(dir, place) };
+  }
 }
 
-function kind(file) {
-  const stats = lstatSync(file, { throwIfNoEntry: false });
-  if (stats === undefined) return "missing";
-  if (stats.isSymbolicLink()) return "link";
-  return stats.isDirectory() ? "folder" : "file";
+function sameIdentity(a, b) {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+function within(child, parent) {
+  const outer = existingAncestor(parent);
+  const inner = existingAncestor(child);
+  if (outer.tail) {
+    return (
+      sameIdentity(inner.stats, outer.stats) &&
+      (inner.tail === outer.tail || inner.tail.startsWith(`${outer.tail}/`))
+    );
+  }
+  let { dir, stats } = inner;
+  while (!sameIdentity(stats, outer.stats)) {
+    const above = path.dirname(dir);
+    if (above === dir) return false;
+    dir = above;
+    stats = statSync(dir, { bigint: true });
+  }
+  return true;
 }
 
 class Unreachable extends Error {}
 
-// The place the kernel reaches for a path, existing or not: each symbolic link
-// is followed where it stands, `..` leaves the folder reached so far, and a
-// name that does not exist yet keeps its place, as `mkdir -p` makes it. The
-// kernel goes neither back out of a missing name nor through a regular file.
-export function real(dir) {
-  const rest = path.resolve(dir).split("/").toReversed();
-  let reached = "/";
-  let last = "folder";
-  for (let links = 0; rest.length > 0;) {
-    const name = rest.pop();
-    if (name === "" || name === ".") continue;
-    if (last === "file") throw new Unreachable(`${reached} is not a folder`);
-    if (name === "..") {
-      if (last === "missing")
-        throw new Unreachable(`${dir} leads through ${reached}, which does not exist`);
-      reached = path.dirname(reached);
-      continue;
-    }
-    const next = path.join(reached, name);
-    const found = last === "missing" ? "missing" : kind(next);
-    if (found !== "link") {
-      reached = next;
-      last = found;
-      continue;
-    }
-    if ((links += 1) > MAX_LINKS) throw new Error(`${dir} passes through a loop of symbolic links`);
-    const text = readlinkSync(next);
-    if (text.startsWith("/")) reached = "/";
-    rest.push(...text.split("/").toReversed());
+function existingPlace(file) {
+  try {
+    statSync(file);
+  } catch (error) {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
   }
-  return reached;
+  return realpathSync.native(file);
+}
+
+function resolvePlace(file, danglingLinks = new Set()) {
+  let suffix = "";
+  for (let head = file; ;) {
+    const existing = existingPlace(head);
+    if (existing !== undefined) {
+      let reached = existing;
+      for (const name of suffix.split("/")) {
+        if (name === "..")
+          throw new Unreachable(`${file} leads through ${reached}, which does not exist`);
+        if (name !== "" && name !== ".") reached = path.join(reached, name);
+      }
+      return reached;
+    }
+
+    const slash = head.lastIndexOf("/");
+    const parent = head.slice(0, slash) || "/";
+    if (lstatSync(head, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      if (danglingLinks.has(head))
+        throw new Unreachable(
+          `${file} repeats the dangling link ${head} during missing-path resolution`,
+        );
+      danglingLinks.add(head);
+      const text = readlinkSync(head);
+      const target = path.isAbsolute(text) ? text : `${parent}/${text}`;
+      return resolvePlace(target + suffix, danglingLinks);
+    }
+    suffix = head.slice(slash) + suffix;
+    head = parent;
+  }
+}
+
+// Keep the original components for the kernel, including directory markers
+// and `..` in link targets. Only a missing suffix can be placed in advance.
+export function real(dir) {
+  try {
+    return resolvePlace(path.isAbsolute(dir) ? dir : `${process.cwd()}/${dir}`);
+  } catch (error) {
+    if (error.code === undefined) throw error;
+    throw new Unreachable(`${dir} is unreachable (${error.code})`, { cause: error });
+  }
 }
 
 // A path as one argument of a POSIX shell command.
@@ -319,16 +355,14 @@ function shellQuoted(text) {
 }
 
 function overlaps(a, b) {
-  return within(real(a), real(b)) || within(real(b), real(a));
+  return within(a, b) || within(b, a);
 }
 
-// A folder the kernel cannot reach holds nothing and lies in no other folder.
-function reachable(dir) {
+function optionalPiPlace(dir) {
   try {
-    real(dir);
-    return true;
+    return real(dir);
   } catch (error) {
-    if (error instanceof Unreachable) return false;
+    if (error instanceof Unreachable) return undefined;
     throw error;
   }
 }
@@ -379,12 +413,15 @@ export function exportBb(options, log = console.log) {
 
 function checkBeforeImport(options) {
   const { from, to } = options;
-  if (overlaps(from, to)) throw new Error(`${from} and ${to} must be two separate folders`);
-  if (reachable(options.piSessions) && overlaps(options.piSessions, to))
+  const destination = real(to);
+  if (overlaps(real(from), destination))
+    throw new Error(`${from} and ${to} must be two separate folders`);
+  const pi = optionalPiPlace(options.piSessions);
+  if (pi !== undefined && overlaps(pi, destination))
     throw new Error(`Pi's earlier conversations in ${options.piSessions} must be outside ${to}`);
-  if (kind(to) === "link")
+  if (lstatSync(to, { throwIfNoEntry: false })?.isSymbolicLink())
     throw new Error(
-      `${to} is a symbolic link to ${real(to)}. The import moves and renames the folder it is given, and would do that to the link and not to the data behind it: pass --to ${shellQuoted(real(to))}`,
+      `${to} is a symbolic link to ${destination}. The import moves and renames the folder it is given, and would do that to the link and not to the data behind it: pass --to ${shellQuoted(destination)}`,
     );
   if (!existsSync(path.join(from, "bb.db")) || !existsSync(path.join(from, "host-id")))
     throw new Error(`${from} is not a bb data folder (no bb.db or host-id)`);

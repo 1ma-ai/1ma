@@ -7,9 +7,11 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -118,6 +120,25 @@ const importArgs = (from, to, cli, more = []) => ({
   listProcesses: noProcesses,
 });
 
+function assertUnreachableDestination(options, code) {
+  const { to } = options;
+  const before = readdirSync(path.dirname(to)).toSorted();
+  const link = readlinkSync(to);
+  assert.throws(() => statSync(to), { code });
+  assert.throws(
+    () => importIntoOneMa(options, quiet),
+    (error) => {
+      assert.doesNotMatch(error.message, /pass --to/);
+      assert.ok(error.message.includes(to), error.message);
+      assert.ok(error.message.includes(code), error.message);
+      assert.equal(error.cause?.path, to);
+      return true;
+    },
+  );
+  assert.equal(readlinkSync(to), link);
+  assert.deepEqual(readdirSync(path.dirname(to)).toSorted(), before);
+}
+
 describe("arguments", () => {
   test("each command names what it needs, and a typo stops it", () => {
     assert.throws(() => parseArgs([]), /usage/);
@@ -190,22 +211,18 @@ describe("where a path leads", () => {
       "absolute-to-link/y/z/up",
     ]) {
       const file = path.join(root, relative);
-      assert.equal(real(file), realpathSync(file), relative);
+      assert.equal(real(file), realpathSync.native(file), relative);
     }
   });
 
-  test("a loop of symbolic links is named, also in a folder above the name", () => {
+  test("the kernel names a loop of symbolic links, also in a folder above the name", () => {
     const root = fresh("loop");
     mkdirSync(root);
     symlinkSync("b", path.join(root, "a"));
     symlinkSync("a", path.join(root, "b"));
     symlinkSync("self", path.join(root, "self"));
     for (const relative of ["a", "self/sub"])
-      assert.throws(
-        () => real(path.join(root, relative)),
-        /passes through a loop of symbolic links/,
-        relative,
-      );
+      assert.throws(() => real(path.join(root, relative)), /ELOOP/, relative);
   });
 
   test("a path the kernel cannot reach has no place, a missing folder to be made has one", () => {
@@ -216,7 +233,7 @@ describe("where a path leads", () => {
     symlinkSync("f/..", path.join(root, "up"));
     assert.throws(() => real(path.join(root, "l")), /missing, which does not exist/);
     for (const relative of ["f/x", "up"])
-      assert.throws(() => real(path.join(root, relative)), /f is not a folder/, relative);
+      assert.throws(() => real(path.join(root, relative)), /ENOTDIR/, relative);
     assert.equal(
       real(path.join(root, "missing/a/b")),
       path.join(realpathSync(root), "missing/a/b"),
@@ -550,6 +567,23 @@ describe("Pi sessions of a bb older than 0.50", () => {
       "thr_own.jsonl",
     ]);
   });
+
+  test("create a missing folder named with a trailing dot in the sessions link", () => {
+    const home = fresh("home");
+    const session = '{"type":"session"}\n';
+    write(home, ".bb/pi-bridge-sessions/thr_1.jsonl", session);
+    const store = path.join(path.dirname(PI_SESSIONS), "store");
+    const { to, record } = homeImport(home, {
+      prepare: (from) => {
+        mkdirSync(path.dirname(path.join(from, PI_SESSIONS)), { recursive: true });
+        symlinkSync("store/.", path.join(from, PI_SESSIONS));
+        assert.equal(existsSync(path.join(from, store)), false);
+      },
+    });
+    assert.equal(record.piSessions.copied, 1);
+    assert.equal(readlinkSync(path.join(to, PI_SESSIONS)), "store/.");
+    assert.equal(readFileSync(path.join(to, store, "thr_1.jsonl"), "utf8"), session);
+  });
 });
 
 describe("importing into 1ma", () => {
@@ -669,6 +703,86 @@ describe("importing into 1ma", () => {
     );
     assert.ok(lstatSync(to).isSymbolicLink());
     assert.deepEqual(readdirSync(disk), []);
+  });
+
+  for (const suffix of ["/.", "/"]) {
+    test(`a linked destination requiring a folder at file${suffix} is refused before writing`, () => {
+      const from = bbFolder();
+      const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
+      const to = fresh("1ma");
+      const file = fresh("file");
+      writeFileSync(file, "regular file");
+      symlinkSync(`${file}${suffix}`, to);
+      assertUnreachableDestination(importArgs(from, to, cli), "ENOTDIR");
+      assert.equal(readFileSync(file, "utf8"), "regular file");
+    });
+  }
+
+  test(
+    "a linked destination passing through a directory without search permission is refused",
+    { skip: process.getuid?.() === 0 && "root can traverse a directory without search permission" },
+    () => {
+      const from = bbFolder();
+      const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
+      const to = fresh("1ma");
+      const disk = fresh("disk");
+      const noSearch = fresh("no-search");
+      mkdirSync(disk);
+      mkdirSync(noSearch, { mode: 0o600 });
+      symlinkSync(`${noSearch}/../${path.basename(disk)}`, to);
+      try {
+        assertUnreachableDestination(importArgs(from, to, cli), "EACCES");
+        assert.deepEqual(readdirSync(disk), []);
+      } finally {
+        chmodSync(noSearch, 0o700);
+      }
+    },
+  );
+
+  test("a destination link loop is refused with the kernel's ELOOP before writing", () => {
+    const from = bbFolder();
+    const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
+    const to = fresh("1ma");
+    const next = fresh("next");
+    symlinkSync(next, to);
+    symlinkSync(to, next);
+    assertUnreachableDestination(importArgs(from, to, cli), "ELOOP");
+  });
+
+  test("overlap uses directory identity when native resolution keeps two spellings", (t) => {
+    const from = bbFolder();
+    const alias = fresh("alias");
+    symlinkSync(path.dirname(from), alias);
+    const alternate = path.join(alias, path.basename(from));
+    const native = realpathSync.native;
+    const spelling = path.join(
+      native(path.dirname(from)),
+      path.basename(alias),
+      path.basename(from),
+    );
+    const original = statSync(from, { bigint: true });
+    const alternative = statSync(spelling, { bigint: true });
+    assert.equal(alternative.dev, original.dev);
+    assert.equal(alternative.ino, original.ino);
+
+    // The host resolves the symlink. Simulate a filesystem that preserves the alias.
+    t.mock.method(realpathSync, "native", (file) => (file === alternate ? spelling : native(file)));
+    assert.equal(real(alternate), spelling);
+    const cli = fakeCli({ sourceDataDir: from, sourceServerHostId: "host-1" });
+    for (const to of [alternate, path.join(alternate, "new", "data")]) {
+      assert.throws(
+        () => importIntoOneMa(importArgs(from, to, cli, ["--dry-run"]), quiet),
+        /two separate folders/,
+      );
+    }
+    const other = bbFolder();
+    const to = path.join(from, "new");
+    const pi = path.join(alternate, "new", "sessions");
+    assert.throws(
+      () => importIntoOneMa(importArgs(other, to, cli, ["--pi-sessions", pi, "--dry-run"]), quiet),
+      /Pi's earlier conversations in .* must be outside/,
+    );
+    assert.equal(existsSync(path.join(from, "new")), false);
   });
 
   test("the command that turns bb connect on names the 1ma folder as one shell argument", () => {
